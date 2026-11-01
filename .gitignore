@@ -1,0 +1,16 @@
+.DS_Store
+.direnv/
+.zig-cache/
+zig-out/
+node_modules/
+runtime/dist/
+result
+result-*
+.env
+.env.*
+!.env.example
+.deck/
+auth.json
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal

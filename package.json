@@ -1,0 +1,21 @@
+{
+  "name": "deck",
+  "version": "0.1.0-dev",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24 <25" },
+  "scripts": {
+    "build": "tsc -p runtime/tsconfig.json",
+    "check": "tsc -p runtime/tsconfig.json --noEmit",
+    "test": "npm run build && node --test runtime/dist/*.test.js"
+  },
+  "dependencies": {
+    "@earendil-works/chord": "1.4.0",
+    "@earendil-works/pi-ai": "1.4.0",
+    "@earendil-works/pi-durable": "1.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.1",
+    "typescript": "5.9.3"
+  }
+}
