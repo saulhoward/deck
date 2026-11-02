@@ -1,6 +1,6 @@
 # Deck architecture proposal
 
-**Status:** proposal for review, not an implemented service. The repository currently provides a buildable bootstrap Zig CLI and an offline Pi SQLite integration test. Commands and protocol shapes below are proposed contracts.
+**Status:** target architecture with a partial local prototype. See [implementation progress and limitations](implementation-plan.md) for the implemented subset: Zig supervision/loopback transport, central Pi conversations, provider integration, a plain client and native local file tools. Commands and protocol shapes below remain proposed contracts unless that implementation plan says otherwise.
 
 **Chosen topology:** coordinator-owned Pi conversations and inference, with tools executing on registered workers. Every chat—including a task or subagent chat opened in Rex—uses the hub. Hub availability is required; independent worker-local inference and transcript replication are not goals.
 
@@ -261,7 +261,7 @@ For a future web UI, enforce Host/Origin checks, same-origin/CSRF protection and
 
 Current foundation: locked nixpkgs, Zig 0.15.2, Node 24 dev shell, exact Pi 1.4.0 dependencies and npm lockfile. Pi Durable is experimental; upgrades need recovery/compatibility tests. Intended targets: arm64/x86_64 macOS/Linux; claim support only after platform testing.
 
-The Nix package currently installs **only the bootstrap Zig CLI**. Before functional release, package compiled TS, its locked npm closure and Node privately, preserving lazy provider assets/imports. The hub launches that runtime without global npm or startup downloads. Worker-only mode need not start TS. Rex/Tailscale/1Password remain external. Include runtime behavior in Nix checks once packaged.
+The Nix package now installs the Zig local prototype, compiled TS, its locked production npm closure and Node privately, preserving lazy provider assets/imports. An installed-package smoke check verifies hub/client/native-tool behavior outside the checkout without Node on PATH; see [packaging](packaging.md). No global npm or startup dependency downloads are needed. Worker-only mode is still unimplemented and should not need TS. Rex/Tailscale/1Password remain external.
 
 Milestones:
 

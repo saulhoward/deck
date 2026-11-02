@@ -19,4 +19,5 @@ jobs:
       - run: nix develop -c zig fmt --check build.zig src
       - run: nix develop -c npm ci --ignore-scripts
       - run: nix develop -c npm run check
-      - run: nix develop -c npm test
+      - run: nix develop -c zig build
+      - run: DECK_TEST_BINARY="$PWD/zig-out/bin/deck" nix develop -c npm test
