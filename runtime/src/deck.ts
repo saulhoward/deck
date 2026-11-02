@@ -2,7 +2,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { Models } from "@earendil-works/pi-ai/models";
-import { createRegistry, defineDoc, defineDocFamily, Harness, LiveDoc, InboxDoc, type ConversationId, type Conversation, type AgentChange, type Cursor } from "@earendil-works/pi-durable";
+import { createRegistry, configure as configureAgent, defineDoc, defineDocFamily, Harness, LiveDoc, InboxDoc, type ConversationId, type Conversation, type AgentChange, type Cursor } from "@earendil-works/pi-durable";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { nativeFiles, type HostFiles } from "./host-files.js";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
@@ -26,7 +26,7 @@ const TaskRequest = defineDocFamily<{ hash: string; chatId: number }, string>({
 });
 const Identity = defineDoc<{ id: string }>({ kind: "deck.identity", version: 1, scope: "session", initial: () => ({ id: randomUUID() }), checkpointWhen: () => true });
 export class DeckError extends Error {
-  constructor(public readonly code: "conflict" | "offline" | "not_found" | "invalid" | "auth_required", message: string) { super(message); }
+  constructor(public readonly code: "conflict" | "offline" | "not_found" | "invalid" | "auth_required" | "busy" | "settings_changed", message: string) { super(message); }
 }
 function positiveId(id: string, kind: string): number {
   const value = Number(id);
@@ -152,9 +152,25 @@ export class DeckRuntime {
       const agent = await chat.agent(context);
       const capture = await chat.commit(async (tx) => {
         const binding = await tx.doc(ChatDoc, chat.id);
-        const capture = JSON.stringify({ model: agent.model, thinkingLevel: agent.thinkingLevel, binding });
+        if (!existing && agent.cwd !== binding.cwd) throw new DeckError("invalid", "Agent cwd differs from its saved tool binding");
+        // An admission observation, not a per-input override of Pi's later request resolution.
+        const capture = JSON.stringify({
+          version: 2, semantics: "observed-at-reservation", pi: "1.4.0", nativeTools: this.localFiles,
+          model: agent.model ? { provider: agent.model.provider, modelId: agent.model.modelId } : null,
+          thinkingLevel: agent.thinkingLevel, cwd: agent.cwd,
+          binding: { machineId: binding.machineId, cwd: binding.cwd },
+          extensions: agent.extensions.map((extension) => extension.name),
+          tools: agent.tools.map((tool) => tool.name), callable: agent.callable.map((tool) => tool.name),
+          deferred: agent.deferred.map((tool) => tool.name),
+          instructionsHash: agent.instructions === undefined ? null : createHash("sha256").update(agent.instructions).digest("hex"),
+        });
         const reservation = await tx.doc(Admission, chat.id, input.requestId, { hash, capture });
         if (reservation.hash !== hash) throw new DeckError("conflict", "Request ID was already used with different input");
+        // Repair the reservation/submit gap only under the same observed choices. Already
+        // admitted receipts remain retrievable after settings/auth changes. Legacy captures
+        // can check only the model/thinking/binding fields they actually recorded.
+        const legacy = JSON.stringify({ model: agent.model, thinkingLevel: agent.thinkingLevel, binding });
+        if (!existing && reservation.capture !== capture && reservation.capture !== legacy) throw new DeckError("settings_changed", "Unadmitted request settings changed; restore the original choices or explicitly discard and submit a new request");
         return reservation.capture;
       }, context);
       // ACK only after Pi has committed the submission. The capture remains unchanged on retry.
@@ -166,7 +182,20 @@ export class DeckRuntime {
   }
 
   configure(id: string, change: AgentChange) {
-    return this.serial(async () => (await this.chat(id)).configure(change, context));
+    return this.serial(async () => {
+      const chat = await this.chat(id);
+      return chat.commit(async (tx) => {
+        // Query Pi's authoritative work records, not a second execution tracker. This
+        // includes pending/parked/background work and effects still draining after stop.
+        for (const status of ["pending", "running", "waiting", "sleeping", "completing"] as const) {
+          if ((await tx.scanTasks({ conversationId: chat.id, status }, 1)).items.length) throw new DeckError("busy", "Conversation has unfinished work; stop/drain it before configuring");
+        }
+        if ((await tx.doc(InboxDoc, chat.id)).items.length) throw new DeckError("busy", "Conversation has queued input; resolve it before configuring");
+        const binding = await tx.doc(ChatDoc, chat.id);
+        if (change.cwd !== undefined && change.cwd !== binding.cwd) throw new DeckError("invalid", "Configure cannot move or clear the saved tool-host cwd");
+        await configureAgent(tx, chat.id, change);
+      }, context);
+    });
   }
   async activity(id: string) {
     const chat = await this.chat(id);

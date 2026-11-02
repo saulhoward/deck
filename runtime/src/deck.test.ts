@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -10,6 +11,7 @@ import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
+import { defineTask, defineDocFamily } from "@earendil-works/pi-durable";
 import { DeckRuntime, ChatDoc, type RuntimeOptions } from "./deck.js";
 
 async function fixture(run: (runtime: DeckRuntime, options: RuntimeOptions, path: string, faux: ReturnType<typeof fauxProvider>, directory: string) => Promise<void>) {
@@ -237,6 +239,102 @@ test("durable admissions deduplicate concurrent retries, reject conflicts and su
   });
 });
 
+test("capture labels observed choices, hashes instructions and leaves later idle configuration explicit", async () => {
+  await fixture(async (runtime, options, path, faux, directory) => {
+    const id = String(runtime.main.id);
+    await writeFile(join(directory, "AGENTS.md"), "UNREAD_PROJECT_INSTRUCTION");
+    await runtime.configure(id, { instructions: "Original instruction" });
+    for (const cwd of ["/different", null]) await assert.rejects(runtime.configure(id, { cwd }), { code: "invalid" });
+    assert.equal((await runtime.main.agent(context)).cwd, directory);
+    faux.setResponses([(request) => {
+      const messages = JSON.stringify(request.messages);
+      assert.match(messages, /Original instruction/); assert.doesNotMatch(messages, /UNREAD_PROJECT_INSTRUCTION/);
+      return fauxAssistantMessage("Done");
+    }]);
+    const first = await runtime.admit(id, input("capture")); await first.wait(context);
+    const entry = (await runtime.history(id)).items.find((entry) => entry.kind === "deck.input")!;
+    const data = entry.data as { capture: string };
+    const capture = JSON.parse(data.capture) as Record<string, unknown>;
+    assert.equal(capture.version, 2); assert.equal(capture.semantics, "observed-at-reservation");
+    assert.deepEqual(capture.model, options.model); assert.equal(capture.cwd, directory);
+    assert.deepEqual(capture.tools, ["read", "write", "edit", "bash"]);
+    assert.match(String(capture.instructionsHash), /^[a-f0-9]{64}$/);
+    assert.doesNotMatch(data.capture, /Original instruction|UNREAD_PROJECT_INSTRUCTION/);
+    await runtime.configure(id, { instructions: "Changed later" });
+    assert.equal((await runtime.admit(id, input("capture"))).id, first.id);
+    assert.equal(faux.state.callCount, 1);
+    assert.equal(((await runtime.history(id)).items.find((item) => item.kind === "deck.input")!.data as { capture: string }).capture, data.capture);
+  });
+});
+
+test("unadmitted reservation refuses settings drift across reopen; restoring choices repairs the original ID", async () => {
+  await fixture(async (runtime, options, path, faux) => {
+    const id = String(runtime.main.id);
+    await runtime.configure(id, { instructions: "Original" });
+    const originalChat = runtime.chat.bind(runtime);
+    runtime.chat = async (id) => { const chat = await originalChat(id); chat.submit = async () => { throw new Error("Simulated crash before Pi submit"); }; return chat; };
+    await assert.rejects(runtime.admit(id, input("gap")), /Simulated crash/);
+    runtime.chat = originalChat;
+    assert.equal(faux.state.callCount, 0);
+    await runtime.configure(id, { instructions: "Changed" });
+    await runtime.close();
+    const reopened = await DeckRuntime.open(path, options);
+    try {
+      await assert.rejects(reopened.admit(id, input("gap")), { code: "settings_changed" });
+      assert.equal((await reopened.history(id)).items.length, 0); assert.equal(faux.state.callCount, 0);
+      await reopened.configure(id, { instructions: "Original" });
+      faux.setResponses([fauxAssistantMessage("Recovered")]);
+      assert.equal((await (await reopened.admit(id, input("gap"))).wait(context)).status, "done");
+      assert.equal(faux.state.callCount, 1);
+    } finally { await reopened.close(); }
+  });
+});
+
+test("legacy reservation repair keeps the original limited capture without inventing newly observed fields", async () => {
+  await fixture(async (runtime, options, path, faux) => {
+    const Legacy = defineDocFamily<{ hash: string; capture: string }, { hash: string; capture: string }>({ kind: "deck.admission", version: 1, scope: "conversation", history: "latest", fork: "initial", family: true, initial: (seed) => seed, checkpointWhen: () => true });
+    const id = String(runtime.main.id); const agent = await runtime.main.agent(context);
+    const request = input("legacy");
+    const capture = await runtime.main.commit(async (tx) => {
+      const capture = JSON.stringify({ model: agent.model, thinkingLevel: agent.thinkingLevel, binding: await tx.doc(ChatDoc, runtime.main.id) });
+      await tx.doc(Legacy, runtime.main.id, request.requestId, { hash: createHash("sha256").update(JSON.stringify([request.text, request.mode])).digest("hex"), capture });
+      return capture;
+    }, context);
+    faux.setResponses([fauxAssistantMessage("Legacy recovered")]);
+    await (await runtime.admit(id, request)).wait(context);
+    const data = (await runtime.history(id)).items.find((entry) => entry.kind === "deck.input")!.data as { capture: string };
+    assert.equal(data.capture, capture); assert.equal(JSON.parse(data.capture).version, undefined);
+  });
+});
+
+test("configuration cannot change active or queued work, but succeeds once Pi settles it", { timeout: 10_000 }, async () => {
+  await fixture(async (runtime, options, path, faux) => {
+    const id = String(runtime.main.id); const entered = gate(); const release = gate();
+    faux.setResponses([async () => { entered.release(); await release.promise; return fauxAssistantMessage("First"); }, fauxAssistantMessage("Second")]);
+    const first = await runtime.admit(id, input("active"));
+    try {
+      await entered.promise;
+      await assert.rejects(runtime.configure(id, { instructions: "Must not apply" }), { code: "busy" });
+      const queued = await runtime.admit(id, input("queued"));
+      await assert.rejects(runtime.configure(id, { thinkingLevel: "high" }), { code: "busy" });
+      assert.equal((await runtime.main.agent(context)).instructions, undefined);
+      release.release(); await first.wait(context); await queued.wait(context);
+      await runtime.configure(id, { instructions: "Now idle" });
+      assert.equal((await runtime.main.agent(context)).instructions, "Now idle");
+    } finally { release.release(); }
+  });
+});
+
+test("configuration checks authoritative pending tasks even when chat activity looks idle", async () => {
+  await fixture(async (runtime) => {
+    const pending = defineTask<{}, { phase: "blocked" }, null>({ name: "test.uninstalled", version: 1, initial: () => ({ phase: "blocked" }), phases: { blocked: async () => {} }, abort: async () => {} });
+    await runtime.main.commit((tx) => tx.createTask(pending, {}, { ownership: { kind: "conversation" } }), context);
+    const id = String(runtime.main.id);
+    assert.equal((await runtime.activity(id)).busy, false);
+    await assert.rejects(runtime.configure(id, { instructions: "Not safe yet" }), { code: "busy" });
+  });
+});
+
 test("task context is separate and its host binding and model survive reopen", async () => {
   await fixture(async (runtime, options, path, faux) => {
     const task = await runtime.createTask("Fix parser", { machineId: "offline-worker", cwd: "/project" }, "create-task");
@@ -278,6 +376,7 @@ test("stop requests and unrelated admissions proceed while issued native files d
       await entered.promise;
       inputPipe.write(encodeFrame({ version: 1, id: "stop", command: "stop", args: { chatId: String(native.main.id) } }));
       const stop = await frames.next(); assert.equal(stop.value.result.requested, true);
+      await assert.rejects(native.configure(String(native.main.id), { instructions: "Too early; effects still drain" }), { code: "busy" });
       inputPipe.write(encodeFrame({ version: 1, id: "other", command: "admit", args: { chatId: String(task.id), requestId: "independent", text: "Hello", mode: "followUp" } }));
       const admission = await frames.next(); assert.equal(admission.value.id, "other"); assert.equal(admission.value.ok, true);
       inputPipe.write(encodeFrame({ version: 1, id: "status", command: "status" }));

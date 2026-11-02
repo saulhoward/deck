@@ -32,7 +32,7 @@ A record is written to a private exclusive temporary file, fsynced, then atomica
 
 Recovery bounds each record to 1 MiB and lists at most 1,000 records (metadata only is retained in memory). Corrupt/incompatible records fail closed with a diagnostic; preserve them for inspection rather than guessing or editing their request IDs. Client shutdown warns if an active draft is unresolved. An input that could not be saved is still memory-only and cannot be recovered after client death.
 
-These are process-crash recovery guarantees, **not** a power-loss/exactly-once guarantee. A client death before publication cannot send the request but may lose that draft. ACK means durable Pi admission, not generation completion or successful effects. Draft persistence does not pin later model/settings/instruction-file choices; the existing captured-settings limitation remains. No transcript cursor is persisted: reconnect still starts with bounded recent history.
+These are process-crash recovery guarantees, **not** a power-loss/exactly-once guarantee. A client death before publication cannot send the request but may lose that draft. ACK means durable Pi admission, not generation completion or successful effects. Draft persistence does not pin later model/settings/instruction-file choices; see [settings semantics](settings.md). Repair of an unadmitted reservation after observed settings drift can return `settings_changed`: keep the original draft until restoring the original choices, or explicitly discard it and start a new request. No transcript cursor is persisted: reconnect still starts with bounded recent history.
 
 ## Validation
 
