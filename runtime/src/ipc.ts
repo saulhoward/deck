@@ -28,9 +28,10 @@ async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, 
     }
     case "status": {
       const chat = args.chatId === undefined ? runtime.main : await runtime.chat(text(args.chatId, "chatId"));
-      return { hubId: runtime.hubId, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding: await runtime.harness.snapshot(ChatDoc, chat.id, context), activity: await runtime.harness.inspect(context), provider: (await chat.agent(context)).model?.provider, model: (await chat.agent(context)).model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
+      return { implementation: runtime.implementation, hubId: runtime.hubId, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding: await runtime.harness.snapshot(ChatDoc, chat.id, context), activity: await runtime.harness.inspect(context), provider: (await chat.agent(context)).model?.provider, model: (await chat.agent(context)).model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
     }
     case "activity": return runtime.activity(args.chatId === undefined ? String(runtime.main.id) : text(args.chatId, "chatId"));
+    case "progress": return runtime.progress(args.chatId === undefined ? String(runtime.main.id) : text(args.chatId, "chatId"));
     case "list_chats": {
       if (args.limit !== undefined && typeof args.limit !== "number") throw new DeckError("invalid", "Invalid limit");
       return runtime.listChats({ ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.after === undefined ? {} : { after: text(args.after, "after") }) });
@@ -47,9 +48,17 @@ async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, 
     case "history": {
       if (args.limit !== undefined && typeof args.limit !== "number") throw new DeckError("invalid", "Invalid limit");
       if (args.includeActivity !== undefined && typeof args.includeActivity !== "boolean") throw new DeckError("invalid", "Invalid includeActivity");
+      if (args.includeProgress !== undefined && typeof args.includeProgress !== "boolean") throw new DeckError("invalid", "Invalid includeProgress");
       const id = text(args.chatId, "chatId");
       const page = await runtime.history(id, { ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.before === undefined ? {} : { before: text(args.before, "before") }), ...(args.after === undefined ? {} : { after: text(args.after, "after") }) });
-      return args.includeActivity ? { ...page, activity: await runtime.activity(id) } : page;
+      const canonical = { ...page, ...(args.includeActivity ? { activity: await runtime.activity(id) } : {}) };
+      if (!args.includeProgress) return canonical;
+      const combined = { ...canonical, progress: await runtime.progress(id) };
+      // Optional previews must never make an otherwise fitting history page fail.
+      // Canonical oversize pages still get the usual too_large/adaptive retry path.
+      try { encodeFrame({ version: PROTOCOL_VERSION, id: request.id, ok: true, result: combined }); }
+      catch { return canonical; }
+      return combined;
     }
     case "stop": {
       const chat = await runtime.chat(text(args.chatId, "chatId"));

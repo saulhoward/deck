@@ -27,7 +27,7 @@ mkdir -p /tmp/deck-work
 ./zig-out/bin/deck agent --no-tui
 ```
 
-Ask: “Write hello.txt containing hello, read it back, then change hello to goodbye using edit.” Inspect `/tmp/deck-work/hello.txt` yourself. No live model calls are made by automated tests; actual agent tool use with your provider still needs this manual smoke test.
+Ask: “Write hello.txt containing hello, read it back, then change hello to goodbye using edit.” Inspect `/tmp/deck-work/hello.txt` yourself. The user reports this live API-key write/read/edit workflow passed, including independent verification through tool results. No live model calls are made by automated tests; repeat the manual smoke test when validating another provider or environment.
 
 `--workspace` sets main's workspace only on first conversation creation. Existing conversations keep their saved host/cwd; restarting in another directory or passing a new default never moves their effects. `/task TITLE` inherits the selected chat's binding. `/status` shows the saved binding and file-tool capability. To change the initial workspace during testing, use a new state root rather than editing history/config by hand.
 

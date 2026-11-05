@@ -20,12 +20,40 @@ pub fn lock(dir: std.fs.Dir) !std.fs.File {
     return dir.createFile("writer.lock", .{ .truncate = false, .read = true, .mode = 0o600, .lock = .exclusive, .lock_nonblocking = true });
 }
 
+pub fn requireComplete(dir: std.fs.Dir) !void {
+    if (std.posix.fstatat(dir.fd, ".restore-incomplete", std.posix.AT.SYMLINK_NOFOLLOW)) |_| return error.RestoreIncomplete else |err| if (err != error.FileNotFound) return err;
+}
+
+// A restore destination is never an existing directory, even an empty one.
+// The caller acquires its writer lock before adding the incomplete marker.
+pub fn restoreDirectory(allocator: std.mem.Allocator, source: []const u8, destination: []const u8) !void {
+    const from = try std.fs.cwd().realpathAlloc(allocator, source);
+    defer allocator.free(from);
+    const parent = try std.fs.cwd().realpathAlloc(allocator, std.fs.path.dirname(destination) orelse return error.InvalidArguments);
+    defer allocator.free(parent);
+    const target = try std.fs.path.join(allocator, &.{ parent, std.fs.path.basename(destination) });
+    defer allocator.free(target);
+    if (std.mem.eql(u8, from, target) or (std.mem.startsWith(u8, target, from) and target.len > from.len and target[from.len] == std.fs.path.sep)) return error.InvalidArguments;
+    try std.posix.mkdir(destination, 0o700);
+}
+
+pub fn markRestore(dir: std.fs.Dir) !void {
+    var entries = dir.iterate();
+    while (try entries.next()) |entry| if (!std.mem.eql(u8, entry.name, "writer.lock")) return error.PathAlreadyExists;
+    try dir.chmod(0o700);
+    const marker = try dir.createFile(".restore-incomplete", .{ .exclusive = true, .mode = 0o600 });
+    defer marker.close();
+    try marker.writeAll("Incomplete restore; init and serve must refuse this directory.\n");
+    try marker.sync();
+}
+
 pub fn initialize(allocator: std.mem.Allocator, path: []const u8) !void {
     try std.fs.cwd().makePath(path);
     var dir = try std.fs.cwd().openDir(path, .{});
     defer dir.close();
     const held = try lock(dir);
     defer held.close();
+    try requireComplete(dir);
     if (dir.access("config.json", .{})) |_| {
         const existing = try load(allocator, dir);
         existing.deinit();
@@ -47,6 +75,7 @@ pub fn initialize(allocator: std.mem.Allocator, path: []const u8) !void {
 }
 
 pub fn load(allocator: std.mem.Allocator, dir: std.fs.Dir) !std.json.Parsed(Config) {
+    try requireComplete(dir);
     const data = try dir.readFileAlloc(allocator, "config.json", 16 * 1024);
     defer allocator.free(data);
     const parsed = try std.json.parseFromSlice(Config, allocator, data, .{ .allocate = .alloc_always });
@@ -71,6 +100,19 @@ test "init is private, idempotent and refuses incompatible config" {
     try std.testing.expectEqualStrings(first, second);
     try tmp.dir.writeFile(.{ .sub_path = "config.json", .data = "{\"version\":2,\"machine_id\":\"bad\"}" });
     try std.testing.expectError(error.InvalidConfig, initialize(allocator, path));
+}
+
+test "incomplete restore rejects both init and config loading without inventing identity" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const allocator = std.testing.allocator;
+    const path = try tmp.dir.realpathAlloc(allocator, ".");
+    defer allocator.free(path);
+    try tmp.dir.writeFile(.{ .sub_path = ".restore-incomplete", .data = "incomplete" });
+    try std.testing.expectError(error.RestoreIncomplete, initialize(allocator, path));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access("config.json", .{}));
+    try tmp.dir.writeFile(.{ .sub_path = "config.json", .data = "{\"version\":1,\"machine_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}" });
+    try std.testing.expectError(error.RestoreIncomplete, load(allocator, tmp.dir));
 }
 
 test "a second writer cannot acquire the lock" {

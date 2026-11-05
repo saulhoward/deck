@@ -8,25 +8,28 @@ Deck therefore does not claim that its admission metadata pins every later gener
 
 ## Observation contract
 
-New `deck.input.data.capture` strings contain JSON version 2 with `semantics: "observed-at-reservation"`. They record:
+New `deck.input.data.capture` strings contain JSON version 3 with `semantics: "observed-at-reservation"`. They record:
 
 - the pinned Pi API version and whether native tools are installed;
 - resolved model, thinking level and agent cwd;
 - saved tool-host machine ID/cwd;
 - selected extension names and ordered model/callable/deferred tool names;
-- SHA-256 of explicitly configured agent instructions, or null when absent.
+- SHA-256 of explicitly configured agent instructions, or null when absent;
+- the writer's startup implementation digest, used by the [recovery compatibility gate](recovery-compatibility.md).
 
 These are choices observed at the initial reservation, before Pi submission. They are neither a rendered system prompt nor a code/content snapshot. Hashing instructions avoids duplicating their text into admission metadata; it does not anonymize low-entropy contents, and Pi's own agent/transcript can retain the instructions themselves. Credentials are not capture inputs.
 
-Deck does not currently discover/load project instruction files such as `AGENTS.md`, hash extension implementation code, snapshot provider defaults, or freeze a worktree. A model can still read workspace files through tools. Names and a Pi version are provenance, not proof of identical implementation code or provider behavior across restarts.
+Deck does not currently discover/load project instruction files such as `AGENTS.md`, snapshot provider defaults, or freeze a worktree. A model can still read workspace files through tools. The startup implementation digest now covers Deck code and its declared installed dependency closure, Node and the local native executable; unfinished work cannot resume under a different digest. This is not code attestation or provider/workspace reproducibility. New extensions change observed selections and code identity; an older unadmitted observation can consequently fail repair with `settings_changed`, rather than silently adopting the new selection.
 
 ## Reservation repair
 
 A reservation is not an ACK. Pi submission still uses the same durable request ID, with ACK only after Pi commits it. If a process dies between reservation and submission, retry must match the reserved text/mode **and** its observed choices. A changed observation yields `settings_changed` without submitting or replacing the reservation. Restore the original choices, or explicitly discard the local draft and start a new request ID. Discard never cancels already admitted work. No independent reservation replay loop is introduced.
 
-For an already admitted input, retry returns its original Pi receipt even after settings changes or authentication failure; it never silently starts new work or rewrites the old capture. Pre-versioned captures remain byte-for-byte unchanged. Their repair can check only the model/thinking/full chat binding they originally recorded; new fields are not fabricated retroactively.
+For an already admitted input, retry returns its original Pi receipt even after settings changes or authentication failure; it never silently starts new work or rewrites the old capture. Legacy version-2 and pre-versioned captures remain byte-for-byte unchanged. Version 2 checks its original observations but has no implementation identity; pre-versioned repair checks only its original model/thinking/full chat binding. New provenance is not fabricated retroactively.
 
-This comparison protects the reservation/submit gap, not every later generation. Once admitted, Pi's canonical work resumes with its supported resolution semantics. Upgrading runtime code or changing registry/policy outside Deck is not a per-input reproducibility guarantee.
+Owned subagent inputs use Pi's invocation-bound submission path rather than Deck's host reservation path; they retain delegation provenance and Pi agent state, not a fabricated host capture. See [foreground subagents](subagents.md).
+
+This comparison protects the reservation/submit gap, not every later generation. Once admitted, Pi's canonical work resumes with its supported resolution semantics, subject to the startup implementation gate. Idle upgrades preserve historical receipts; new version-3 reservations refuse code drift before submission. Mutating loaded code or registry/policy outside Deck is not a supported per-input reproducibility mechanism.
 
 ## Internal configuration boundary
 
@@ -38,4 +41,4 @@ The method also rejects clearing/moving the agent cwd away from its saved host b
 
 Tests cover observed field/hash content, unchanged receipt/capture after idle configuration, unadmitted drift refusal across reopen and repair after restoring instructions, legacy reservation repair, active/queued task rejection, rejection while stopped file effects drain, authoritative pending-task checks despite idle activity, cwd coherence, and configured-vs-unread project instructions in a faux model request.
 
-Full captured settings/files semantics remain unfinished: choose an explicit generation-boundary snapshot/compatibility policy, resolve project-local file reads centrally through assigned workers, define extension/code/policy versions and upgrades, and test pending recovery before introducing public configuration or jobs. Do not implement these by swapping agents around queued inputs or adding a second scheduler.
+Full captured settings/files semantics remain unfinished: choose an explicit generation-boundary snapshot/compatibility policy, resolve project-local file reads centrally through assigned workers, define explicit compatible migrations/retained-build operations beyond the conservative startup gate, and test the remaining settings/file boundaries before introducing public configuration or jobs. Do not implement these by swapping agents around queued inputs or adding a second scheduler.

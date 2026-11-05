@@ -4,12 +4,17 @@ import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { Models } from "@earendil-works/pi-ai/models";
 import { createRegistry, configure as configureAgent, defineDoc, defineDocFamily, Harness, LiveDoc, InboxDoc, type ConversationId, type Conversation, type AgentChange, type Cursor } from "@earendil-works/pi-durable";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
+import { projectProgress } from "./progress.js";
+import { bindImplementation, checkCompatibility, defaultImplementation, stampImplementation } from "./compatibility.js";
 import { nativeFiles, type HostFiles } from "./host-files.js";
+import { foregroundSubagent } from "./subagent.js";
+import { taskControl } from "./task-control.js";
+import { taskTools } from "./task-tools.js";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
 export type Binding = { machineId: string; cwd: string };
-type Chat = { kind: "main" | "task"; title: string; machineId: string; cwd: string };
+type Chat = { kind: "main" | "task" | "subagent"; title: string; machineId: string; cwd: string; parentChatId?: string; ownerTaskId?: string };
 export const ChatDoc = defineDoc<Chat>({
   kind: "deck.chat", version: 1, scope: "conversation", history: "latest", fork: "initial",
   initial: () => ({ kind: "main", title: "Main", machineId: "", cwd: "" }), checkpointWhen: () => true,
@@ -34,7 +39,7 @@ function positiveId(id: string, kind: string): number {
   return value;
 }
 function chatId(id: string): ConversationId { return positiveId(id, "conversation") as ConversationId; }
-export type Input = { requestId: string; text: string; mode: "steer" | "followUp" };
+export type Input = { requestId: string; text: string; mode: "steer" | "followUp"; origin?: { kind: "task-tool"; chatId: string; taskId: string } };
 export type RuntimeOptions = {
   models: Models;
   model: { provider: string; modelId: string };
@@ -43,17 +48,33 @@ export type RuntimeOptions = {
   hostFiles?: HostFiles;
   admissionGuard?: () => Promise<void>;
   validateSavedModels?: boolean;
+  // Trusted embedded callers identify injected code; production main fingerprints
+  // the actual runtime/dependency closure, Node and native executable.
+  implementation?: string;
 };
 
 export class DeckRuntime {
   private tail: Promise<unknown> = Promise.resolve();
-  private constructor(readonly harness: Harness, readonly main: Conversation, private readonly guard: () => Promise<void>, readonly localFiles: boolean, readonly hubId: string) {}
+  private constructor(readonly harness: Harness, readonly main: Conversation, private readonly guard: () => Promise<void>, readonly localFiles: boolean, readonly hubId: string, readonly implementation: string) {}
 
   static async open(path: string, options: RuntimeOptions): Promise<DeckRuntime> {
+    let runtime: DeckRuntime | undefined;
     const registry = createRegistry();
     registry.install(CodingTools);
+    const current = () => {
+      if (!runtime) throw new Error("Deck runtime is not ready");
+      return runtime;
+    };
+    registry.install(taskTools(current));
+    const control = taskControl(current);
+    registry.install(control);
+    registry.install(foregroundSubagent(control));
     if (options.hostFiles) registry.install(nativeFiles(options.hostFiles));
-    const harness = await Harness.open(await openNodeSqliteStorage(path), {
+    const implementation = bindImplementation(options.implementation ?? await defaultImplementation(), !!options.hostFiles);
+    const storage = await openNodeSqliteStorage(path);
+    try { await checkCompatibility(storage, implementation); }
+    catch (error) { await storage.close(context); throw error; }
+    const harness = await Harness.open(storage, {
       models: options.models, registry,
       settings: { steeringMode: "all", followUpMode: "one-at-a-time" },
       env: async ({ conversationId, read }) => {
@@ -66,6 +87,7 @@ export class DeckRuntime {
       },
     }, context);
     try {
+      await stampImplementation(harness, implementation);
       const main = await harness.root(context, {
         agent: { model: options.model, cwd: options.binding.cwd },
         init: async (tx, id) => { Object.assign(await tx.doc(ChatDoc, id), options.binding); },
@@ -82,8 +104,10 @@ export class DeckRuntime {
         } while (cursor);
       }
       const hubId = await harness.commit(async (tx) => (await tx.doc(Identity)).id, context);
+      // Bind Deck tool callbacks before recovered Pi tool tasks can run.
+      runtime = new DeckRuntime(harness, main, options.admissionGuard ?? (async () => {}), !!options.hostFiles, hubId, implementation);
       harness.resume();
-      return new DeckRuntime(harness, main, options.admissionGuard ?? (async () => {}), !!options.hostFiles, hubId);
+      return runtime;
     } catch (error) {
       await harness.close(context);
       throw error;
@@ -112,13 +136,14 @@ export class DeckRuntime {
     const items = [];
     for (const record of page.items) {
       const metadata = await this.harness.snapshot(ChatDoc, record.id, context);
-      if (metadata) items.push({ chatId: String(record.id), kind: metadata.kind, title: metadata.title, machineId: metadata.machineId, cwd: metadata.cwd });
+      if (metadata) items.push({ chatId: String(record.id), kind: metadata.kind, title: metadata.title, machineId: metadata.machineId, cwd: metadata.cwd, ...(metadata.parentChatId ? { parentChatId: metadata.parentChatId } : {}), ...(metadata.ownerTaskId ? { ownerTaskId: metadata.ownerTaskId } : {}) });
     }
     return { items, ...(page.next ? { next: String(page.items.at(-1)!.id) } : {}) };
   }
 
-  createTask(title: string, binding: Binding, requestId: string = randomUUID()): Promise<Conversation> {
+  createTask(title: string, binding: Binding, requestId: string = randomUUID(), signal?: AbortSignal): Promise<Conversation> {
     return this.serial(async () => {
+      signal?.throwIfAborted();
       if (!title.trim() || !binding.machineId || !binding.cwd.startsWith("/")) throw new DeckError("invalid", "Task needs a title, host and absolute cwd");
       if (!requestId || requestId.length > 200) throw new DeckError("invalid", "Invalid task request ID");
       const hash = createHash("sha256").update(JSON.stringify([title, binding.machineId, binding.cwd])).digest("hex");
@@ -129,6 +154,7 @@ export class DeckRuntime {
       }, context);
       if (existing) return this.chat(String(existing));
       const agent = await this.main.agent(context);
+      signal?.throwIfAborted();
       return this.harness.createConversation({
         ownership: { kind: "ownerless" },
         agent: { ...(agent.model ? { model: agent.model } : {}), thinkingLevel: agent.thinkingLevel, cwd: binding.cwd },
@@ -140,22 +166,31 @@ export class DeckRuntime {
     });
   }
 
-  admit(id: string, input: Input) {
+  admit(id: string, input: Input, signal?: AbortSignal) {
     return this.serial(async () => {
+      signal?.throwIfAborted();
       if (!input.requestId || input.requestId.length > 200 || !input.text.trim() || !["steer", "followUp"].includes(input.mode)) {
         throw new DeckError("invalid", "Input needs requestId, text and a supported mode");
       }
+      const origin = input.origin === undefined ? undefined : { kind: input.origin.kind, chatId: input.origin.chatId, taskId: input.origin.taskId };
+      if (origin) {
+        if (origin.kind !== "task-tool") throw new DeckError("invalid", "Unsupported input origin");
+        positiveId(origin.chatId, "origin conversation"); positiveId(origin.taskId, "origin task");
+      }
       const chat = await this.chat(id);
+      if ((await this.harness.snapshot(ChatDoc, chat.id, context))?.kind === "subagent") throw new DeckError("invalid", "Subagent chats accept input only through their owning tool; inspect or stop them instead");
       const existing = await chat.commit((tx) => tx.submissionByRequest(chat.id, input.requestId), context);
+      signal?.throwIfAborted();
       if (!existing) await this.guard();
-      const hash = createHash("sha256").update(JSON.stringify([input.text, input.mode])).digest("hex");
+      signal?.throwIfAborted();
+      const hash = createHash("sha256").update(JSON.stringify(origin ? [input.text, input.mode, origin] : [input.text, input.mode])).digest("hex");
       const agent = await chat.agent(context);
       const capture = await chat.commit(async (tx) => {
         const binding = await tx.doc(ChatDoc, chat.id);
         if (!existing && agent.cwd !== binding.cwd) throw new DeckError("invalid", "Agent cwd differs from its saved tool binding");
         // An admission observation, not a per-input override of Pi's later request resolution.
-        const capture = JSON.stringify({
-          version: 2, semantics: "observed-at-reservation", pi: "1.4.0", nativeTools: this.localFiles,
+        const observations = {
+          semantics: "observed-at-reservation", pi: "1.4.0", nativeTools: this.localFiles,
           model: agent.model ? { provider: agent.model.provider, modelId: agent.model.modelId } : null,
           thinkingLevel: agent.thinkingLevel, cwd: agent.cwd,
           binding: { machineId: binding.machineId, cwd: binding.cwd },
@@ -163,20 +198,24 @@ export class DeckRuntime {
           tools: agent.tools.map((tool) => tool.name), callable: agent.callable.map((tool) => tool.name),
           deferred: agent.deferred.map((tool) => tool.name),
           instructionsHash: agent.instructions === undefined ? null : createHash("sha256").update(agent.instructions).digest("hex"),
-        });
+        };
+        const capture = JSON.stringify({ version: 3, ...observations, implementation: this.implementation });
+        const legacyV2 = JSON.stringify({ version: 2, ...observations });
         const reservation = await tx.doc(Admission, chat.id, input.requestId, { hash, capture });
         if (reservation.hash !== hash) throw new DeckError("conflict", "Request ID was already used with different input");
         // Repair the reservation/submit gap only under the same observed choices. Already
         // admitted receipts remain retrievable after settings/auth changes. Legacy captures
-        // can check only the model/thinking/binding fields they actually recorded.
+        // retain only their originally recorded observations, not invented code provenance.
         const legacy = JSON.stringify({ model: agent.model, thinkingLevel: agent.thinkingLevel, binding });
-        if (!existing && reservation.capture !== capture && reservation.capture !== legacy) throw new DeckError("settings_changed", "Unadmitted request settings changed; restore the original choices or explicitly discard and submit a new request");
+        if (!existing && reservation.capture !== capture && reservation.capture !== legacyV2 && reservation.capture !== legacy) throw new DeckError("settings_changed", "Unadmitted request settings or implementation changed; restore the original choices/build or explicitly discard and submit a new request");
         return reservation.capture;
       }, context);
+      // Cancellation can leave a reservation, never a fabricated admission ACK.
+      signal?.throwIfAborted();
       // ACK only after Pi has committed the submission. The capture remains unchanged on retry.
       return chat.submit({
-        type: "input", content: input.text, requestId: input.requestId, whenBusy: input.mode,
-        entry: { kind: "deck.input", data: { text: input.text, requestId: input.requestId, mode: input.mode, capture } },
+        type: "input", content: origin ? `[Message from agent chat ${origin.chatId}, tool task ${origin.taskId}; not a direct human message]\n${input.text}` : input.text, requestId: input.requestId, whenBusy: input.mode,
+        entry: { kind: "deck.input", data: { text: input.text, requestId: input.requestId, mode: input.mode, capture, ...(origin ? { origin } : {}) } },
       }, context);
     });
   }
@@ -196,6 +235,10 @@ export class DeckRuntime {
         await configureAgent(tx, chat.id, change);
       }, context);
     });
+  }
+  async progress(id: string) {
+    const chat = await this.chat(id);
+    return projectProgress(String(chat.id), await this.harness.snapshot(LiveDoc, chat.id, context));
   }
   async activity(id: string) {
     const chat = await this.chat(id);

@@ -255,9 +255,9 @@ test("capture labels observed choices, hashes instructions and leaves later idle
     const entry = (await runtime.history(id)).items.find((entry) => entry.kind === "deck.input")!;
     const data = entry.data as { capture: string };
     const capture = JSON.parse(data.capture) as Record<string, unknown>;
-    assert.equal(capture.version, 2); assert.equal(capture.semantics, "observed-at-reservation");
+    assert.equal(capture.version, 3); assert.equal(capture.implementation, runtime.implementation); assert.equal(capture.semantics, "observed-at-reservation");
     assert.deepEqual(capture.model, options.model); assert.equal(capture.cwd, directory);
-    assert.deepEqual(capture.tools, ["read", "write", "edit", "bash"]);
+    assert.deepEqual(capture.tools, ["read", "write", "edit", "bash", "task_list", "task_history", "task_activity", "task_create", "task_message", "subagent"]);
     assert.match(String(capture.instructionsHash), /^[a-f0-9]{64}$/);
     assert.doesNotMatch(data.capture, /Original instruction|UNREAD_PROJECT_INSTRUCTION/);
     await runtime.configure(id, { instructions: "Changed later" });

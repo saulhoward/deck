@@ -52,7 +52,10 @@ test("loopback hub and plain detached client: admission, security checks, task i
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     assert.match(history, /Hello from client/); assert.match(history, /no inference performed/);
-    const newest = await command("history", { chatId: status.mainChatId, limit: 1, includeActivity: true });
+    const newest = await command("history", { chatId: status.mainChatId, limit: 1, includeActivity: true, includeProgress: true });
+    assert.equal((newest.progress as Record<string, unknown>).provisional, true);
+    const progress = await command("progress", { chatId: status.mainChatId });
+    assert.equal(progress.chatId, status.mainChatId); assert.equal(progress.version, 1); assert.equal(progress.provisional, true);
     assert.equal((newest.activity as Record<string, unknown>).chatId, status.mainChatId);
     assert.equal((newest.items as unknown[]).length, 1); assert.equal(typeof newest.next, "string");
     const previous = await command("history", { chatId: status.mainChatId, limit: 1, before: newest.next });
@@ -68,7 +71,7 @@ test("loopback hub and plain detached client: admission, security checks, task i
       after = String(page.next);
     }
     assert.deepEqual(forward, (complete.items as Record<string, unknown>[]).map((entry) => entry.id).reverse());
-    for (const args of [{ limit: 0 }, { limit: "2" }, { before: "oops" }, { before: 1 }, { after: "-1" }, { after: 0 }, { before: "1", after: "0" }, { includeActivity: "true" }]) {
+    for (const args of [{ limit: 0 }, { limit: "2" }, { before: "oops" }, { before: 1 }, { after: "-1" }, { after: 0 }, { before: "1", after: "0" }, { includeActivity: "true" }, { includeProgress: "true" }]) {
       const result = await (await raw(JSON.stringify({ version: 1, id: "bad-history", command: "history", args: { chatId: status.mainChatId, ...args } }))).json() as { ok: boolean; error: { code: string } };
       assert.equal(result.ok, false); assert.equal(result.error.code, "invalid");
     }

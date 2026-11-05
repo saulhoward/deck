@@ -19,6 +19,7 @@ test("plain client deduplicates activity transitions and renders bounded sanitiz
     else {
       assert.equal(command, "history"); assert.equal(args.includeActivity, true); polls++;
       result = { activity: activity(String(args.chatId)), items: args.chatId !== "1" || args.after !== undefined ? [] : [
+        { id: 3, kind: "deck.input", data: { text: "AGENT_NOTE", origin: { kind: "task-tool", chatId: "9", taskId: "10" } } },
         { id: 2, kind: "pi.tool-result", model: [{ toolName: "bash", isError: true, details: { code: "effect_uncertain", exitCode: 7, truncated: true }, content: [{ type: "text", text: "HEAD_MUST_CLIP" + "x".repeat(10_000) + "\u001b[31mTAIL_SENTINEL" }] }] },
         { id: 1, kind: "pi.assistant", model: [{ content: [{ type: "toolCall", name: "bash", arguments: { command: "SECRET_ARGUMENTS" } }] }] },
       ] };
@@ -47,6 +48,7 @@ test("plain client deduplicates activity transitions and renders bounded sanitiz
     assert.equal((output.match(/tool requested:/g) ?? []).length, 1);
     assert.match(output, /result \(error\)/); assert.match(output, /effect_uncertain/); assert.match(output, /"exitCode":7/);
     assert.match(output, /display clipped/); assert.doesNotMatch(output, /HEAD_MUST_CLIP|SECRET_ARGUMENTS|\x1b/);
+    assert.match(output, /agent chat 9: AGENT_NOTE/); assert.doesNotMatch(output, /you: AGENT_NOTE/);
     assert.equal(errors, "");
   } finally {
     if (client.exitCode === null && client.signalCode === null) client.kill(); await closed;

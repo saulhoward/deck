@@ -9,6 +9,8 @@ const help =
     \\
     \\Usage:
     \\  deck init [--directory PATH]
+    \\  deck backup --output NEW_DIRECTORY [--directory STATE] [--include-credentials]
+    \\  deck restore --from BACKUP_DIRECTORY --directory NEW_STATE
     \\  deck serve [--mock | --api-key] [--model ID] [--port 52800] [--directory PATH]
     \\  deck login [--port 52800]
     \\  deck serve --stdio --mock [--directory PATH] [--runtime PATH]
@@ -22,10 +24,21 @@ const help =
     \\Nix installs the runtime and Node privately. Checkout builds need npm run build.
     \\The plain client supports /tasks, /select CHAT_ID, /main, /task TITLE,
     \\/older, /activity, /stop, /status and /exit.
+    \\Sampled answer previews are provisional; retained history is authoritative.
+    \\Native bash output is shown only when the operation settles.
     \\Drafts save before sending. /draft, /drafts, /recover REQUEST_ID,
     \\/retry and /discard [REQUEST_ID] manage unresolved requests; no auto replay.
+    \\Models can inspect existing chats with task_list/task_history/task_activity.
+    \\task_create/task_message create ownerless tasks and acknowledge admission only.
+    \\These are ownerless: stopping the caller does not stop target work.
+    \\subagent waits for a Pi-owned child answer; caller stop drains ordinary owned work.
+    \\Owned child chats can be inspected/stopped, but do not accept direct input.
     \\Default provider: OpenAI with ChatGPT OAuth; use deck login after serving.
     \\--api-key explicitly opts into ambient OPENAI_API_KEY (may incur charges).
+    \\Backup requires the writer to be stopped; it never stops or resumes work.
+    \\Restore preserves identity/bindings and refuses existing destinations.
+    \\Restoring old state can repeat later external effects; reconcile before serving.
+    \\Backups exclude credentials unless explicitly requested; treat all as sensitive.
     \\Remote workers and TUI are not yet available.
     \\
 ;
@@ -40,6 +53,9 @@ const Options = struct {
     api_key: bool = false,
     model: []const u8 = "",
     workspace: ?[]const u8 = null,
+    output: ?[]const u8 = null,
+    from: ?[]const u8 = null,
+    include_credentials: bool = false,
 };
 
 fn parse(args: []const []const u8) !Options {
@@ -53,6 +69,12 @@ fn parse(args: []const []const u8) !Options {
             i += 1;
             if (i == args.len) return error.InvalidArguments;
             if (std.mem.eql(u8, arg, "--directory")) result.directory = args[i] else result.runtime = args[i];
+        } else if (std.mem.eql(u8, arg, "--output") or std.mem.eql(u8, arg, "--from")) {
+            i += 1;
+            if (i == args.len or args[i].len == 0) return error.InvalidArguments;
+            if (std.mem.eql(u8, arg, "--output")) result.output = args[i] else result.from = args[i];
+        } else if (std.mem.eql(u8, arg, "--include-credentials")) {
+            result.include_credentials = true;
         } else if (std.mem.eql(u8, arg, "--workspace")) {
             i += 1;
             if (i == args.len) return error.InvalidArguments;
@@ -82,6 +104,8 @@ fn run(allocator: std.mem.Allocator, options: Options) !void {
     const command = options.command;
     if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) return std.fs.File.stdout().writeAll(help);
     if (std.mem.eql(u8, command, "--version")) return std.fs.File.stdout().writeAll("deck 0.1.0-dev\n");
+    if (std.mem.eql(u8, command, "backup") or std.mem.eql(u8, command, "restore")) return maintenance(allocator, options);
+    if (options.output != null or options.from != null or options.include_credentials) return error.InvalidArguments;
     if (!std.mem.eql(u8, command, "init") and !std.mem.eql(u8, command, "serve")) return error.InvalidArguments;
     const path = try state.directory(allocator, options.directory);
     defer allocator.free(path);
@@ -147,7 +171,9 @@ fn run(allocator: std.mem.Allocator, options: Options) !void {
     const journal = try std.fs.path.join(allocator, &.{ path, "worker", "operations" });
     defer allocator.free(journal);
     try std.fs.cwd().makePath(journal);
-    var child = std.process.Child.init(&.{ node_path, runtime, database, config.value.machine_id, cwd, descriptor, if (options.mock) "--mock" else if (options.api_key) "--api-key" else "--chatgpt", options.model, result_fd, request_fd, control_fd }, allocator);
+    const native_executable = try std.fs.selfExePathAlloc(allocator);
+    defer allocator.free(native_executable);
+    var child = std.process.Child.init(&.{ node_path, runtime, database, config.value.machine_id, cwd, descriptor, if (options.mock) "--mock" else if (options.api_key) "--api-key" else "--chatgpt", options.model, result_fd, request_fd, control_fd, native_executable }, allocator);
     child.stdin_behavior = if (options.stdio) .Inherit else .Pipe;
     child.stdout_behavior = if (options.stdio) .Inherit else .Pipe;
     child.stderr_behavior = .Inherit;
@@ -179,6 +205,43 @@ fn run(allocator: std.mem.Allocator, options: Options) !void {
     switch (term) {
         .Exited => |code| if (code != 0) return error.RuntimeFailed,
         else => return error.RuntimeFailed,
+    }
+}
+
+fn maintenance(allocator: std.mem.Allocator, options: Options) !void {
+    const restoring = std.mem.eql(u8, options.command, "restore");
+    if (options.stdio or options.mock or options.api_key or options.model.len != 0 or options.workspace != null or options.runtime != null or options.port != 52800) return error.InvalidArguments;
+    const artifact = if (restoring) options.from orelse return error.InvalidArguments else options.output orelse return error.InvalidArguments;
+    if (restoring) {
+        if (options.directory == null or options.output != null or options.include_credentials) return error.InvalidArguments;
+    } else if (options.from != null) return error.InvalidArguments;
+    const path = try state.directory(allocator, options.directory);
+    defer allocator.free(path);
+    if (restoring) try state.restoreDirectory(allocator, artifact, path);
+    var dir = try std.fs.cwd().openDir(path, .{ .iterate = true });
+    defer dir.close();
+    const held = try state.lock(dir);
+    defer held.close();
+    if (restoring) try state.markRestore(dir) else {
+        const config = try state.load(allocator, dir);
+        config.deinit();
+    }
+    const node_path = try runtime_paths.node(allocator);
+    defer allocator.free(node_path);
+    const entry = try runtime_paths.entry(allocator, null, "backup-main.js");
+    defer allocator.free(entry);
+    const descriptor = try std.fmt.allocPrint(allocator, "{d}", .{held.handle});
+    defer allocator.free(descriptor);
+    _ = try std.posix.fcntl(held.handle, std.posix.F.SETFD, 0);
+    defer _ = std.posix.fcntl(held.handle, std.posix.F.SETFD, std.posix.FD_CLOEXEC) catch {};
+    var child = std.process.Child.init(&.{ node_path, entry, options.command, path, artifact, descriptor, if (options.include_credentials) "include" else "exclude" }, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Inherit;
+    child.stderr_behavior = .Inherit;
+    const term = try child.spawnAndWait();
+    switch (term) {
+        .Exited => |code| if (code != 0) return error.BackupFailed,
+        else => return error.BackupFailed,
     }
 }
 
@@ -216,8 +279,11 @@ pub fn main() void {
     };
     run(allocator, options) catch |err| {
         const message = switch (err) {
+            error.RestoreIncomplete => "deck: incomplete restore; leave it offline and restore into a new directory\n",
+            error.PathAlreadyExists => "deck: destination already exists; use a new backup/restore directory\n",
+            error.BackupFailed => "deck: backup/restore did not complete; originals were not replaced\n",
             error.WouldBlock => "deck: this state directory already has a running writer\n",
-            error.FileNotFound => "deck: missing state or runtime; run init and npm run build\n",
+            error.FileNotFound => "deck: missing state, backup or runtime; check paths, init and installation\n",
             error.RuntimeFailed, error.RuntimeClosed, error.InvalidFrame, error.BrokenPipe => "deck: runtime unavailable; hub stopped; inspect pending work before restarting serve\n",
             else => "deck: command failed; check arguments, config and runtime\n",
         };

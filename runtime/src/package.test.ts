@@ -10,7 +10,7 @@ import test from "node:test";
 const binary = process.env.DECK_PACKAGE_BINARY;
 test("installed package runs hub, client, lazy provider imports and native tools outside the checkout without Node on PATH", { skip: !binary, timeout: 20_000 }, async () => {
   const scratch = await mkdtemp(join(tmpdir(), "deck-package-"));
-  const state = join(scratch, "state");
+  let state = join(scratch, "state");
   const env = { ...process.env, HOME: scratch, DECK_CLIENT_STATE_DIRECTORY: join(scratch, "client"), PATH: "/missing-tools", DECK_NODE: "/missing-node", DECK_RUNTIME_ROOT: "/missing-runtime" };
   const invoke = (args: string[], input?: string) => spawnSync(binary!, args, { cwd: scratch, env, encoding: "utf8", timeout: 10_000, ...(input === undefined ? {} : { input }) });
   let hub: ReturnType<typeof spawn> | undefined;
@@ -40,6 +40,8 @@ test("installed package runs hub, client, lazy provider imports and native tools
       const provider = providers('--mock',args[0]+'.unused-auth',args[1]);
       const runtime = await DeckRuntime.open(args[0], {models:provider.models,model:provider.model,binding,environment:()=>undefined});
       try {
+        const agent = await runtime.main.agent(context);
+        for (const name of ['task_list','task_history','task_activity','task_create','task_message','subagent']) assert.ok(agent.tools.some(tool => tool.name === name));
         await runtime.main.commit(async tx => {
           for (let i=0;i<110;i++) await tx.appendEntry(runtime.main.id,{kind:'deck.input',data:{text:'packaged retained '+i}});
           // Seed a paired tool exchange to check installed-client result rendering.
@@ -51,6 +53,11 @@ test("installed package runs hub, client, lazy provider imports and native tools
     const native = invoke(["serve", "--stdio", "--mock", "--directory", state, "--runtime", fixture, "--workspace", scratch]);
     assert.equal(native.status, 0, native.stderr);
     assert.equal(await readFile(join(scratch, "packaged.txt"), "utf8"), "installed tools work");
+    const snapshot = join(scratch, "backup");
+    const backed = invoke(["backup", "--directory", state, "--output", snapshot]); assert.equal(backed.status, 0, backed.stderr);
+    const restored = join(scratch, "restored");
+    const recovery = invoke(["restore", "--from", snapshot, "--directory", restored]); assert.equal(recovery.status, 0, recovery.stderr);
+    assert.match(recovery.stdout, /no work resumed/); state = restored; // Serve the restored canonical transcript/receipts below.
     const probe = createServer(); probe.listen(0, "127.0.0.1"); await once(probe, "listening");
     const address = probe.address(); assert.ok(address && typeof address !== "string"); const port = address.port;
     await new Promise<void>((resolve) => probe.close(() => resolve()));
@@ -68,6 +75,7 @@ test("installed package runs hub, client, lazy provider imports and native tools
       catch { await new Promise((resolve) => setTimeout(resolve, 30)); }
     }
     assert.ok(status, errors);
+    assert.match(String(status.implementation), /^[a-f0-9]{64}$/);
     const checkpoint = await command("history", { chatId: status.mainChatId, limit: 1 });
     const checkpointId = String((checkpoint.items as Record<string, unknown>[])[0]!.id);
     const message = invoke(["agent", "--no-tui", "--port", String(port), "--message", "packaged chat"]);
@@ -77,7 +85,10 @@ test("installed package runs hub, client, lazy provider imports and native tools
       if (JSON.stringify(await command("history", { chatId: status.mainChatId })).includes("no inference performed")) break;
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
-    const caughtUp = await command("history", { chatId: status.mainChatId, after: checkpointId, limit: 100 });
+    const caughtUp = await command("history", { chatId: status.mainChatId, after: checkpointId, limit: 100, includeProgress: true });
+    assert.equal((caughtUp.progress as Record<string, unknown>).provisional, true);
+    const preview = await command("progress", { chatId: status.mainChatId });
+    assert.equal(preview.version, 1); assert.equal(preview.chatId, status.mainChatId);
     assert.match(JSON.stringify(caughtUp), /packaged chat/); assert.match(JSON.stringify(caughtUp), /no inference performed/);
     assert.ok((caughtUp.items as Record<string, unknown>[]).every((entry) => Number(entry.id) > Number(checkpointId)));
     const binding = status.binding as Record<string, unknown>;

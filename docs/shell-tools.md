@@ -10,7 +10,7 @@ Rebuild Zig and TypeScript and restart the hub. Use the scratch workspace/state 
 - “Create a small script in this workspace and run it.”
 - “Run `sleep 30`.” Then send `/stop` while it runs.
 
-Automated tests use only fake inference and real local Zig shell execution. Model-driven shell use with a live provider still needs your manual smoke test. As before, paid API-key mode must be explicitly selected.
+Automated tests use only fake inference and real local Zig shell execution. The user reports live API-key bash execution, foreground `sleep 30` cancellation with `/stop`, and detach/reconnect while a delayed shell finishes all passed. This is manual validation, not coverage of every process-tree escape or failure mode. As before, paid API-key mode must be explicitly selected.
 
 ## Execution and bounds
 

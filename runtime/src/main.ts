@@ -1,15 +1,16 @@
 // Private child entry point. Only Zig opens/owns the inherited writer lock.
 import { fstatSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { CompatibilityError, fingerprintImplementation } from "./compatibility.js";
 import { providers } from "./providers.js";
 import { DeckError, DeckRuntime } from "./deck.js";
 import { PipeFiles } from "./host-files.js";
 import { serveIpc } from "./ipc.js";
 
 async function main() {
-  const [path, machineId, cwd, descriptor, mode, modelId, readFd, writeFd, controlFd] = process.argv.slice(2);
+  const [path, machineId, cwd, descriptor, mode, modelId, readFd, writeFd, controlFd, nativeExecutable] = process.argv.slice(2);
   const lockFd = Number(descriptor);
-  if (!path || !machineId || !cwd || !Number.isSafeInteger(lockFd) || lockFd < 3 || (mode !== "--mock" && mode !== "--chatgpt" && mode !== "--api-key")) throw new Error("Runtime must be launched by deck serve");
+  if (!nativeExecutable || !path || !machineId || !cwd || !Number.isSafeInteger(lockFd) || lockFd < 3 || (mode !== "--mock" && mode !== "--chatgpt" && mode !== "--api-key")) throw new Error("Runtime must be launched by deck serve");
   if (!fstatSync(lockFd).isFile()) throw new Error("Missing inherited writer lock");
   // Upstream's callback bind override must not expose a public listener.
   if (mode === "--chatgpt") process.env.PI_OAUTH_CALLBACK_HOST = "127.0.0.1";
@@ -31,6 +32,7 @@ async function main() {
   try {
     runtime = await DeckRuntime.open(path, {
       models: provider.models, model: provider.model, admissionGuard: provider.guard, validateSavedModels: true,
+      implementation: await fingerprintImplementation({ native: nativeExecutable, entry: process.argv[1]!, mode }),
       binding: { machineId, cwd }, environment: () => undefined, ...(files ? { hostFiles: files } : {}),
     });
     // A failed Harness closes itself. Do not leave a live command process/listener
@@ -52,6 +54,6 @@ async function main() {
 
 main().catch((error: unknown) => {
   // Do not echo provider/storage exception text: it may contain input or secrets.
-  process.stderr.write(error instanceof DeckError ? `deck runtime: ${error.message}\n` : "deck runtime: startup or IPC failed\n");
+  process.stderr.write(error instanceof DeckError || error instanceof CompatibilityError ? `deck runtime: ${error.message}\n` : "deck runtime: startup or IPC failed\n");
   process.exitCode = 1;
 });

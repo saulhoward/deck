@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { once } from "node:events";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { DraftStore, type Draft } from "./drafts.js";
+import { ProgressDisplay } from "./progress.js";
 import { loginClient } from "./login-client.js";
 
 type ObjectValue = Record<string, unknown>;
@@ -20,7 +22,11 @@ function plain(text: string): string {
 function renderHistory(items: unknown[], descending = true) {
   for (const raw of descending ? items.slice().reverse() : items) {
     const entry = object(raw);
-    if (entry.kind === "deck.input") stdout.write(`you: ${plain(String(object(entry.data).text))}\n`);
+    if (entry.kind === "deck.input") {
+      const data = object(entry.data); const origin = data.origin && typeof data.origin === "object" && !Array.isArray(data.origin) ? object(data.origin) : {};
+      const sender = origin.kind === "task-tool" ? `agent chat ${plain(String(origin.chatId))}` : "you";
+      stdout.write(`${sender}: ${plain(String(data.text))}\n`);
+    }
     else if (entry.kind === "pi.assistant" && Array.isArray(entry.model)) {
       for (const rawMessage of entry.model) {
         const msg = object(rawMessage);
@@ -119,6 +125,7 @@ async function main() {
   let newerAfter = "0";
   let selection = 0;
   let lastActivity: string | undefined;
+  const previews = new ProgressDisplay(plain);
   let olderBefore: string | undefined;
   let historyLoaded = false;
   let recentLimit = 100; let olderLimit = 100;
@@ -128,7 +135,7 @@ async function main() {
     const chatId = selected; const revision = selection;
     polling = (async () => {
       const ascending = historyLoaded;
-      const result = await historyPage({ chatId, includeActivity: true, ...(ascending ? { after: newerAfter } : {}) }, recentLimit);
+      const result = await historyPage({ chatId, includeActivity: true, includeProgress: true, ...(ascending ? { after: newerAfter } : {}) }, recentLimit);
       if (revision !== selection || detached) return;
       const { page } = result; recentLimit = result.limit;
       if (!Array.isArray(page.items)) throw new Error("Invalid history");
@@ -150,6 +157,11 @@ async function main() {
         if (key !== lastActivity && (lastActivity !== undefined || activity.busy || activity.queued || activity.compactions || activity.compactionFailed)) stdout.write(`activity: ${plain(key)}\n`);
         lastActivity = key;
       }
+      const preview = previews.render(page.progress, chatId!);
+      if (preview) stdout.write(preview);
+      // One poll owns at most one bounded history page + preview. Do not keep
+      // queuing snapshots if the terminal/pipe consumer stops reading.
+      if (stdout.writableNeedDrain) await once(stdout, "drain", { signal: transport.signal });
     })().finally(() => { polling = undefined; });
     return polling;
   };
@@ -172,7 +184,7 @@ async function main() {
   }, 500);
   let chatCursor: string | undefined;
   const select = async (id: string) => {
-    selected = id; selection++; lastActivity = undefined; newerAfter = "0"; olderBefore = undefined; historyLoaded = false; recentLimit = 100; olderLimit = 100;
+    selected = id; selection++; lastActivity = undefined; previews.reset(); newerAfter = "0"; olderBefore = undefined; historyLoaded = false; recentLimit = 100; olderLimit = 100;
     stdout.write(`Selected chat ${plain(id)}.\n`);
     await restore();
   };
@@ -188,7 +200,15 @@ async function main() {
   const detach = () => {
     if (detached) return;
     detached = true; editor.close(); clearInterval(timer); transport.abort();
+    const blockedOutput = stdout.writableNeedDrain;
     if (active) process.stderr.write("Detached with an unresolved draft; work may already be admitted. Reconnect for /retry; saving must have succeeded to recover it.\n");
+    if (blockedOutput) {
+      // Node intentionally does not close standard stdout on destroy(); a pending
+      // pipe write can otherwise keep this detached client alive indefinitely.
+      // This process owns no execution. Save-before-send prevents this attempt
+      // sending before publication; earlier ambiguous admissions keep their IDs.
+      stdout.destroy(); setImmediate(() => process.exit(process.exitCode ?? 0));
+    }
   };
   process.once("SIGINT", detach);
   try {
@@ -198,7 +218,7 @@ async function main() {
       if (!text) continue;
       try {
         if (text === "/exit") break;
-        if (text === "/help") { stdout.write("/status /activity /stop /older /tasks [more] /select CHAT_ID /main /task TITLE /draft /drafts /recover REQUEST_ID /retry /discard [REQUEST_ID] /exit\nEnter submits or steers. Switching detaches without stopping other chats. Ctrl+C detaches. This is plain line mode, not TUI.\n"); continue; }
+        if (text === "/help") { stdout.write("/status /activity /stop /older /tasks [more] /select CHAT_ID /main /task TITLE /draft /drafts /recover REQUEST_ID /retry /discard [REQUEST_ID] /exit\nEnter submits or steers. Switching detaches without stopping other chats. Ctrl+C detaches. Answer previews are sampled/provisional; retained history is authoritative. This is plain line mode, not TUI.\n"); continue; }
         if (text === "/draft") {
           if (!active) throw new Error("No active unacknowledged draft");
           const preview = plain(JSON.stringify(active));
