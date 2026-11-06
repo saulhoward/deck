@@ -26,6 +26,10 @@ test("draft cache publishes private immutable records, isolates hub identities a
     const task: Draft = { kind: "task", chatId: "2", requestId: randomUUID(), title: "Task", machineId: "offline-original", cwd: "/original" };
     await store.save(task);
     assert.deepEqual((await store.load(task.requestId)).request, task);
+    const instructions: Draft = { kind: "instructions", chatId: "2", requestId: randomUUID(), machineId: "original-worker", cwd: "/original" };
+    await store.save(instructions); assert.deepEqual((await store.load(instructions.requestId)).request, instructions);
+    await assert.rejects(store.save({ ...instructions, cwd: "/changed" }), /conflicts/);
+    assert.doesNotMatch(JSON.stringify(await store.list()), /original-worker|\/original/);
   } finally { await local.close(); }
 });
 

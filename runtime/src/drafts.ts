@@ -6,7 +6,8 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
 export type Draft = { kind: "input"; chatId: string; requestId: string; text: string; mode: "steer" } |
-  { kind: "task"; chatId: string; requestId: string; title: string; machineId: string; cwd: string };
+  { kind: "task"; chatId: string; requestId: string; title: string; machineId: string; cwd: string } |
+  { kind: "instructions"; chatId: string; requestId: string; machineId: string; cwd: string };
 type Saved = { version: 1; hubId: string; createdAt: number; request: Draft };
 export type DraftSummary = { kind: Draft["kind"]; chatId: string; requestId: string; createdAt: number };
 const maxBytes = 1024 * 1024;
@@ -24,8 +25,9 @@ function validate(value: unknown): Draft {
   const chatId = text(data.chatId); const id = text(data.requestId);
   if (!/^[1-9]\d*$/.test(chatId) || !Number.isSafeInteger(Number(chatId)) || !requestId.test(id)) throw new Error("Invalid saved draft identity");
   if (data.kind === "input" && data.mode === "steer") return { kind: "input", chatId, requestId: id, text: text(data.text), mode: "steer" };
-  if (data.kind === "task") {
+  if (data.kind === "task" || data.kind === "instructions") {
     const cwd = text(data.cwd); if (!isAbsolute(cwd)) throw new Error("Invalid saved draft cwd");
+    if (data.kind === "instructions") return { kind: "instructions", chatId, requestId: id, machineId: text(data.machineId), cwd };
     return { kind: "task", chatId, requestId: id, title: text(data.title), machineId: text(data.machineId), cwd };
   }
   throw new Error("Unsupported saved draft");

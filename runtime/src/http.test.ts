@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, readdir } from "node:fs/promises";
 import { createServer } from "node:net";
 import { request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
@@ -16,7 +16,7 @@ test("loopback hub and plain detached client: admission, security checks, task i
   const address = probe.address(); assert.ok(address && typeof address !== "string"); const port = address.port;
   await new Promise<void>((resolve) => probe.close(() => resolve()));
   assert.equal(spawnSync(binary!, ["init", "--directory", directory]).status, 0);
-  const hub = spawn(binary!, ["serve", "--mock", "--port", String(port), "--directory", directory, "--runtime", resolve("runtime/dist/main.js")]);
+  const hub = spawn(binary!, ["serve", "--mock", "--port", String(port), "--directory", directory, "--workspace", directory, "--runtime", resolve("runtime/dist/main.js")]);
   const url = `http://127.0.0.1:${port}/v1/command`;
   const raw = (body: string, headers = {}) => fetch(url, { method: "POST", headers: { "content-type": "application/json", ...headers }, body, signal: AbortSignal.timeout(3000) });
   const command = async (name: string, args = {}) => {
@@ -71,7 +71,7 @@ test("loopback hub and plain detached client: admission, security checks, task i
       after = String(page.next);
     }
     assert.deepEqual(forward, (complete.items as Record<string, unknown>[]).map((entry) => entry.id).reverse());
-    for (const args of [{ limit: 0 }, { limit: "2" }, { before: "oops" }, { before: 1 }, { after: "-1" }, { after: 0 }, { before: "1", after: "0" }, { includeActivity: "true" }, { includeProgress: "true" }]) {
+    for (const args of [{ limit: 0 }, { limit: "2" }, { before: "oops" }, { before: 1 }, { after: "-1" }, { after: 0 }, { before: "1", after: "0" }, { includeActivity: "true" }, { includeProgress: "true" }, { includeInstructions: "true" }]) {
       const result = await (await raw(JSON.stringify({ version: 1, id: "bad-history", command: "history", args: { chatId: status.mainChatId, ...args } }))).json() as { ok: boolean; error: { code: string } };
       assert.equal(result.ok, false); assert.equal(result.error.code, "invalid");
     }
@@ -107,6 +107,25 @@ test("loopback hub and plain detached client: admission, security checks, task i
     assert.doesNotMatch(main, /Task-only message|Task selected input/);
     assert.match(main, /Main selected input/); assert.match(taskHistory, /Task selected input/);
     assert.doesNotMatch(taskHistory, /Main selected input/);
+    // Public client -> real HTTP/IPC -> Pi admin task -> Zig read, with no inference.
+    await writeFile(join(directory, "AGENTS.md"), "NATIVE_IMPORTED_INSTRUCTIONS");
+    const importedChat = await command("create_task", { ...taskArgs, requestId: "import-target", title: "Import target" });
+    const importing = spawnSync(binary!, ["agent", "--no-tui", "--port", String(port), "--task", String(importedChat.chatId)], { env, input: "/instructions\n/instructions load\n/instructions\n/exit\n", encoding: "utf8", timeout: 5000 });
+    assert.equal(importing.status, 0, importing.stderr); assert.match(importing.stdout, /Application not yet confirmed/); assert.doesNotMatch(importing.stdout, /NATIVE_IMPORTED_INSTRUCTIONS/);
+    const importId = /Instruction import admitted: task ([1-9]\d*)\./.exec(importing.stdout)?.[1]; assert.ok(importId);
+    let imported: Record<string, unknown> = {};
+    for (let i = 0; i < 100; i++) {
+      imported = await command("instruction_status", { chatId: importedChat.chatId, taskId: importId });
+      if ((imported.import as Record<string, unknown>).state === "terminal") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(((imported.import as Record<string, unknown>).result as Record<string, unknown>).status, "applied");
+    assert.equal((await command("history", { chatId: importedChat.chatId })).items instanceof Array, true);
+    assert.equal(((await command("history", { chatId: importedChat.chatId })).items as unknown[]).length, 0);
+    const operations = await readdir(join(directory, "worker", "operations"));
+    await writeFile(join(directory, "AGENTS.md"), "CHANGED_NOT_RELOADED");
+    assert.deepEqual(await command("instruction_status", { chatId: importedChat.chatId }), imported);
+    assert.deepEqual(await readdir(join(directory, "worker", "operations")), operations);
   } finally {
     const closed = once(hub, "close"); hub.kill("SIGTERM"); await closed;
     // The runtime closes on EOF from the supervisor; wait for its inherited pipes to close.

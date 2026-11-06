@@ -1,6 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { configure, defineExtension, defineTool, type EntryRecord, type Extension } from "@earendil-works/pi-durable";
 import { ChatDoc } from "./deck.js";
+import { instructionHash, InstructionSourceDoc } from "./instruction-import.js";
 
 // Text-only, bounded final answer. The full child transcript stays canonical in Pi.
 export function delegationAnswer(entry: Pick<EntryRecord, "model">) {
@@ -33,6 +34,7 @@ export function foregroundSubagent(control: Extension): Extension {
         if (owned.items[0]) return owned.items[0].id;
         const binding = await tx.doc(ChatDoc, api.conversationId);
         if (!binding.machineId || parent.cwd !== binding.cwd) throw new Error("Delegation requires a coherent saved Deck tool binding");
+        const source = (await tx.doc(InstructionSourceDoc, api.conversationId)).source;
         const created = await tx.createConversation({ ownership: { kind: "task", taskId: api.taskId } });
         // Pi copied the stored agent. Fix the resolved selection, rather than replacing
         // an explicit parent allowlist with host defaults via {remove: ...}.
@@ -44,6 +46,7 @@ export function foregroundSubagent(control: Extension): Extension {
           kind: "subagent", title: args.title ?? "Subagent", machineId: binding.machineId, cwd: binding.cwd,
           parentChatId: String(api.conversationId), ownerTaskId: String(api.taskId),
         });
+        if (source && source.sha256 === instructionHash(parent.instructions)) (await tx.doc(InstructionSourceDoc, created.id)).source = source;
         return created.id;
       }, context);
       await api.details({ conversationId: child }, context);

@@ -1,8 +1,9 @@
 const std = @import("std");
 const file_limit = 128 * 1024;
 const frame_limit = 1024 * 1024;
-const Request = struct { version: u32, id: []const u8, machineId: []const u8, cwd: []const u8, operation: []const u8, args: struct { path: []const u8 = "", content: ?[]const u8 = null, oldText: ?[]const u8 = null, newText: ?[]const u8 = null, command: ?[]const u8 = null, timeout: u32 = 60 } };
+const Request = struct { version: u32, id: []const u8, machineId: []const u8, cwd: []const u8, operation: []const u8, args: struct { path: []const u8 = "", content: ?[]const u8 = null, oldText: ?[]const u8 = null, newText: ?[]const u8 = null, command: ?[]const u8 = null, timeout: u32 = 60, target: []const u8 = "", plan: []const u8 = "" } };
 const shell = @import("shell.zig");
+const rex = @import("rex.zig");
 const Result = shell.Result;
 const Receipt = struct { hash: []const u8, result: ?Result = null };
 
@@ -62,9 +63,9 @@ fn execute(allocator: std.mem.Allocator, request: Request) !Result {
 }
 
 pub fn operation(allocator: std.mem.Allocator, journal: std.fs.Dir, machine_id: []const u8, body: []const u8) ![]const u8 {
-    return controlled(allocator, journal, machine_id, body, null);
+    return controlled(allocator, journal, machine_id, body, null, null);
 }
-fn controlled(allocator: std.mem.Allocator, journal: std.fs.Dir, machine_id: []const u8, body: []const u8, cancelled: ?*std.atomic.Value(bool)) ![]const u8 {
+fn controlled(allocator: std.mem.Allocator, journal: std.fs.Dir, machine_id: []const u8, body: []const u8, cancelled: ?*std.atomic.Value(bool), progress: ?shell.Progress) ![]const u8 {
     const parsed = try std.json.parseFromSlice(Request, allocator, body, .{});
     defer parsed.deinit();
     const request = parsed.value;
@@ -92,13 +93,40 @@ fn controlled(allocator: std.mem.Allocator, journal: std.fs.Dir, machine_id: []c
         // Persist acceptance before touching the workspace. An accepted operation without
         // a retained result is uncertain after restart and is never automatically reissued.
         try save(allocator, journal, name, .{ .hash = &hash });
-        result = (if (std.mem.eql(u8, request.operation, "bash")) shell.run(allocator, request.cwd, request.args.command orelse "", request.args.timeout, cancelled orelse return error.Unsupported) else execute(allocator, request)) catch |err| .{ .ok = false, .output = if (std.mem.eql(u8, request.operation, "read")) @errorName(err) else "effect_uncertain: file operation failed; inspect the file before retrying", .code = if (std.mem.eql(u8, request.operation, "read")) "read_failed" else "effect_uncertain" };
+        result = (if (std.mem.eql(u8, request.operation, "bash")) shell.runObserved(allocator, request.cwd, request.args.command orelse "", request.args.timeout, cancelled orelse return error.Unsupported, progress) else if (std.mem.eql(u8, request.operation, "rex_allocate")) rex.allocate(allocator, request.cwd, request.args.plan, cancelled orelse return error.Unsupported) else execute(allocator, request)) catch |err| .{ .ok = false, .output = if (std.mem.eql(u8, request.operation, "read")) @errorName(err) else "effect_uncertain: file operation failed; inspect the file before retrying", .code = if (std.mem.eql(u8, request.operation, "read")) "read_failed" else "effect_uncertain" };
         try save(allocator, journal, name, .{ .hash = &hash, .result = result });
     }
     return std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = request.id, .result = result }, .{});
 }
 
-const Slot = struct { id: u64 = 0, cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false) };
+const Slot = struct {
+    id: u64 = 0,
+    cancelled: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    cwd_hash: [32]u8 = undefined,
+    tail: [shell.progress_limit]u8 = undefined,
+    used: usize = 0,
+    truncated: bool = false,
+    lossy: bool = false,
+};
+const ProgressContext = struct {
+    state: *State,
+    slot: *Slot,
+    fn publish(raw: *anyopaque, bytes: []const u8, truncated: bool) void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        // No pipe/disk I/O under this mutex: draining and cancellation never wait
+        // for a progress reader. Only the latest bounded sample lives here.
+        self.state.mutex.lock();
+        defer self.state.mutex.unlock();
+        const slot = self.slot;
+        @memcpy(slot.tail[0..bytes.len], bytes);
+        slot.used = bytes.len;
+        slot.truncated = truncated;
+        slot.lossy = !std.unicode.utf8ValidateSlice(bytes);
+        if (slot.lossy) for (slot.tail[0..slot.used]) |*byte| {
+            if (byte.* >= 128) byte.* = '?';
+        };
+    }
+};
 const State = struct {
     slots: [4]Slot = .{ .{}, .{}, .{}, .{} },
     mutex: std.Thread.Mutex = .{},
@@ -146,7 +174,7 @@ fn control(state: *State, fd: std.posix.fd_t) void {
         state.mutex.unlock();
     }
 }
-fn bashJob(state: *State, slot: *Slot, body: []u8) void {
+fn processJob(state: *State, slot: *Slot, body: []u8) void {
     defer state.jobs.finish();
     defer {
         state.mutex.lock();
@@ -157,7 +185,8 @@ fn bashJob(state: *State, slot: *Slot, body: []u8) void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const response = controlled(allocator, state.journal, state.machine_id, body, &slot.cancelled) catch blk: {
+    var progress = ProgressContext{ .state = state, .slot = slot };
+    const response = controlled(allocator, state.journal, state.machine_id, body, &slot.cancelled, .{ .context = &progress, .publish = ProgressContext.publish }) catch blk: {
         const id = std.fmt.allocPrint(allocator, "{d}", .{slot.id}) catch return;
         break :blk std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = id, .result = Result{ .ok = false, .output = "effect_uncertain: worker failed; inspect effects before retrying", .code = "effect_uncertain" } }, .{}) catch return;
     };
@@ -192,7 +221,32 @@ pub fn serve(read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.
         const body = allocator.alloc(u8, length) catch return;
         readExact(input, body) catch return;
         const parsed = std.json.parseFromSlice(Request, allocator, body, .{}) catch return;
-        if (std.mem.eql(u8, parsed.value.operation, "bash")) {
+        if (std.mem.eql(u8, parsed.value.operation, "bash_progress")) {
+            // Read-only ephemeral sampling, not an accepted operation or receipt.
+            // Copy under the slot mutex; serialize/write only after releasing it.
+            const request = parsed.value;
+            if (request.version != 1) return;
+            const target = std.fmt.parseInt(u64, request.args.target, 10) catch return;
+            var cwd_hash: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(request.cwd, &cwd_hash, .{});
+            var tail: [shell.progress_limit]u8 = undefined;
+            var used: usize = 0;
+            var truncated = false;
+            var lossy = false;
+            state.mutex.lock();
+            if (target != 0 and std.mem.eql(u8, request.machineId, machine_id)) for (&state.slots) |*slot| {
+                if (slot.id == target and std.mem.eql(u8, &cwd_hash, &slot.cwd_hash)) {
+                    used = slot.used;
+                    @memcpy(tail[0..used], slot.tail[0..used]);
+                    truncated = slot.truncated;
+                    lossy = slot.lossy;
+                    break;
+                }
+            };
+            state.mutex.unlock();
+            const response = std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = request.id, .progress = .{ .output = tail[0..used], .truncated = truncated, .lossyUtf8 = lossy } }, .{}) catch return;
+            state.send(response) catch return;
+        } else if (std.mem.eql(u8, parsed.value.operation, "bash") or std.mem.eql(u8, parsed.value.operation, "rex_allocate")) {
             const id = std.fmt.parseInt(u64, parsed.value.id, 10) catch return;
             state.mutex.lock();
             var selected: ?*Slot = null;
@@ -203,6 +257,10 @@ pub fn serve(read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.
             if (!duplicate and id != 0) for (&state.slots) |*slot| {
                 if (slot.id == 0) {
                     slot.id = id;
+                    slot.used = 0;
+                    slot.truncated = false;
+                    slot.lossy = false;
+                    std.crypto.hash.sha2.Sha256.hash(parsed.value.cwd, &slot.cwd_hash, .{});
                     var cancelled = state.stopping.load(.acquire);
                     for (state.cancelled_ids) |prior| {
                         if (prior == id) cancelled = true;
@@ -216,7 +274,7 @@ pub fn serve(read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.
             if (selected) |slot| {
                 const copy = std.heap.page_allocator.dupe(u8, body) catch return;
                 state.jobs.start();
-                const thread = std.Thread.spawn(.{}, bashJob, .{ &state, slot, copy }) catch {
+                const thread = std.Thread.spawn(.{}, processJob, .{ &state, slot, copy }) catch {
                     state.jobs.finish();
                     std.heap.page_allocator.free(copy);
                     state.mutex.lock();
@@ -226,7 +284,7 @@ pub fn serve(read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.
                 };
                 thread.detach();
             } else {
-                const response = std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = parsed.value.id, .result = Result{ .ok = false, .output = if (duplicate) "busy: operation already active; original effects may be underway; not repeated" else "busy: native bash capacity reached; command not accepted", .code = "busy" } }, .{}) catch return;
+                const response = std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = parsed.value.id, .result = Result{ .ok = false, .output = if (duplicate) "busy: operation already active; original effects may be underway; not repeated" else "busy: native process capacity reached; command not accepted", .code = "busy" } }, .{}) catch return;
                 state.send(response) catch return;
             }
         } else {

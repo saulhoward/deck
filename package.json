@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc -p runtime/tsconfig.json",
     "check": "tsc -p runtime/tsconfig.json --noEmit",
-    "test": "npm run build && node --test runtime/dist/*.test.js"
+    "test": "npm run build && node --test --test-concurrency=4 runtime/dist/*.test.js"
   },
   "dependencies": {
     "@earendil-works/chord": "1.4.0",

@@ -2,9 +2,12 @@
 import { createHash, randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { Models } from "@earendil-works/pi-ai/models";
-import { createRegistry, configure as configureAgent, defineDoc, defineDocFamily, Harness, LiveDoc, InboxDoc, type ConversationId, type Conversation, type AgentChange, type Cursor } from "@earendil-works/pi-durable";
+import { AgentDoc, createRegistry, configure as configureAgent, defineDoc, defineDocFamily, Harness, LiveDoc, InboxDoc, type ConversationId, type Conversation, type AgentChange, type Cursor, type TaskId } from "@earendil-works/pi-durable";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
+import { instructionSnapshot, projectInstructionTask } from "./instructions-view.js";
 import { projectProgress } from "./progress.js";
+import { configurationIdle, importingInstructions, instructionHash, instructionImport, IMPORT_KIND, InstructionRequest, InstructionSourceDoc, type InstructionImportResult } from "./instruction-import.js";
+import { REX_KIND, rexAllocation, RexDoc, RexRequest, rexCoherent, rexTarget, rexUuid, rexBlock, rexStartup, type RexInput, type RexTarget, type RexResult } from "./rex-allocation.js";
 import { bindImplementation, checkCompatibility, defaultImplementation, stampImplementation } from "./compatibility.js";
 import { nativeFiles, type HostFiles } from "./host-files.js";
 import { foregroundSubagent } from "./subagent.js";
@@ -55,7 +58,7 @@ export type RuntimeOptions = {
 
 export class DeckRuntime {
   private tail: Promise<unknown> = Promise.resolve();
-  private constructor(readonly harness: Harness, readonly main: Conversation, private readonly guard: () => Promise<void>, readonly localFiles: boolean, readonly hubId: string, readonly implementation: string) {}
+  private constructor(readonly harness: Harness, readonly main: Conversation, private readonly guard: () => Promise<void>, readonly localFiles: boolean, readonly hubId: string, readonly implementation: string, private readonly instructionTask: ReturnType<typeof instructionImport>["task"], private readonly rexTask: ReturnType<typeof rexAllocation>["task"]) {}
 
   static async open(path: string, options: RuntimeOptions): Promise<DeckRuntime> {
     let runtime: DeckRuntime | undefined;
@@ -70,6 +73,8 @@ export class DeckRuntime {
     registry.install(control);
     registry.install(foregroundSubagent(control));
     if (options.hostFiles) registry.install(nativeFiles(options.hostFiles));
+    const importer = instructionImport(options.hostFiles); registry.install(importer.extension);
+    const rex = rexAllocation(options.hostFiles); registry.install(rex.extension);
     const implementation = bindImplementation(options.implementation ?? await defaultImplementation(), !!options.hostFiles);
     const storage = await openNodeSqliteStorage(path);
     try { await checkCompatibility(storage, implementation); }
@@ -105,7 +110,7 @@ export class DeckRuntime {
       }
       const hubId = await harness.commit(async (tx) => (await tx.doc(Identity)).id, context);
       // Bind Deck tool callbacks before recovered Pi tool tasks can run.
-      runtime = new DeckRuntime(harness, main, options.admissionGuard ?? (async () => {}), !!options.hostFiles, hubId, implementation);
+      runtime = new DeckRuntime(harness, main, options.admissionGuard ?? (async () => {}), !!options.hostFiles, hubId, implementation, importer.task, rex.task);
       harness.resume();
       return runtime;
     } catch (error) {
@@ -179,13 +184,20 @@ export class DeckRuntime {
       }
       const chat = await this.chat(id);
       if ((await this.harness.snapshot(ChatDoc, chat.id, context))?.kind === "subagent") throw new DeckError("invalid", "Subagent chats accept input only through their owning tool; inspect or stop them instead");
-      const existing = await chat.commit((tx) => tx.submissionByRequest(chat.id, input.requestId), context);
+      const existing = await chat.commit(async (tx) => {
+        const existing = await tx.submissionByRequest(chat.id, input.requestId);
+        // Check before resolving the agent: the import applies outside this serial
+        // admission line, so a later-only check could capture pre-apply instructions.
+        if (!existing && await importingInstructions(tx, chat.id)) throw new DeckError("busy", "Conversation is importing instructions; wait for its Pi task to settle");
+        return existing;
+      }, context);
       signal?.throwIfAborted();
       if (!existing) await this.guard();
       signal?.throwIfAborted();
       const hash = createHash("sha256").update(JSON.stringify(origin ? [input.text, input.mode, origin] : [input.text, input.mode])).digest("hex");
       const agent = await chat.agent(context);
       const capture = await chat.commit(async (tx) => {
+        if (!existing && await importingInstructions(tx, chat.id)) throw new DeckError("busy", "Conversation is importing instructions; wait for its Pi task to settle");
         const binding = await tx.doc(ChatDoc, chat.id);
         if (!existing && agent.cwd !== binding.cwd) throw new DeckError("invalid", "Agent cwd differs from its saved tool binding");
         // An admission observation, not a per-input override of Pi's later request resolution.
@@ -220,19 +232,124 @@ export class DeckRuntime {
     });
   }
 
+  // Internal operator API only. Returns durable admission to a Pi task, not application
+  // success. Callers keep requestId across lost replies and inspect/wait on that task.
+  importInstructions(id: string, requestId: string, signal?: AbortSignal, expectedBinding?: Binding): Promise<TaskId<InstructionImportResult>> {
+    return this.serial(async () => {
+      signal?.throwIfAborted();
+      if (typeof requestId !== "string" || !requestId || requestId.length > 200) throw new DeckError("invalid", "Invalid instruction import request ID");
+      const chat = await this.chat(id);
+      return chat.commit(async (tx) => {
+        const receipt = await tx.doc(InstructionRequest, chat.id, requestId, null);
+        if (receipt.taskId) {
+          const original = (await tx.task(receipt.taskId as TaskId))?.input as { binding?: Binding } | undefined;
+          if (expectedBinding && (original?.binding?.machineId !== expectedBinding.machineId || original?.binding?.cwd !== expectedBinding.cwd)) throw new DeckError("conflict", "Instruction import ID already used with another binding");
+          return receipt.taskId as TaskId<InstructionImportResult>;
+        }
+        const binding = await tx.doc(ChatDoc, chat.id); const agent = await tx.doc(AgentDoc, chat.id);
+        if (!binding || !["main", "task"].includes(binding.kind) || (await tx.conversation(chat.id))?.owner) throw new DeckError("invalid", "Instruction imports require a managed ownerless chat");
+        if (!binding.machineId || !binding.cwd.startsWith("/") || agent?.cwd !== binding.cwd) throw new DeckError("invalid", "Instruction import requires a coherent saved tool binding");
+        if (expectedBinding && (expectedBinding.machineId !== binding.machineId || expectedBinding.cwd !== binding.cwd)) throw new DeckError("settings_changed", "Saved instruction host/cwd changed; discard the draft explicitly before starting a new import");
+        if (!this.localFiles) throw new DeckError("offline", "Instruction import requires the assigned native worker");
+        if (!await configurationIdle(tx, chat.id)) throw new DeckError("busy", "Conversation has unfinished work; stop/drain it before importing instructions");
+        signal?.throwIfAborted();
+        const taskId = await tx.createTask(this.instructionTask, { binding: { machineId: binding.machineId, cwd: binding.cwd }, previousHash: instructionHash(agent.instructions) }, { ownership: { kind: "conversation" } });
+        receipt.taskId = taskId; return taskId;
+      }, context);
+    });
+  }
+
+  // Internal trusted operator API. No wire/model command or default Rex server.
+  // One attempt per chat, including failures/abort: no automatic replacement.
+  allocateTerminal(id: string, requestId: string, target: RexTarget, signal?: AbortSignal, expectedBinding?: Binding): Promise<TaskId<RexResult>> {
+    return this.serial(async () => {
+      signal?.throwIfAborted();
+      if (typeof requestId !== "string" || !requestId || requestId.length > 200) throw new DeckError("invalid", "Invalid Rex allocation request ID");
+      let saved: RexTarget;
+      try { saved = rexTarget(target); } catch { throw new DeckError("invalid", "Rex allocation needs an explicit local target and client"); }
+      const hash = createHash("sha256").update(JSON.stringify([id, this.hubId, saved])).digest("hex");
+      const chat = await this.chat(id);
+      return chat.commit(async (tx) => {
+        const receipt = await tx.doc(RexRequest, chat.id, requestId, hash);
+        if (receipt.hash !== hash) throw new DeckError("conflict", "Rex allocation request ID reused with different launch arguments");
+        if (receipt.taskId) {
+          const original = (await tx.task(receipt.taskId as TaskId))?.input as { binding: Binding } | undefined;
+          if (expectedBinding && (original?.binding.machineId !== expectedBinding.machineId || original?.binding.cwd !== expectedBinding.cwd)) throw new DeckError("conflict", "Rex allocation request ID reused with another host/cwd");
+          return receipt.taskId as TaskId<RexResult>;
+        }
+        if (!await rexCoherent(tx, chat.id)) throw new DeckError("invalid", "Rex allocation requires a managed ownerless task with a coherent saved worker/cwd");
+        const current = await tx.doc(ChatDoc, chat.id);
+        if (expectedBinding && (current.machineId !== expectedBinding.machineId || current.cwd !== expectedBinding.cwd)) throw new DeckError("settings_changed", "Saved Rex worker/cwd changed");
+        if (!this.localFiles) throw new DeckError("offline", "Rex allocation requires the assigned native worker");
+        const doc = await tx.doc(RexDoc, chat.id);
+        if (doc.taskId) throw new DeckError("conflict", "This chat already has a Rex allocation attempt; inspect its original Pi task. Replacement/adoption is not implemented");
+        const plan = { ...saved, chatId: id, hubId: this.hubId, label: `deck-${this.hubId.slice(0, 8)}-chat-${id}`, allocationId: randomUUID() };
+        if (Buffer.byteLength(JSON.stringify(plan)) > 16 * 1024) throw new DeckError("invalid", "Rex launch intent is too large");
+        signal?.throwIfAborted();
+        const taskId = await tx.createTask(this.rexTask, { binding: { machineId: current.machineId, cwd: current.cwd }, plan }, { ownership: { kind: "conversation" } });
+        doc.taskId = taskId; doc.allocationId = plan.allocationId; receipt.taskId = taskId;
+        return taskId;
+      }, context);
+    });
+  }
+
+  async terminalBinding(id: string) {
+    const chat = await this.chat(id);
+    return (await this.harness.snapshot(RexDoc, chat.id, context))?.binding;
+  }
+
+  // Startup observation only: never adopts objects, restarts work, or reports
+  // current health. The client uses its native REX_BLOCK, not a block argv flag.
+  registerTerminalStartup(id: string, allocationId: string, blockId: string) {
+    return this.serial(async () => {
+      if (!rexUuid(allocationId) || !rexBlock(blockId)) throw new DeckError("invalid", "Invalid Rex startup identity");
+      const chat = await this.chat(id);
+      return chat.commit(async (tx) => {
+        const doc = await tx.doc(RexDoc, chat.id);
+        const task = doc.taskId ? await tx.task(doc.taskId as TaskId) : undefined;
+        const input = task?.input as RexInput | undefined;
+        if (!task || task.kind !== REX_KIND || task.conversationId !== chat.id || doc.allocationId !== allocationId || input?.plan.allocationId !== allocationId || input.plan.hubId !== this.hubId || input.plan.chatId !== id) throw new DeckError("conflict", "Rex startup does not match the saved allocation intent");
+        if (!await rexCoherent(tx, chat.id, input.binding)) throw new DeckError("settings_changed", "Rex startup requires the original ownerless task worker/cwd");
+        if ((doc.startup && doc.startup.blockId !== blockId) || (doc.binding && doc.binding.blockId !== blockId)) throw new DeckError("conflict", "Rex startup block conflicts with saved allocation evidence");
+        doc.startup = { blockId };
+        return { ...rexStartup(id, doc), allocationId, blockId, registered: true as const };
+      }, context);
+    });
+  }
+
+  async terminalStartup(id: string) {
+    const chat = await this.chat(id);
+    return rexStartup(id, await this.harness.snapshot(RexDoc, chat.id, context));
+  }
+
+  async instructionSource(id: string) {
+    const chat = await this.chat(id);
+    const source = (await this.harness.snapshot(InstructionSourceDoc, chat.id, context))?.source;
+    return source && source.sha256 === instructionHash((await chat.agent(context)).instructions) ? source : undefined;
+  }
+
+  async instructionsStatus(id: string, taskId?: string) {
+    const chat = await this.chat(id);
+    const task = await chat.commit(async (tx) => {
+      if (taskId === undefined) return (await tx.scanTasks({ conversationId: chat.id, kind: IMPORT_KIND, order: "descending" }, 1)).items[0];
+      const task = await tx.task(positiveId(taskId, "instruction task") as TaskId);
+      if (!task || task.conversationId !== chat.id || task.kind !== IMPORT_KIND) throw new DeckError("not_found", "Unknown instruction import in selected chat");
+      return task;
+    }, context);
+    return instructionSnapshot(String(chat.id), await this.instructionSource(id), projectInstructionTask(task));
+  }
+
   configure(id: string, change: AgentChange) {
     return this.serial(async () => {
       const chat = await this.chat(id);
       return chat.commit(async (tx) => {
         // Query Pi's authoritative work records, not a second execution tracker. This
         // includes pending/parked/background work and effects still draining after stop.
-        for (const status of ["pending", "running", "waiting", "sleeping", "completing"] as const) {
-          if ((await tx.scanTasks({ conversationId: chat.id, status }, 1)).items.length) throw new DeckError("busy", "Conversation has unfinished work; stop/drain it before configuring");
-        }
-        if ((await tx.doc(InboxDoc, chat.id)).items.length) throw new DeckError("busy", "Conversation has queued input; resolve it before configuring");
+        if (!await configurationIdle(tx, chat.id)) throw new DeckError("busy", "Conversation has unfinished work; stop/drain it before configuring");
         const binding = await tx.doc(ChatDoc, chat.id);
         if (change.cwd !== undefined && change.cwd !== binding.cwd) throw new DeckError("invalid", "Configure cannot move or clear the saved tool-host cwd");
         await configureAgent(tx, chat.id, change);
+        if (change.instructions !== undefined) delete (await tx.doc(InstructionSourceDoc, chat.id)).source;
       }, context);
     });
   }

@@ -24,8 +24,11 @@ const help =
     \\Nix installs the runtime and Node privately. Checkout builds need npm run build.
     \\The plain client supports /tasks, /select CHAT_ID, /main, /task TITLE,
     \\/older, /activity, /stop, /status and /exit.
+    \\/instructions load imports saved-worker AGENTS.md only while idle, replacing
+    \\explicit instructions. /instructions [TASK_ID] reads source/import status.
+    \\Import admission is not application; no automatic project-file loading.
     \\Sampled answer previews are provisional; retained history is authoritative.
-    \\Native bash output is shown only when the operation settles.
+    \\Native bash shows sampled provisional output tails; final results are separate.
     \\Drafts save before sending. /draft, /drafts, /recover REQUEST_ID,
     \\/retry and /discard [REQUEST_ID] manage unresolved requests; no auto replay.
     \\Models can inspect existing chats with task_list/task_history/task_activity.
@@ -39,7 +42,7 @@ const help =
     \\Restore preserves identity/bindings and refuses existing destinations.
     \\Restoring old state can repeat later external effects; reconcile before serving.
     \\Backups exclude credentials unless explicitly requested; treat all as sensitive.
-    \\Remote workers and TUI are not yet available.
+    \\Public Rex allocation/reopen, remote workers and TUI are not yet available.
     \\
 ;
 

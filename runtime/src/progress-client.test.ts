@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { clientEnv } from "./client.test.env.js";
 function preview(chatId: string, text: string, attempt = 1) {
-  return { version: 1, chatId, provisional: true, runTaskId: "42", generation: { text, attempt, phase: "generating", arguments: "PRIVATE_ARGUMENTS", reasoning: "HIDDEN_REASONING" }, private: "PRIVATE_METADATA" };
+  return { version: 1, chatId, provisional: true, runTaskId: "42", generation: { text, attempt, phase: "generating", arguments: "PRIVATE_ARGUMENTS", reasoning: "HIDDEN_REASONING" }, tools: [{ taskId: "43", name: "bash", text: text.startsWith("STALE_") ? "STALE_SELECTION_BASH" : chatId === "2" ? "BASH_SECOND" : "BASH_ACTIVE\x1b[31m", arguments: "PRIVATE_BASH_ARGUMENTS" }], private: "PRIVATE_METADATA" };
 }
 async function waitFor(condition: () => boolean) {
   for (let index = 0; index < 600; index++) { if (condition()) return; await new Promise((resolve) => setTimeout(resolve, 10)); }
@@ -22,12 +22,12 @@ test("plain previews are bounded/sanitized snapshots; outages, replacements and 
     const { command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { command: string; args: Record<string, unknown> };
     if (command === "stop") stopCalls++;
     if (command === "status") { response.end(JSON.stringify({ ok: true, result: { chatId: args.chatId ?? "1", mainChatId: "1", hubId: "progress-client", model: {} } })); return; }
-    assert.equal(command, "history"); assert.equal(args.includeProgress, true); polls++;
+    assert.equal(command, "history"); assert.equal(args.includeProgress, true); assert.equal(args.includeInstructions, true); polls++;
     if (failNext) { failNext = false; failed = true; response.writeHead(503); response.end(); return; }
     const chatId = String(args.chatId);
     if (holdOld && chatId === "1") {
       holdOld = false;
-      releaseOld = () => response.end(JSON.stringify({ ok: true, result: { items: [], progress: preview("1", "STALE_SELECTION_MUST_NOT_PRINT") } })); return;
+      releaseOld = () => response.end(JSON.stringify({ ok: true, result: { items: [], progress: preview("1", "STALE_SELECTION_MUST_NOT_PRINT"), instructions: { version: 1, chatId: "1", source: { machineId: "STALE_SELECTION_INSTRUCTION_SOURCE", cwd: "/old", path: "AGENTS.md", sha256: "a".repeat(64), bytes: 1, taskId: "9" }, import: null } } })); return;
     }
     response.end(JSON.stringify({ ok: true, result: {
       items: chatId === "1" && settled && args.after === "0" ? [{ id: 1, kind: "pi.assistant", model: [{ content: [{ type: "text", text: final }] }] }] : [],
@@ -41,17 +41,19 @@ test("plain previews are bounded/sanitized snapshots; outages, replacements and 
   client.stdout.on("data", (chunk) => { output += String(chunk); }); client.stderr.on("data", (chunk) => { errors += String(chunk); });
   try {
     await waitFor(() => polls >= 3); assert.equal((output.match(/FIRST_PARTIAL/g) ?? []).length, 1);
+    assert.equal((output.match(/BASH_ACTIVE/g) ?? []).length, 1); assert.match(output, /bash output preview \(provisional snapshot\)/);
     failNext = true; await waitFor(() => failed && errors.includes("Hub unavailable")); await waitFor(() => errors.includes("Hub reconnected"));
     assert.equal((output.match(/FIRST_PARTIAL/g) ?? []).length, 1);
     text = "REPLACED_PREVIEW"; await waitFor(() => output.includes("REPLACED_PREVIEW"));
     attempt = 2; await waitFor(() => output.includes('"attempt":2')); assert.equal((output.match(/REPLACED_PREVIEW/g) ?? []).length, 2);
     text = "HEAD_MUST_CLIP" + "x".repeat(10_000) + "TAIL_PREVIEW";
     await waitFor(() => output.includes("TAIL_PREVIEW")); assert.match(output, /"textClipped":true/); assert.doesNotMatch(output, /HEAD_MUST_CLIP/);
-    settled = true; await waitFor(() => output.includes(final) && output.includes("preview cleared"));
+    settled = true; await waitFor(() => output.includes(final) && output.includes("bash output preview cleared"));
+    assert.equal((output.match(/BASH_ACTIVE/g) ?? []).length, 1);
     const before = polls; await waitFor(() => polls >= before + 2); assert.equal((output.match(/FINAL_CANONICAL_/g) ?? []).length, 1);
     holdOld = true; await waitFor(() => !!releaseOld);
     client.stdin.write("/select 2\n"); await waitFor(() => output.includes("Selected chat 2"));
-    const sendOld = releaseOld!; releaseOld = undefined; sendOld(); await waitFor(() => output.includes("SECOND_CHAT"));
+    const sendOld = releaseOld!; releaseOld = undefined; sendOld(); await waitFor(() => output.includes("SECOND_CHAT") && output.includes("BASH_SECOND"));
     client.stdin.end("/exit\n"); assert.equal((await closed)[0], 0, errors);
     assert.doesNotMatch(output, /PRIVATE_|HIDDEN_|STALE_SELECTION_|\x1b/); assert.equal(stopCalls, 0);
     const lines = output.split("\n").filter((line) => line.startsWith("assistant preview ("));
@@ -73,6 +75,7 @@ for (const detach of ["exit", "SIGINT"] as const) test(`blocked stdout backpress
     response.end(JSON.stringify({ ok: true, result: {
       items: polls === 2 ? [{ id: 1, kind: "pi.assistant", model: [{ content: [{ type: "text", text: "x".repeat(500_000) }] }] }] : [],
       progress: polls === 1 ? { version: 1, chatId: "1", provisional: true } : preview(String(args.chatId), `snapshot-${polls}`),
+      instructions: { version: 1, chatId: String(args.chatId), source: null, import: { taskId: String(polls), state: "running" } },
     } }));
   });
   server.listen(0, "127.0.0.1"); await once(server, "listening"); const address = server.address(); assert.ok(address && typeof address !== "string");

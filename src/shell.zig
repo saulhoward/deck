@@ -1,15 +1,40 @@
 const std = @import("std");
 pub const Result = struct { ok: bool, output: []const u8, code: []const u8 = "ok", exitCode: ?u8 = null, truncated: bool = false };
 const limit = 64 * 1024;
+pub const progress_limit = 2048;
+pub const Progress = struct {
+    context: *anyopaque,
+    // A replacement tail, never an append delta. Must not perform I/O or retain the slice.
+    publish: *const fn (*anyopaque, []const u8, bool) void,
+};
 
 pub fn run(allocator: std.mem.Allocator, cwd: []const u8, command: []const u8, seconds: u32, cancelled: *std.atomic.Value(bool)) !Result {
-    if (!std.fs.path.isAbsolute(cwd) or command.len == 0 or seconds == 0 or seconds > 300) return error.InvalidArguments;
+    return runObserved(allocator, cwd, command, seconds, cancelled, null);
+}
+pub fn runObserved(allocator: std.mem.Allocator, cwd: []const u8, command: []const u8, seconds: u32, cancelled: *std.atomic.Value(bool), progress: ?Progress) !Result {
+    if (command.len == 0) return error.InvalidArguments;
+    return runArgv(allocator, cwd, &.{ "bash", "--noprofile", "--norc", "-c", command }, seconds, cancelled, progress, false);
+}
+// Shared owned-process runner. Raw mode is for bounded native CLI JSON, not a
+// model tool: malformed/truncated/lossy output cannot become a trusted result.
+pub fn runArgv(allocator: std.mem.Allocator, cwd: []const u8, argv: []const []const u8, seconds: u32, cancelled: *std.atomic.Value(bool), progress: ?Progress, raw: bool) !Result {
+    if (!std.fs.path.isAbsolute(cwd) or argv.len == 0 or seconds == 0 or seconds > 300) return error.InvalidArguments;
     if (cancelled.load(.acquire)) return .{ .ok = false, .output = "Cancelled before spawn", .code = "cancelled" };
     var env = try std.process.getEnvMap(allocator);
     defer env.deinit();
     env.remove("BASH_ENV");
     env.remove("OPENAI_API_KEY"); // Model credentials are hub inputs, not shell defaults.
-    var child = std.process.Child.init(&.{ "bash", "--noprofile", "--norc", "-c", command }, allocator);
+    if (raw) {
+        // CLI transport gets no hub credentials, ambient Rex routing/focus,
+        // loader/Node injection or Deck runtime overrides. Rex launches the
+        // client from its own environment, using our packaged client wrapper.
+        var clean = std.process.EnvMap.init(allocator);
+        errdefer clean.deinit();
+        for ([_][]const u8{ "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "TERM" }) |key| if (env.get(key)) |value| try clean.put(key, value);
+        env.deinit();
+        env = clean;
+    }
+    var child = std.process.Child.init(argv, allocator);
     child.cwd = cwd;
     child.env_map = &env;
     child.pgid = 0;
@@ -47,6 +72,8 @@ pub fn run(allocator: std.mem.Allocator, cwd: []const u8, command: []const u8, s
     var stopping: ?u64 = null;
     var reason: []const u8 = "ok";
     var status: ?u32 = null;
+    var dirty = false;
+    var published: ?u64 = null;
     while (true) {
         const now = timer.read();
         if (stopping == null and (cancelled.load(.acquire) or now >= @as(u64, seconds) * std.time.ns_per_s)) {
@@ -82,7 +109,14 @@ pub fn run(allocator: std.mem.Allocator, cwd: []const u8, command: []const u8, s
             }
             @memcpy(tail[used .. used + count], chunk[0..count]);
             used += count;
+            dirty = true;
         }
+        if (progress) |sink| if (dirty and (published == null or now - published.? >= 250 * std.time.ns_per_ms)) {
+            const start = used - @min(used, progress_limit);
+            sink.publish(sink.context, tail[start..used], truncated or start > 0);
+            published = now;
+            dirty = false;
+        };
         if (status == null) {
             const result = std.posix.waitpid(pid, std.posix.W.NOHANG);
             if (result.pid != 0) {
@@ -106,5 +140,6 @@ pub fn run(allocator: std.mem.Allocator, cwd: []const u8, command: []const u8, s
             byte.* = '?';
         };
     }
+    if (raw) return .{ .ok = exit_code == 0 and std.mem.eql(u8, reason, "ok") and !lossy and !truncated, .output = try allocator.dupe(u8, tail[0..used]), .code = if (lossy or truncated) "invalid_output" else if (std.mem.eql(u8, reason, "ok") and exit_code != 0) "exit_nonzero" else reason, .exitCode = exit_code, .truncated = truncated };
     return .{ .ok = exit_code == 0 and std.mem.eql(u8, reason, "ok"), .output = try std.fmt.allocPrint(allocator, "exitCode={d} status={s} truncated={} lossyUtf8={}\n{s}", .{ exit_code, reason, truncated, lossy, tail[0..used] }), .code = if (std.mem.eql(u8, reason, "ok") and exit_code != 0) "exit_nonzero" else reason, .exitCode = exit_code, .truncated = truncated };
 }

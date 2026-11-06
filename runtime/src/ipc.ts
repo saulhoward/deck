@@ -14,6 +14,10 @@ function text(value: unknown, name: string): string {
 }
 
 async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, login?: Login): Promise<unknown> {
+  if (request.hubId !== undefined) {
+    if (typeof request.hubId !== "string" || !request.hubId || request.hubId.length > 200) throw new DeckError("invalid", "Invalid expected hub identity");
+    if (request.hubId !== runtime.hubId) throw new DeckError("conflict", "Hub identity changed; reconnect to the intended hub. No command applied");
+  }
   const args = object(request.args ?? {});
   switch (request.command) {
     case "login_start": if (!login) throw new DeckError("invalid", "ChatGPT login requires the hub's default ChatGPT mode"); return login.start(text(args.requestId, "requestId"));
@@ -28,7 +32,12 @@ async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, 
     }
     case "status": {
       const chat = args.chatId === undefined ? runtime.main : await runtime.chat(text(args.chatId, "chatId"));
-      return { implementation: runtime.implementation, hubId: runtime.hubId, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding: await runtime.harness.snapshot(ChatDoc, chat.id, context), activity: await runtime.harness.inspect(context), provider: (await chat.agent(context)).model?.provider, model: (await chat.agent(context)).model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
+      return { implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, rexStartup: 1, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding: await runtime.harness.snapshot(ChatDoc, chat.id, context), activity: await runtime.harness.inspect(context), provider: (await chat.agent(context)).model?.provider, model: (await chat.agent(context)).model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
+    }
+    case "rex_startup": {
+      if (request.hubId !== runtime.hubId) throw new DeckError("invalid", "Rex startup requires an explicit expected hub identity");
+      if (Object.keys(args).some((key) => !["chatId", "allocationId", "blockId"].includes(key))) throw new DeckError("invalid", "Invalid Rex startup arguments");
+      return runtime.registerTerminalStartup(text(args.chatId, "chatId"), text(args.allocationId, "allocationId"), text(args.blockId, "blockId"));
     }
     case "activity": return runtime.activity(args.chatId === undefined ? String(runtime.main.id) : text(args.chatId, "chatId"));
     case "progress": return runtime.progress(args.chatId === undefined ? String(runtime.main.id) : text(args.chatId, "chatId"));
@@ -40,6 +49,16 @@ async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, 
       const chat = await runtime.createTask(text(args.title, "title"), { machineId: text(args.machineId, "machineId"), cwd: text(args.cwd, "cwd") }, text(args.requestId, "requestId"));
       return { chatId: String(chat.id) };
     }
+    case "import_instructions": {
+      if (Object.keys(args).some((key) => !["chatId", "requestId", "machineId", "cwd"].includes(key))) throw new DeckError("invalid", "Instruction import accepts only a saved chat/binding and request ID; path is fixed to AGENTS.md");
+      const chatId = text(args.chatId, "chatId"); const requestId = text(args.requestId, "requestId");
+      const taskId = await runtime.importInstructions(chatId, requestId, undefined, { machineId: text(args.machineId, "machineId"), cwd: text(args.cwd, "cwd") });
+      return { chatId, requestId, taskId: String(taskId), admitted: true, completion: "not_waited" };
+    }
+    case "instruction_status": {
+      if (Object.keys(args).some((key) => !["chatId", "taskId"].includes(key))) throw new DeckError("invalid", "Invalid instruction status arguments");
+      return runtime.instructionsStatus(args.chatId === undefined ? String(runtime.main.id) : text(args.chatId, "chatId"), args.taskId === undefined ? undefined : text(args.taskId, "taskId"));
+    }
     case "admit": {
       if (args.mode !== "steer" && args.mode !== "followUp") throw new DeckError("invalid", "Invalid admission mode");
       const submission = await runtime.admit(text(args.chatId, "chatId"), { requestId: text(args.requestId, "requestId"), text: text(args.text, "text"), mode: args.mode });
@@ -49,12 +68,13 @@ async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, 
       if (args.limit !== undefined && typeof args.limit !== "number") throw new DeckError("invalid", "Invalid limit");
       if (args.includeActivity !== undefined && typeof args.includeActivity !== "boolean") throw new DeckError("invalid", "Invalid includeActivity");
       if (args.includeProgress !== undefined && typeof args.includeProgress !== "boolean") throw new DeckError("invalid", "Invalid includeProgress");
+      if (args.includeInstructions !== undefined && typeof args.includeInstructions !== "boolean") throw new DeckError("invalid", "Invalid includeInstructions");
       const id = text(args.chatId, "chatId");
       const page = await runtime.history(id, { ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.before === undefined ? {} : { before: text(args.before, "before") }), ...(args.after === undefined ? {} : { after: text(args.after, "after") }) });
       const canonical = { ...page, ...(args.includeActivity ? { activity: await runtime.activity(id) } : {}) };
-      if (!args.includeProgress) return canonical;
-      const combined = { ...canonical, progress: await runtime.progress(id) };
-      // Optional previews must never make an otherwise fitting history page fail.
+      if (!args.includeProgress && !args.includeInstructions) return canonical;
+      const combined = { ...canonical, ...(args.includeProgress ? { progress: await runtime.progress(id) } : {}), ...(args.includeInstructions ? { instructions: await runtime.instructionsStatus(id) } : {}) };
+      // Optional previews/instruction samples never make fitting canonical history fail.
       // Canonical oversize pages still get the usual too_large/adaptive retry path.
       try { encodeFrame({ version: PROTOCOL_VERSION, id: request.id, ok: true, result: combined }); }
       catch { return canonical; }

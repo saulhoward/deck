@@ -7,13 +7,15 @@ import { ChatDoc, type Binding } from "./deck.js";
 
 type Args = Record<string, string | number | undefined>;
 export type FileResult = { ok: boolean; output: string; code?: string; exitCode?: number | null; truncated?: boolean };
-export interface HostFiles { call(binding: Binding, id: string, operation: string, args: Args, signal?: AbortSignal): Promise<FileResult>; }
+export type ShellProgress = { output: string; truncated: boolean; lossyUtf8: boolean };
+export interface HostFiles { call(binding: Binding, id: string, operation: string, args: Args, signal?: AbortSignal, onProgress?: (progress: ShellProgress) => void): Promise<FileResult>; }
+type Pending = { reject: (error: Error) => void } & ({ kind: "result"; resolve: (result: FileResult) => void } | { kind: "progress"; resolve: (result: ShellProgress) => void });
 
 export class PipeFiles implements HostFiles {
   private readonly reader;
   private readonly writer;
   private readonly control;
-  private readonly pending = new Map<string, { resolve: (result: FileResult) => void; reject: (error: Error) => void }>();
+  private readonly pending = new Map<string, Pending>();
   private failed = false;
   private closing: Promise<void> | undefined;
   private readonly decoder = new FrameDecoder();
@@ -33,36 +35,62 @@ export class PipeFiles implements HostFiles {
     void (async () => {
       try {
         for await (const raw of decoder) {
-          const value = raw as { version?: unknown; id?: unknown; result?: FileResult };
-          if (value.version !== 1 || typeof value.id !== "string" || typeof value.result?.ok !== "boolean" || typeof value.result.output !== "string") throw new Error("Invalid worker response");
+          const value = raw as { version?: unknown; id?: unknown; result?: FileResult; progress?: ShellProgress };
+          if (value.version !== 1 || typeof value.id !== "string") throw new Error("Invalid worker response");
           const pending = this.pending.get(value.id);
           if (!pending) throw new Error("Unexpected worker response");
-          this.pending.delete(value.id); pending.resolve(value.result);
+          if (pending.kind === "progress") {
+            const sample = value.progress;
+            if (value.result !== undefined || typeof sample?.output !== "string" || Buffer.byteLength(sample.output) > 2048 || typeof sample.truncated !== "boolean" || typeof sample.lossyUtf8 !== "boolean") throw new Error("Invalid worker progress");
+            this.pending.delete(value.id); pending.resolve({ output: sample.output, truncated: sample.truncated, lossyUtf8: sample.lossyUtf8 });
+          } else {
+            if (value.progress !== undefined || typeof value.result?.ok !== "boolean" || typeof value.result.output !== "string") throw new Error("Invalid worker result");
+            this.pending.delete(value.id); pending.resolve(value.result);
+          }
         }
       } catch { /* Fail closed, never resend an issued effect. */ }
       finally { fail(); }
     })();
   }
-  async call(binding: Binding, id: string, operation: string, args: Args, signal?: AbortSignal): Promise<FileResult> {
-    signal?.throwIfAborted();
-    if (operation === "bash" && !this.control) throw new Error("offline: shell cancellation channel unavailable");
-    if (this.failed) throw new Error("offline: local worker unavailable");
-    if (this.pending.size >= 16 || this.pending.has(id)) throw new Error("busy: native operation capacity reached");
-    const frame = encodeFrame({ version: 1, id, ...binding, operation, args });
+  private sample(binding: Binding, target: string): Promise<ShellProgress> | undefined {
+    const id = `progress:${target}`;
+    if (this.failed || [...this.pending.values()].filter((item) => item.kind === "progress").length >= 4 || this.pending.has(id)) return;
+    const frame = encodeFrame({ version: 1, id, ...binding, operation: "bash_progress", args: { target } });
     return new Promise((resolve, reject) => {
+      this.pending.set(id, { kind: "progress", resolve, reject });
+      this.writer.write(frame, (error) => {
+        if (error) { this.pending.get(id)?.reject(new Error("Progress unavailable")); this.pending.delete(id); }
+      });
+    });
+  }
+  async call(binding: Binding, id: string, operation: string, args: Args, signal?: AbortSignal, onProgress?: (progress: ShellProgress) => void): Promise<FileResult> {
+    signal?.throwIfAborted();
+    const processOperation = operation === "bash" || operation === "rex_allocate";
+    if (processOperation && !this.control) throw new Error("offline: process cancellation channel unavailable");
+    if (this.failed) throw new Error("offline: local worker unavailable");
+    if ([...this.pending.values()].filter((item) => item.kind === "result").length >= 16 || this.pending.has(id)) throw new Error("busy: native operation capacity reached");
+    const frame = encodeFrame({ version: 1, id, ...binding, operation, args });
+    let ended = false;
+    const timer = operation === "bash" && onProgress ? setInterval(() => {
+      if (ended || signal?.aborted) return;
+      void this.sample(binding, id)?.then((sample) => {
+        if (!ended && !signal?.aborted) { try { onProgress(sample); } catch { /* Presentation cannot change an effect's outcome. */ } }
+      }, () => {});
+    }, 500) : undefined;
+    try { return await new Promise<FileResult>((resolve, reject) => {
       const cancel = () => {
-        if (operation !== "bash") return;
+        if (!processOperation) return;
         const bytes = Buffer.alloc(8); bytes.writeBigUInt64BE(BigInt(id));
         this.control!.write(bytes);
       };
       const clean = () => signal?.removeEventListener("abort", cancel);
-      this.pending.set(id, { resolve: (result) => { clean(); resolve(result); }, reject: (error) => { clean(); reject(error); } });
+      this.pending.set(id, { kind: "result", resolve: (result) => { clean(); resolve(result); }, reject: (error) => { clean(); reject(error); } });
       signal?.addEventListener("abort", cancel, { once: true });
       if (signal?.aborted) cancel();
       this.writer.write(frame, (error) => {
         if (error) { this.pending.get(id)?.reject(new Error("effect_uncertain: failed to send native operation")); this.pending.delete(id); }
       });
-    });
+    }); } finally { ended = true; clearInterval(timer); }
   }
   close(): Promise<void> {
     if (this.closing) return this.closing;
@@ -84,7 +112,31 @@ export function nativeFiles(host: HostFiles) {
     const binding = await api.snapshot(ChatDoc, api.conversationId, context);
     if (!binding?.machineId) throw new Error("offline: conversation has no assigned worker");
     context.abortSignal?.throwIfAborted();
-    const result = await host.call({ machineId: binding.machineId, cwd: binding.cwd }, String(api.taskId), operation, args, context.abortSignal);
+    let latest: ShellProgress | undefined; let publishing: Promise<void> | undefined; let ended = false; let disabled = false; let observed: string | undefined;
+    // One commit in flight and one replacement sample, never a promise/output queue.
+    const publish = () => {
+      if (publishing || !latest || ended || disabled || context.abortSignal?.aborted) return;
+      publishing = (async () => {
+        while (latest && !ended && !context.abortSignal?.aborted) {
+          const value = latest; latest = undefined;
+          await api.details({ kind: "deck.bash-progress", version: 1, provisional: true, operationId: String(api.taskId), ...value }, context);
+        }
+      })().catch(() => { disabled = true; latest = undefined; }).finally(() => {
+        publishing = undefined;
+        // A sample can arrive between the loop's exit and this finally microtask.
+        publish();
+      });
+    };
+    const progress = (sample: ShellProgress) => {
+      if (ended || disabled || context.abortSignal?.aborted || typeof sample.output !== "string" || !sample.output || Buffer.byteLength(sample.output) > 2048 || typeof sample.truncated !== "boolean" || typeof sample.lossyUtf8 !== "boolean") return;
+      const value = { output: sample.output, truncated: sample.truncated, lossyUtf8: sample.lossyUtf8 };
+      const fingerprint = JSON.stringify(value);
+      if (fingerprint === observed) return;
+      observed = fingerprint; latest = value; publish();
+    };
+    let result: FileResult;
+    try { result = await host.call({ machineId: binding.machineId, cwd: binding.cwd }, String(api.taskId), operation, args, context.abortSignal, operation === "bash" ? progress : undefined); }
+    finally { ended = true; latest = undefined; await publishing; }
     return { output: [{ type: "text" as const, text: result.output }], isError: !result.ok, details: { host: binding.machineId, operationId: String(api.taskId), code: result.code ?? "ok", exitCode: result.exitCode ?? null, truncated: result.truncated ?? false } };
   };
   return defineExtension({ name: "deck.native-files", tools: [

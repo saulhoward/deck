@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
@@ -29,17 +30,25 @@ test("installed package runs hub, client, lazy provider imports and native tools
       const binding = {machineId:args[1],cwd:args[2]};
       try {
         assert.equal((await tools.call(binding,'100','write',{path:'packaged.txt',content:'installed tools work'})).ok,true);
-        const bash = await tools.call(binding,'101','bash',{command:'printf packaged-shell',timeout:5});
-        assert.equal(bash.ok,true); assert.match(bash.output,/packaged-shell/);
-      } finally { tools.close(); }
+        let sampled=false;
+        // Only Bash builtins: PATH deliberately contains no sleep/coreutils.
+        // Resume the stopped shell only after observing its pre-settlement sample.
+        const bash = await tools.call(binding,'101','bash',{command:'printf "packaged-shell:%s" "$$"; kill -STOP "$$"',timeout:5},undefined,sample=>{const pid=/^packaged-shell:([1-9][0-9]*)$/.exec(sample.output)?.[1]; if(pid){sampled=true; process.kill(Number(pid),'SIGCONT');}});
+        assert.equal(bash.ok,true); assert.match(bash.output,/packaged-shell/); assert.equal(sampled,true);
+        assert.equal((await tools.call(binding,'102','write',{path:'AGENTS.md',content:'PACKAGED_PROJECT_INSTRUCTIONS'})).ok,true);
       // Seed more than one retained page through the packaged adapter, with no inference.
       const { BACKGROUND_CONTEXT: context } = await import(pathToFileURL(root+'/node_modules/@earendil-works/chord/dist/context/index.js'));
       const { DeckRuntime } = await import(pathToFileURL(root+'/runtime/dist/deck.js'));
       const { providers } = await import(pathToFileURL(root+'/runtime/dist/providers.js'));
       const { fauxAssistantMessage, fauxToolCall } = await import(pathToFileURL(root+'/node_modules/@earendil-works/pi-ai/dist/providers/faux.js'));
       const provider = providers('--mock',args[0]+'.unused-auth',args[1]);
-      const runtime = await DeckRuntime.open(args[0], {models:provider.models,model:provider.model,binding,environment:()=>undefined});
+      const runtime = await DeckRuntime.open(args[0], {models:provider.models,model:provider.model,binding,hostFiles:tools,environment:()=>{throw new Error('No local fallback');}});
       try {
+        const imported=await runtime.importInstructions(String(runtime.main.id),'package-import');
+        const settled=await runtime.harness.waitForTask(imported,context);
+        assert.equal(settled.state.outcome.status,'completed'); assert.equal(settled.state.outcome.result.status,'applied');
+        assert.equal(await runtime.importInstructions(String(runtime.main.id),'package-import'),imported);
+        assert.equal((await runtime.instructionSource(String(runtime.main.id))).path,'AGENTS.md');
         const agent = await runtime.main.agent(context);
         for (const name of ['task_list','task_history','task_activity','task_create','task_message','subagent']) assert.ok(agent.tools.some(tool => tool.name === name));
         await runtime.main.commit(async tx => {
@@ -49,6 +58,7 @@ test("installed package runs hub, client, lazy provider imports and native tools
           await tx.appendEntry(runtime.main.id,{kind:'pi.tool-result',model:[{role:'toolResult',toolCallId:'seeded-call',toolName:'bash',content:[{type:'text',text:'seeded packaged tool result'}],isError:false,timestamp:Date.now(),details:{code:'ok',exitCode:0}}]});
         },context);
       } finally { await runtime.close(); }
+      } finally { await tools.close(); }
     `);
     const native = invoke(["serve", "--stdio", "--mock", "--directory", state, "--runtime", fixture, "--workspace", scratch]);
     assert.equal(native.status, 0, native.stderr);
@@ -93,11 +103,24 @@ test("installed package runs hub, client, lazy provider imports and native tools
     assert.ok((caughtUp.items as Record<string, unknown>[]).every((entry) => Number(entry.id) > Number(checkpointId)));
     const binding = status.binding as Record<string, unknown>;
     const task = await command("create_task", { requestId: "packaged-task", title: "Packaged task", machineId: binding.machineId, cwd: binding.cwd });
-    const client = invoke(["agent", "--no-tui", "--port", String(port)], `/older\n/older\n/activity\n/tasks\n/select ${task.chatId}\n/status\n/main\n/exit\n`);
+    await writeFile(join(scratch, "AGENTS.md"), "PACKAGED_RELOADED_INSTRUCTIONS");
+    const client = invoke(["agent", "--no-tui", "--port", String(port)], `/older\n/older\n/activity\n/tasks\n/select ${task.chatId}\n/status\n/main\n/instructions\n/instructions load\n/instructions\n/exit\n`);
     assert.equal(client.status, 0, client.stderr);
     assert.match(client.stdout, /you: packaged chat/); assert.match(client.stdout, /assistant: Deck prototype response/);
     assert.match(client.stdout, /seeded packaged tool result/); assert.match(client.stdout, /activity: /);
     assert.match(client.stdout, /you: packaged retained 0\n/); assert.match(client.stdout, /Beginning of retained history/);
+    const importId = /Instruction import admitted: task ([1-9]\d*)\./.exec(client.stdout)?.[1]; assert.ok(importId, client.stderr);
+    let applied = false;
+    for (let i = 0; i < 100; i++) {
+      const receipt = await command("instruction_status", { chatId: status.mainChatId, taskId: importId });
+      if ((receipt.import as Record<string, unknown>).state === "terminal") {
+        assert.equal(((receipt.import as Record<string, unknown>).result as Record<string, unknown>).status, "applied");
+        assert.equal((receipt.source as Record<string, unknown>).sha256, createHash("sha256").update("PACKAGED_RELOADED_INSTRUCTIONS").digest("hex")); applied = true; break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.ok(applied); assert.doesNotMatch(client.stdout, /PACKAGED_RELOADED_INSTRUCTIONS/);
+    for (const bucket of await readdir(join(scratch, "client", "drafts"))) assert.deepEqual(await readdir(join(scratch, "client", "drafts", bucket)), []);
     assert.match(client.stdout, /Packaged task/); assert.match(client.stdout, new RegExp(`Selected chat ${task.chatId}`));
   } finally {
     if (hub && hub.exitCode === null && hub.signalCode === null) {

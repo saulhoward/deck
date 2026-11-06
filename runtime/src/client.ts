@@ -3,6 +3,7 @@ import { once } from "node:events";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { DraftStore, type Draft } from "./drafts.js";
+import { InstructionsDisplay, validInstructionId } from "./instructions-view.js";
 import { ProgressDisplay } from "./progress.js";
 import { loginClient } from "./login-client.js";
 
@@ -55,7 +56,7 @@ function renderHistory(items: unknown[], descending = true) {
 
 async function main() {
   let login = false;
-  let port = 52800; let selected: string | undefined; let message: string | undefined;
+  let port = 52800; let selected: string | undefined; let message: string | undefined; let expectedHubId: string | undefined; let rexAllocationId: string | undefined;
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -66,15 +67,20 @@ async function main() {
     if (arg === "--port" && /^\d+$/.test(value)) port = Number(value);
     else if (arg === "--task" && /^[1-9]\d*$/.test(value)) selected = value;
     else if (arg === "--message") message = value;
+    else if (arg === "--hub-id" && value.length <= 200) expectedHubId = value;
+    else if (arg === "--rex-allocation" && /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value)) rexAllocationId = value;
     else throw new Error("Unknown client option");
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid port");
+  const requireHubGuard = expectedHubId !== undefined;
+  const rexBlockId = process.env.REX_BLOCK;
+  if (rexAllocationId && (!expectedHubId || !selected || login || message !== undefined || !rexBlockId || !/^block:[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(rexBlockId))) throw new Error("Rex startup requires an explicit hub/task and native full REX_BLOCK; no input sent");
   const transport = new AbortController();
   let detached = false;
   const command = async (name: string, args: ObjectValue = {}) => {
     const response = await fetch(`http://127.0.0.1:${port}/v1/command`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ version: 1, id: randomUUID(), command: name, args }),
+      body: JSON.stringify({ version: 1, id: randomUUID(), command: name, args, ...(expectedHubId ? { hubId: expectedHubId } : {}) }),
       signal: AbortSignal.any([transport.signal, AbortSignal.timeout(10_000)]),
     });
     if (!response.ok) throw new Error(`Hub HTTP ${response.status}`);
@@ -95,6 +101,9 @@ async function main() {
   const status = await command("status", selected ? { chatId: selected } : {});
   selected ??= String(status.mainChatId);
   if (typeof status.hubId !== "string") throw new Error("Hub lacks draft identity; restart the updated hub");
+  if (expectedHubId && (status.hubId !== expectedHubId || (requireHubGuard && status.hubGuard !== 1))) throw new Error("Expected hub identity/guard unavailable; no input sent");
+  if (rexAllocationId && (status.rexStartup !== 1 || status.chatId !== selected)) throw new Error("Rex startup capability/selected chat unavailable; no input sent");
+  expectedHubId = status.hubId;
   const drafts = new DraftStore(status.hubId);
   let active: Draft | undefined;
   const restore = async () => {
@@ -107,9 +116,9 @@ async function main() {
   const deliver = async (draft: Draft) => {
     await drafts.save(draft); // Never send until the complete private record is published.
     const { kind, chatId, ...args } = draft;
-    const ack = await command(kind === "input" ? "admit" : "create_task", kind === "input" ? { chatId, ...args } : args);
-    const id = ack[kind === "input" ? "submissionId" : "chatId"];
-    if (typeof id !== "string" || !/^[1-9]\d*$/.test(id) || !Number.isSafeInteger(Number(id))) throw new Error("Invalid acknowledgement; draft retained");
+    const ack = await command(kind === "input" ? "admit" : kind === "task" ? "create_task" : "import_instructions", kind === "task" ? args : { chatId, ...args });
+    const id = ack[kind === "input" ? "submissionId" : kind === "task" ? "chatId" : "taskId"];
+    if (!validInstructionId(id) || (kind === "instructions" && (ack.chatId !== chatId || ack.requestId !== draft.requestId || ack.admitted !== true || ack.completion !== "not_waited"))) throw new Error("Invalid acknowledgement; draft retained");
     await drafts.remove(draft.requestId);
     return ack;
   };
@@ -126,6 +135,7 @@ async function main() {
   let selection = 0;
   let lastActivity: string | undefined;
   const previews = new ProgressDisplay(plain);
+  const instructions = new InstructionsDisplay();
   let olderBefore: string | undefined;
   let historyLoaded = false;
   let recentLimit = 100; let olderLimit = 100;
@@ -135,7 +145,7 @@ async function main() {
     const chatId = selected; const revision = selection;
     polling = (async () => {
       const ascending = historyLoaded;
-      const result = await historyPage({ chatId, includeActivity: true, includeProgress: true, ...(ascending ? { after: newerAfter } : {}) }, recentLimit);
+      const result = await historyPage({ chatId, includeActivity: true, includeProgress: true, includeInstructions: true, ...(ascending ? { after: newerAfter } : {}) }, recentLimit);
       if (revision !== selection || detached) return;
       const { page } = result; recentLimit = result.limit;
       if (!Array.isArray(page.items)) throw new Error("Invalid history");
@@ -159,6 +169,8 @@ async function main() {
       }
       const preview = previews.render(page.progress, chatId!);
       if (preview) stdout.write(preview);
+      const instructionLine = instructions.render(page.instructions, chatId!);
+      if (instructionLine) stdout.write(instructionLine);
       // One poll owns at most one bounded history page + preview. Do not keep
       // queuing snapshots if the terminal/pipe consumer stops reading.
       if (stdout.writableNeedDrain) await once(stdout, "drain", { signal: transport.signal });
@@ -171,6 +183,13 @@ async function main() {
     if (!historyLoaded) await history();
   };
   await history();
+  // Input stays paused until startup checks and the allocation-bound observation
+  // ACK complete. No one-shot submission, automatic retry, or new draft identity.
+  if (rexAllocationId) {
+    const ack = await command("rex_startup", { chatId: selected, allocationId: rexAllocationId, blockId: rexBlockId });
+    if (ack.registered !== true || ack.version !== 1 || ack.chatId !== selected || ack.allocationId !== rexAllocationId || ack.blockId !== rexBlockId || !validInstructionId(ack.taskId) || !["unbound", "matched"].includes(String(ack.observation)) || ack.historical !== true || ack.live !== "not_checked") throw new Error("Invalid Rex startup acknowledgement; no input sent");
+    stdout.write("Rex startup registered (historical observation, not current health).\n");
+  }
   const editor = createInterface({ input: stdin, output: stdout, terminal: false });
   let connected = true;
   const timer = setInterval(() => {
@@ -184,7 +203,7 @@ async function main() {
   }, 500);
   let chatCursor: string | undefined;
   const select = async (id: string) => {
-    selected = id; selection++; lastActivity = undefined; previews.reset(); newerAfter = "0"; olderBefore = undefined; historyLoaded = false; recentLimit = 100; olderLimit = 100;
+    selected = id; selection++; lastActivity = undefined; previews.reset(); instructions.reset(); newerAfter = "0"; olderBefore = undefined; historyLoaded = false; recentLimit = 100; olderLimit = 100;
     stdout.write(`Selected chat ${plain(id)}.\n`);
     await restore();
   };
@@ -196,6 +215,23 @@ async function main() {
     active = undefined;
     if (detached) return;
     await select(String(task.chatId)); await loadSelectedHistory();
+  };
+  const importInstructions = async () => {
+    const draft = active!;
+    const ack = await deliver(draft); active = undefined;
+    if (detached) return;
+    stdout.write(`Instruction import admitted: task ${ack.taskId}. Application not yet confirmed; /instructions ${ack.taskId} checks its result.\n`);
+    // The task ID is now discoverable from Pi even after detach; the acknowledged
+    // local draft is not kept as an execution/result queue.
+    const revision = selection;
+    try {
+      const snapshot = await command("instruction_status", { chatId: draft.chatId, taskId: ack.taskId });
+      if (!detached && revision === selection) {
+        const line = new InstructionsDisplay().render(snapshot, draft.chatId, true);
+        if (!line) throw new Error("Invalid instruction status");
+        stdout.write(line);
+      }
+    } catch { if (!detached) process.stderr.write(`Import admitted; result unavailable. /instructions ${ack.taskId} checks it without another read.\n`); }
   };
   const detach = () => {
     if (detached) return;
@@ -218,7 +254,7 @@ async function main() {
       if (!text) continue;
       try {
         if (text === "/exit") break;
-        if (text === "/help") { stdout.write("/status /activity /stop /older /tasks [more] /select CHAT_ID /main /task TITLE /draft /drafts /recover REQUEST_ID /retry /discard [REQUEST_ID] /exit\nEnter submits or steers. Switching detaches without stopping other chats. Ctrl+C detaches. Answer previews are sampled/provisional; retained history is authoritative. This is plain line mode, not TUI.\n"); continue; }
+        if (text === "/help") { stdout.write("/status /activity /stop /older /tasks [more] /select CHAT_ID /main /task TITLE /instructions [load|TASK_ID] /draft /drafts /recover REQUEST_ID /retry /discard [REQUEST_ID] /exit\nEnter submits or steers. /instructions load replaces stored explicit instructions with saved-worker AGENTS.md, only while idle; admission is not application. /instructions reads source/task status without loading. Switching detaches without stopping other chats. Ctrl+C detaches. Answer previews are sampled/provisional; retained history is authoritative. This is plain line mode, not TUI.\n"); continue; }
         if (text === "/draft") {
           if (!active) throw new Error("No active unacknowledged draft");
           const preview = plain(JSON.stringify(active));
@@ -270,6 +306,25 @@ async function main() {
           if (id) { await drafts.remove(id); if (active?.requestId === id) active = undefined; }
           continue;
         }
+        if (text === "/instructions load") {
+          requireAcknowledged();
+          const binding = object((await command("status", { chatId: selected })).binding);
+          active = { kind: "instructions", chatId: selected, requestId: randomUUID(), machineId: String(binding.machineId), cwd: String(binding.cwd) };
+          await importInstructions(); continue;
+        }
+        if (text === "/instructions" || text.startsWith("/instructions ")) {
+          const taskId = text === "/instructions" ? undefined : text.slice(14).trim();
+          if (taskId !== undefined && !validInstructionId(taskId)) throw new Error("Use /instructions, /instructions load or /instructions TASK_ID");
+          const revision = selection; const chatId = selected;
+          const snapshot = await command("instruction_status", { chatId, ...(taskId ? { taskId } : {}) });
+          if (!detached && revision === selection) {
+            const line = new InstructionsDisplay().render(snapshot, chatId, true);
+            if (!line) throw new Error("Invalid instruction status; application not confirmed");
+            stdout.write(line);
+          }
+          continue;
+        }
+        if (text === "/retry" && active?.kind === "instructions") { await importInstructions(); continue; }
         if (text === "/retry" && active?.kind === "task") { await createTask(); continue; }
         if (text.startsWith("/task ")) {
           requireAcknowledged();
