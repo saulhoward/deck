@@ -3,6 +3,8 @@ import type { Readable, Writable } from "node:stream";
 import { ChatDoc, DeckError, type DeckRuntime } from "./deck.js";
 import type { Login } from "./login.js";
 import { encodeFrame, FrameDecoder, PROTOCOL_VERSION } from "./protocol.js";
+import { responseFrame } from "./responses.js";
+import { validRequestEnvelope, type ResponseEnvelope } from "./generated/contracts.js";
 
 function object(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new DeckError("invalid", "Expected object");
@@ -100,10 +102,8 @@ export async function serveIpc(runtime: DeckRuntime, input: Readable, output: Wr
   output.on("error", fail);
   const active = new Set<Promise<void>>();
   let writes: Promise<void> = Promise.resolve();
-  const send = (value: unknown) => {
-    let frame: Buffer;
-    try { frame = encodeFrame(value); }
-    catch { frame = encodeFrame({ version: 1, id: object(value).id, ok: false, error: { code: "too_large", message: "Response exceeds IPC limit" } }); }
+  const send = (value: ResponseEnvelope) => {
+    const frame = responseFrame(value);
     const write = writes.then(() => new Promise<void>((resolve, reject) => {
       output.write(frame, (error) => error ? reject(error) : resolve());
     }));
@@ -113,13 +113,13 @@ export async function serveIpc(runtime: DeckRuntime, input: Readable, output: Wr
   try {
     for await (const value of decoder) {
       const request = object(value);
-      if (request.version !== PROTOCOL_VERSION || typeof request.id !== "string" || !request.id || request.id.length > 200) throw new DeckError("invalid", "Invalid IPC envelope or version");
+      if (!validRequestEnvelope(request)) throw new DeckError("invalid", "Invalid IPC envelope or version");
       if (active.size >= 16) {
         await send({ version: 1, id: request.id, ok: false, error: { code: "busy", message: "Too many outstanding commands" } });
         continue;
       }
       const job = (async () => {
-        let response;
+        let response: ResponseEnvelope;
         try { response = { version: 1, id: request.id, ok: true, result: await dispatch(runtime, request, login) }; }
         catch (error) { response = { version: 1, id: request.id, ok: false, error: { code: error instanceof DeckError ? error.code : "runtime_failed", message: error instanceof DeckError ? error.message : "Runtime command failed" } }; }
         await send(response);

@@ -4,7 +4,7 @@
 
 **Chosen topology:** coordinator-owned Pi conversations and inference, with tools executing on registered workers. Every chat—including a task or subagent chat opened in Rex—uses the hub. Hub availability is required; independent worker-local inference and transcript replication are not goals.
 
-Deck is a deliberately smaller version of [`jessfraz/agent`](https://github.com/jessfraz/agent). See [the source-based comparison](comparison-agent.md) for the rationale and omitted features.
+Deck takes selected harness lessons from [`jessfraz/beep-boop`](https://github.com/jessfraz/beep-boop) (formerly `jessfraz/agent`), without adopting its broader automation product. The inspection, generated-contract and reconnect lessons below were reviewed at commit [`8466b59`](https://github.com/jessfraz/beep-boop/tree/8466b59dfd5073ddbe01dc63669817a7aaa41b20); they are requirements, not a blanket claim of completion. The [schema foundation](protocol-contracts.md) and [internal fresh inspection](rex-inspection.md) are now implemented. [Explicit retained-creation reconciliation](rex-reconciliation.md) can repair provenance without Rex mutations; broader reconciliation, replacement and safe public reopen remain planned. Deck deliberately uses **JSON Schema as the contract source of truth**, rather than upstream's Rust-type-first generation. The [earlier Agent comparison](comparison-agent.md) records a historical pre-decision topology, not Deck's current implementation.
 
 ## 1. Product and invariants
 
@@ -66,7 +66,7 @@ Proposed Zig modules:
 - `hub/`: routing, worker registry, client sessions and native-effect dispatch;
 - `machine/`: registration, inventory/load sampling, local tool execution and receipts;
 - `transport/`: HTTP/SSE, worker streams, local sockets and runtime IPC;
-- `rex/`: session/terminal creation, stable-ID discovery and reconciliation;
+- `rex/`: bounded exact-object inspection, session/terminal creation and conservative reconciliation;
 - `tui/`: editor, event reducer, Markdown and terminal layout.
 
 Proposed TS modules under `runtime/src/`: `protocol/`, `harness/`, `providers/`, `tools/`, `tasks/`, `jobs/`, and `main.ts`. Deck's catalog, admission metadata and job definitions should use Pi transactional documents where possible, not a second hub database requiring cross-store commits. Pi types stay behind a small versioned adapter.
@@ -163,7 +163,7 @@ The Pi tool task records intent before issuing its native operation. Zig routes 
 
 A worker may return a previously retained result for the same ID; conflicting payloads are rejected. If the outcome of an issued effect is unknown, report **uncertain**, not “not executed.” An unanswered operation is not automatically resent as a new command. Only proven replay-safe operations or provider-supported idempotency permit automatic retry. Native inspection/readback may reconcile actual state; neither a dead connection nor a successful Pi restart proves that an external mutation did not happen.
 
-Bound outstanding commands/progress and keep independent control/cancellation capacity so a full pipe cannot block shutdown. A connection generation prevents stale cleanup from removing its replacement. On reconnect, refresh machine metadata and reconcile outstanding operations without moving ownership.
+Bound outstanding commands/progress and keep independent control/cancellation capacity so a full pipe cannot block shutdown. A connection generation prevents stale cleanup from removing its replacement. On reconnect, verify worker identity/capabilities, refresh machine metadata and reconcile outstanding operations without moving ownership. A transport reconnect does not clear accepted-operation uncertainty or authorize a new operation ID.
 
 ### Availability and failure
 
@@ -172,6 +172,15 @@ Hub downtime means chat, inference and new admissions are unavailable. Show that
 An offline worker keeps its task assignments. Other conversations/hosts can proceed, but effects for that worker wait or return an explicit unavailable result under a defined tool policy; never execute them locally on the hub. Do not blindly repeat in-flight effects when the worker returns.
 
 Pi recovers hub execution from checkpoints after restart, with the same host bindings and operation reconciliation. No coordinator replication or automatic cross-host failover is planned. Backups/restoration are separate operational work and must not activate two writers.
+
+### Reconnect contract
+
+Reconnect restores **observation and transport**, not a second execution or replay queue:
+
+- **Chat clients:** retain the expected hub/chat identity across outages; verify the hub and required protocol capabilities before accepting further input. A reused port or changed identity fails closed rather than silently becoming a new baseline. Resume committed history from the last validated entry cursor, separately from replaceable activity/progress samples. A client restart may load a bounded recent tail; no durable terminal-delivery guarantee is implied.
+- **Mutations:** preserve saved request IDs, original payloads and target bindings through lost ACKs. Recovery/retry is explicit; reconnect never automatically submits drafts or creates another allocation/replacement intent. Discard forgets a local draft, not an external effect. Current startup registration has its own fail-closed contract; reconnect is not permission to fabricate a fresh startup event.
+- **Workers:** reconnect only as the verified assigned machine. Fence stale replies and disconnect handlers by connection generation; retrieve retained results/reconcile accepted operations under their original IDs. An unreachable worker is unavailable, not unassigned. Heartbeats describe the connection, not Pi idleness or completion of effects.
+- **Rex clients and objects:** retain a known full binding when inspection/resume fails. A client may reconnect to the same hub without being replaced. Rex server identity changes are a separate reconciliation boundary, not evidence that old objects are absent. No automatic daemon startup, session recreation or client replacement follows from a broken connection.
 
 Stopping is an explicit command, not socket closure. Esc aborts the selected conversation's current Pi work and foreground children, and cancels/drains its owned native operations where supported. Show Pi's actual queued-input abort behavior rather than maintaining a second paused FIFO by default. Main-chat Esc does not implicitly stop independently delegated tasks. Detach never invokes abort. Completed external effects cannot be undone by cancellation.
 
@@ -189,7 +198,44 @@ Offline workers retain ownership; unavailable capture files/effects stay explici
 
 Rex's taxonomy is session → windows (tabs) → blocks (terminals). Create one named session per task, its primary chat terminal, and named subagent terminals. Persist full Rex IDs; labels can change/collide. Discover using `--json` and explicit server/session/block targets. Spawn with argv, not interpolated shell strings or `rex send` into editors.
 
-Rely on Rex persistence. Normal reopen finds the saved session/terminal and reconnects its chat client to the hub conversation. A dead chat client may be replaced without changing conversation identity or restarting inference. Persist creation intent; after a lost reply, inspect/adopt only provably allocation-bound objects rather than create duplicates; a unique matching label is insufficient. An [isolated installed-CLI spike](rex-contract.md) now verifies local argv/ID contracts, normal central chat clients, reconnect and continued Pi work after Rex destruction. It also proves duplicate labels are possible and creation success is not client readiness. An [internal Pi/native allocation foundation](rex-allocation.md) now persists intent/receipts and full-ID bindings, pins the client's hub identity and conservatively refuses duplicate or uncertain recreation. [Allocation-bound startup registration](rex-startup.md) now joins intent/native-block/binding as historical evidence, not current health. Public allocation/reopen, authoritative current readiness/inspection, uncertain-create reconciliation, GUI attachment and server-restart restoration remain unfinished; labels alone cannot authorize adoption or retry.
+### Evidence and current implementation
+
+Rely on Rex persistence, but distinguish durable admission, native acceptance, retained creation provenance, historical client startup and fresh native observation. None implies the next. Reopen first inspects the saved exact objects; an existing running client need not be replaced. A confirmed exited client may be explicitly replaced without changing conversation identity or restarting inference, under the safety contract below.
+
+An [isolated installed-CLI spike](rex-contract.md) verifies local argv/ID contracts, normal central chat clients, hub reconnect and continued Pi work after Rex destruction. It also proves duplicate labels are possible and creation success is not client readiness. An [internal Pi/native allocation foundation](rex-allocation.md) persists intent/receipts and full-ID bindings, pins the client's hub identity and conservatively refuses duplicate or uncertain recreation. [Allocation-bound startup registration](rex-startup.md) joins intent/native-block/binding as historical evidence, not current health. [Fresh exact-object inspection](rex-inspection.md) is now implemented as a read-only internal API with generated contracts, saved-worker/full-ID scope, native 404 discrimination, ephemeral reads without receipts and stale-result fencing. [Explicit receipt-based reconciliation](rex-reconciliation.md) can now recover an unbound creation binding without touching Rex objects or rewriting the original outcome. Public allocation/reopen, resolution without strong retained evidence, explicit replacement, GUI attachment and server-restart restoration remain unfinished. The following contracts describe the implemented inspection subset and proposed replacement boundary; process sampling is not a responsive-client readiness protocol.
+
+### Fresh read-only exact-object inspection
+
+Inspect on the **saved worker**, using the explicit endpoint, expected Rex host/instance and full session/window/block IDs. Check server identity around the scoped reads and verify the block's window, host and terminal flavor. Do not use focus, labels, process names or a session listing as existence/provenance authority. Without a full trustworthy binding, report unbound/not checked; inspection must not discover an object by label and adopt it.
+
+The bounded projection must distinguish these facts (names below are semantic categories, not shipped wire enums):
+
+| Observation | Required evidence / limit |
+| --- | --- |
+| Unavailable | Assigned worker, endpoint or executable cannot be reached; says nothing about object existence. |
+| Identity changed | Endpoint answers with another host/instance; do not inspect it as the original server or infer absence. |
+| Missing session | Exact-session inspection affirmatively reports native session-not-found on the verified server. An empty live-session list, generic nonzero exit or timeout is insufficient. |
+| Missing terminal | A complete, validated exact-session view proves the saved terminal absent. A found block under the wrong window is conflict; partial, truncated or unsupported views are inconclusive. |
+| Pending | Exact terminal exists but validated process data has neither a running child nor a completed exit. Null process fields alone are not exit/readiness. |
+| Running | Exact terminal has validated running-process evidence. This is process presence, **not** proof it is a responsive Deck client, still selects this chat or has delivered any input. |
+| Exited | Exact terminal has no running child and has a valid completed-exit record. Keep-open preserves exit history; it does not restart the client. |
+| Conflict / inconclusive | Wrong scope/host/flavor, duplicate IDs, malformed/oversized/unsupported data, cancellation or failed inspection. Never translate these into absence. |
+
+Prove the installed Rex version's exact not-found/process contracts in isolated opt-in tests before relying on them. If the CLI cannot reliably distinguish native not-found from a failed read, return inconclusive rather than inventing absence from diagnostic prose.
+
+Inspection is a fresh, cancellable on-demand read, not a replayed allocation receipt or durable health journal. Use bounded argv/output/timeouts and the credential-restricted native CLI path, with no autostart, mutation, model input or host fallback. Return only scoped IDs, bounded status/exit metadata and observation timing; omit terminal contents, process arguments/environment and private CLI errors. Timing labels the sample, not a lease or readiness guarantee. Existing `readiness:"not_checked"` creation provenance and historical startup remain separate and unchanged.
+
+Bind the response to the allocation/binding identity and request/connection generation observed before I/O. Recheck authority after I/O; stale responses must not overwrite a newer binding or newer observation, nor authorize a replacement. Multiple CLI reads are a non-atomic sample, not a lasting guarantee of native state.
+
+### Conservative reconciliation and explicit replacement
+
+The implemented [receipt-only reconciliation](rex-reconciliation.md) persists a separate Pi request/task before reading the original native journal. Only a hash-matched retained creation result may supply historical binding/provenance; missing or acceptance-only evidence stays unresolved, and the original attempt/outcome/startup are preserved. There is no automatic adoption/reset/replacement. API 8's advertised `session.new_window` has no expected-revision/process-state or idempotency field; an atomic identity-bound replacement strategy remains unestablished, not assumed from inspect-then-create.
+
+Preserve the original intent, complete known binding, historical evidence and uncertain receipt through failed/inconclusive inspection and hub reopen. An unresolved create/replacement cannot be reset into a fresh allocation. A startup claim—even one matching a running block—is correlation, not sufficient creation/adoption proof. Reconcile only independently provable allocation-bound objects; if provenance cannot be established, stay uncertain.
+
+Replacement is a separate explicit mutation, never a side effect of inspection, reconnect, selection or sending a message. Persist its stable request identity, prior binding and exact plan in a Pi-owned administrative task **before** native effects. Serialize competing replacements per chat and revalidate the evidence/binding before issue and apply; late observations/results cannot revoke newer evidence. Reuse a verified existing session when only its client terminal needs replacement. Recreating a confirmed missing session needs its own explicit plan; neither case permits label-based discovery or adoption. Do not replace a running, pending, unreachable or inconclusively inspected client. Native state can change after inspection: use available conditional/revision checks and refuse unsafe races rather than claiming atomic inspect-and-replace.
+
+Retain original creation provenance and link any applied replacement binding to its own intent/result. Lost replacement replies never discard the old full binding or reset the attempt: retrieve retained results when available; otherwise preserve uncertainty and reconcile the original attempt rather than issuing another replacement. Observing the old client still running cannot by itself rule out an unknown replacement effect. Conversation/history, host affinity, saved drafts and admitted input IDs remain unchanged; terminal replacement never resubmits input or starts inference. Public open/reopen must save identity before send and show admission, allocation, historical startup and fresh observation separately. Owned children stay externally inspection/stop-only until a distinct input/lifetime contract is designed.
 
 Closing/disconnecting Rex UI does not stop hub inference. Destroying a Rex session affects its terminals and any processes it owns, not the existence of the centrally saved conversation. Reopening restores access to that same conversation. Tool processes actually owned by a destroyed terminal can be interrupted; represent that honestly and reconcile uncertain effects. Lack of connectivity is not proof of native absence.
 
@@ -207,7 +253,21 @@ Hub HTTP `/v1` commands and SSE streams support:
 
 Local clients can use a private Unix socket; remote clients, including those running in Rex, use the configured authenticated hub endpoint. No worker-local chat API is necessary. Workers initiate reconnecting outbound connections to announce inventory and accept host-effect/Rex requests. Specify versions, heartbeat, jittered backoff, size limits and flow control. No chat replication protocol is required.
 
-Zig↔TS IPC uses versioned, length-prefixed JSON over inherited pipes, with request IDs, typed errors and cancellation. TS stdout is protocol-only; logs go to stderr. Suggested errors: `offline`, `conflict`, `busy`, `unsupported`, `auth_required`, `storage_failed`, `effect_uncertain`. Define one small schema and validate both directions; avoid independently maintained unchecked Zig/TS shapes.
+Zig↔TS IPC uses versioned, length-prefixed JSON over inherited pipes, with request IDs, typed errors and cancellation. TS stdout is protocol-only; logs go to stderr. Suggested errors: `offline`, `conflict`, `busy`, `unsupported`, `auth_required`, `storage_failed`, `effect_uncertain`. The [current IPC](runtime-ipc.md) has bounded framing, a schema-derived request-envelope guard shared with Zig HTTP, and generated closed success/error response envelopes. IPC validates serialized egress; Zig HTTP and the client validate replies and exact transport IDs before forwarding/applying. Malformed replies never acknowledge mutations or clear drafts, and do not prove no effect. The [initial generated contract layer](protocol-contracts.md) also covers existing native Rex allocation plans/creation projections fresh inspection scope/query/observation/snapshot contracts and read-only native creation-receipt evidence contracts. Command-specific args/results/errors and other views/effects still use handwritten checks; per-request transport cancellation and the broader migration below remain unfinished.
+
+### Schema-first boundary contracts
+
+**Checked-in JSON Schema is the single authored source of truth for Deck-owned wire shapes.** Generate Zig types/codecs/validation and TypeScript types/runtime validators from those schemas; do not maintain parallel handwritten wire interfaces or export a language's types as the authoritative schema. Internal Pi/domain types remain behind adapters, not forced into the wire model. External Rex responses need a versioned, bounded validating adapter; Deck's schema defines its own projection, not Rex's API.
+
+- Pin the JSON Schema dialect and a generator-supported subset (target Draft 2020-12). Start with envelopes, command-specific args/results, typed errors and native Rex projections; incrementally cover native effects, client views and future worker registration/control. Reuse the same command/result definitions across HTTP and private IPC rather than fork them for each transport.
+- Define discriminated success/error/observation variants, required versus nullable/optional fields, unknown-field policy, string/array bounds and exact ID formats. Keep opaque conversation/submission/operation IDs lossless on the wire, using strings where numeric precision could be lost. Separate transport correlation IDs, durable request IDs, Pi task/operation IDs, allocation IDs and connection generations.
+- Validate both directions at each endpoint before dispatch/apply/render, including native results and client ACKs. Types alone are not runtime validation. Do not coerce/default invalid input into a valid mutation. Unknown versions, missing required capabilities or unknown variants fail closed before dispatch or apply; an invalid post-effect result remains uncertain, not "not executed." Compatibility rules must explicitly distinguish optional extensions from breaking changes. Never log rejected payloads or private native/provider errors as schema diagnostics.
+- Keep framing byte limits, parser depth/allocation bounds, timeouts, concurrency and backpressure enforced in transport/native code. Document byte versus character limits and test Unicode equivalence across validators; a schema is not a resource sandbox. Ownership, authentication, saved-host affinity, binding comparison and uncertainty/replay rules remain semantic guards, not schema validation.
+- Pin generators/validators and resolve schemas locally with no runtime network fetches. Check generated artifacts into source with reproducible regeneration and a CI no-diff gate; package required validation assets in the locked offline Nix closure. Use shared positive/negative fixtures and cross-language round trips to catch drift, including oversized IDs, unsafe numbers, nullability, unknown fields/variants and malformed native results. Migrate current contracts without silently rewriting retained receipts or bypassing unfinished-work compatibility.
+
+The minimal compiler/validators now implement a deliberately small Draft 2020-12 subset, refusing unsupported schema keywords/shapes. Shared fixtures, validating Zig typed parsers and an offline no-stale-generation gate are in place; see [current coverage and compatibility limits](protocol-contracts.md). Completing existing boundary migration is a prerequisite for remote effects or additional client implementations, not a new protocol framework or a change to Pi's execution authority.
+
+### Observation and flow control
 
 Expose Deck snapshots/events rather than raw Chord internals. Pi's windowed watches/history support a bounded recent view and asynchronous pagination. Attach/snapshot share a watermark or equivalent gap-safe contract. Slow clients get bounded buffers, coalesced progress and resumable views, not unbounded queues. Reading history never submits it to the model. Pi progress can be provisional (deferred persistence); durable admission/final entries are distinct from live partial display.
 
@@ -265,9 +325,9 @@ The Nix package now installs the Zig local prototype, compiled TS, its locked pr
 
 Milestones:
 
-1. **Contract spikes:** central Pi conversations, worker-backed tool/environment adapter, native Pi FIFO/abort behavior, ChatGPT login/refresh, Rex reconnect, Tailscale identity and terminal capabilities.
-2. **Local slice:** one hub runtime/store, main + task + subagent conversations, Rex clients, ordinary coding tools, all-chat history, settings and detach/reopen.
-3. **Remote effects:** worker registry, host affinity, reverse links, effect receipts/uncertainty, disconnect/reconnect and fault injection.
+1. **Contract spikes:** central Pi conversations, worker-backed tool/environment adapter, native Pi FIFO/abort behavior, ChatGPT login/refresh, exact Rex inspection, reconnect, Tailscale identity and terminal capabilities. Establish the minimal schema-first generation/validation path, then migrate existing boundaries incrementally.
+2. **Local slice:** one hub runtime/store, main + task + subagent conversations, ordinary coding tools, all-chat history and settings. Continue internal fresh Rex inspection → conservative reconciliation/explicit replacement → public save-before-send allocation/open/reopen, with fault tests and no widening of owned-child access.
+3. **Remote effects:** schema-backed worker registry, verified identity, host affinity, reverse links, effect receipts/uncertainty, generation-fenced disconnect/reconnect and fault injection. Complete existing wire-contract migration before adding this boundary.
 4. **TUI/history:** Markdown/activity, lazy scrolling, simple metadata/FTS related-work retrieval, machine load and plain-output parity.
 5. **Jobs/monitoring:** Pi durable schedules with occurrence captures, HTTP monitoring and later web UI.
 
@@ -279,16 +339,19 @@ Test faux-provider inference, SQLite reopen, surviving TS-child writer locks, du
 - **Hub availability is accepted.** Rex preserves terminals and appropriate native processes, not an independent inference service. Chat reconnects when the hub returns.
 - **No task lifecycle protocol.** Tasks organize work; actual Pi chat/activity supplies reporting.
 - **Do not merge all chats into main.** Search/links and dispatch-aware notifications avoid context explosion and instruction replay while retaining every conversation.
-- **Rex persistence is not agent persistence.** Sessions/terminals are Rex-owned; generation/checkpoints/history are hub Pi-owned. Neither needs a duplicate owner.
+- **Rex persistence is not agent persistence.** Sessions/terminals are Rex-owned; generation/checkpoints/history are hub Pi-owned. Neither needs a duplicate owner. Creation provenance, historical startup and fresh process presence are separate facts, not a combined ready/healthy flag.
+- **Failed inspection retains identity.** Unknown is not missing. Reconnect and stale observations cannot reset allocations, discard known bindings or authorize duplicate effects.
+- **Schema-first, not language-first.** JSON Schema owns Deck wire contracts; Zig/TS types and validators are generated projections. Runtime semantic guards still own admission, affinity and replay safety.
 - **Pi primitives first.** Reuse native inboxes, follow-ups, child ownership, abort and durable sleeps before inventing parallel schedulers or queues.
 - **Native effects still need uncertainty handling.** Removing transcript replication does not make disconnected shell/network effects safe to repeat.
 - **Captured files are not worktree snapshots.** Defer managed worktree allocation/cleanup unless actual concurrency demands it.
-- **Feature scope stays narrow.** Defer source polling/triage, lifecycle outcomes, browser automation, mobile/push, historic imports, embeddings, learning and cross-host failover.
+- **Feature scope stays narrow.** Do not add source polling/triage, lifecycle outcomes, managed worktrees, browser automation, mobile/push, historic imports, embeddings, learning or cross-host failover as part of these lessons. Existing remote-worker, TUI and Pi-job goals remain unchanged.
 - **Remaining risks:** provider fast/quota support, worker execution-environment fit, Rex recovery and Zig TUI capability need early validation.
 
 ## References
 
-- [Comparison with Agent](comparison-agent.md), including pinned upstream implementation references.
+- [Historical comparison with Agent](comparison-agent.md), including pre-decision topology and earlier pinned upstream references.
+- Selective beep-boop review at `8466b59dfd5073ddbe01dc63669817a7aaa41b20`: [exact Rex presence/inspection](https://github.com/jessfraz/beep-boop/blob/8466b59dfd5073ddbe01dc63669817a7aaa41b20/src/rex.rs), [known-session recovery/race tests](https://github.com/jessfraz/beep-boop/blob/8466b59dfd5073ddbe01dc63669817a7aaa41b20/runtime/test/known-resume.test.ts), [contract generator](https://github.com/jessfraz/beep-boop/blob/8466b59dfd5073ddbe01dc63669817a7aaa41b20/src/bin/export_protocol.rs) and [runtime schema validation](https://github.com/jessfraz/beep-boop/blob/8466b59dfd5073ddbe01dc63669817a7aaa41b20/runtime/src/protocol.ts). Source/tests reviewed, not executed or evidence of Deck support. Borrow the safety lessons, not upstream's task/outcome queues or Rust-first schema ownership.
 - [Pi repository](https://github.com/earendil-works/pi), [Pi Durable README](https://github.com/earendil-works/pi/blob/main/packages/durable/README.md), [Durable specification](https://github.com/earendil-works/pi/blob/main/packages/durable/docs/spec.md).
 - [pi-ai providers/auth/OAuth/usage](https://github.com/earendil-works/pi/blob/main/packages/ai/README.md).
 - [Durable background subagents example](https://github.com/earendil-works/pi/blob/main/packages/durable/test/examples/22-subagent-background.ts).

@@ -20,7 +20,7 @@ test("empty-chat catch-up drains a burst over multiple pages without gaps or dup
   const failures = new Set(["0", "300"]);
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
-    const { command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { command: string; args: Record<string, unknown> };
+    const { id, command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { id: string; command: string; args: Record<string, unknown> };
     let result: unknown;
     if (command === "status") result = { chatId: "1", mainChatId: "1", hubId: "test-catchup", model: {}, tools: "offline" };
     else {
@@ -28,14 +28,14 @@ test("empty-chat catch-up drains a burst over multiple pages without gaps or dup
       if (args.after === undefined) result = { items: [] };
       else {
         const after = String(args.after); const limit = Number(args.limit); requests.push({ after, limit });
-        if (failures.delete(after)) return void response.end(JSON.stringify({ ok: false, error: { code: "runtime_failed", message: "Temporary outage" } }));
-        if (after === "300" && limit > 50) return void response.end(JSON.stringify({ ok: false, error: { code: "too_large", message: "Response exceeds IPC limit" } }));
+        if (failures.delete(after)) return void response.end(JSON.stringify({ version: 1, id, ok: false, error: { code: "runtime_failed", message: "Temporary outage" } }));
+        if (after === "300" && limit > 50) return void response.end(JSON.stringify({ version: 1, id, ok: false, error: { code: "too_large", message: "Response exceeds IPC limit" } }));
         const remaining = Array.from({ length: 260 }, (_, i) => entry(i + 1)).filter((item) => item.id > Number(after));
         const items = remaining.slice(0, limit);
         result = { items, ...(remaining.length > items.length ? { next: String(items.at(-1)!.id) } : {}) };
       }
     }
-    response.end(JSON.stringify({ ok: true, result }));
+    response.end(JSON.stringify({ version: 1, id, ok: true, result }));
   });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const address = server.address(); assert.ok(address && typeof address !== "string");
@@ -60,10 +60,10 @@ test("SIGINT promptly cancels a stalled catch-up request without sending stop or
   let held = false; const commands: string[] = [];
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
-    const { command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { command: string; args: Record<string, unknown> };
+    const { id, command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { id: string; command: string; args: Record<string, unknown> };
     commands.push(command);
     if (command === "history" && args.after !== undefined) { held = true; return; }
-    response.end(JSON.stringify({ ok: true, result: command === "status" ? { chatId: "1", mainChatId: "1", hubId: "test-catchup", model: {}, tools: "offline" } : { items: [] } }));
+    response.end(JSON.stringify({ version: 1, id, ok: true, result: command === "status" ? { chatId: "1", mainChatId: "1", hubId: "test-catchup", model: {}, tools: "offline" } : { items: [] } }));
   });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const address = server.address(); assert.ok(address && typeof address !== "string");

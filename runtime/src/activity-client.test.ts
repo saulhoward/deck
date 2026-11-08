@@ -12,7 +12,7 @@ test("plain client deduplicates activity transitions and renders bounded sanitiz
     tools: phase === "tools" && chatId === "1" ? [{ callId: "call", name: "bash", status: "running", taskId: "3", nested: false }] : [], omittedTools: 0, compactions: 0, compactionFailed: false });
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
-    const { command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { command: string; args: Record<string, unknown> };
+    const { id, command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { id: string; command: string; args: Record<string, unknown> };
     let result: unknown;
     if (command === "status") result = { chatId: args.chatId ?? "1", mainChatId: "1", hubId: "test-activity", model: {}, tools: "native-files + bash" };
     else if (command === "activity") result = activity(String(args.chatId));
@@ -24,7 +24,7 @@ test("plain client deduplicates activity transitions and renders bounded sanitiz
         { id: 1, kind: "pi.assistant", model: [{ content: [{ type: "toolCall", name: "bash", arguments: { command: "SECRET_ARGUMENTS" } }] }] },
       ] };
     }
-    response.end(JSON.stringify({ ok: true, result }));
+    response.end(JSON.stringify({ version: 1, id, ok: true, result }));
   });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const address = server.address(); assert.ok(address && typeof address !== "string");

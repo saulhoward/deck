@@ -7,6 +7,9 @@ import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { instructionSnapshot, projectInstructionTask } from "./instructions-view.js";
 import { projectProgress } from "./progress.js";
 import { configurationIdle, importingInstructions, instructionHash, instructionImport, IMPORT_KIND, InstructionRequest, InstructionSourceDoc, type InstructionImportResult } from "./instruction-import.js";
+import { RexInspector } from "./rex-inspection.js";
+import { rexReconciliation, RexReconcileRequest, allocationRequest, type ReconcileResult } from "./rex-reconciliation.js";
+import { validRexAllocationPlan, validRexAllocationReceiptQuery } from "./generated/contracts.js";
 import { REX_KIND, rexAllocation, RexDoc, RexRequest, rexCoherent, rexTarget, rexUuid, rexBlock, rexStartup, type RexInput, type RexTarget, type RexResult } from "./rex-allocation.js";
 import { bindImplementation, checkCompatibility, defaultImplementation, stampImplementation } from "./compatibility.js";
 import { nativeFiles, type HostFiles } from "./host-files.js";
@@ -58,7 +61,8 @@ export type RuntimeOptions = {
 
 export class DeckRuntime {
   private tail: Promise<unknown> = Promise.resolve();
-  private constructor(readonly harness: Harness, readonly main: Conversation, private readonly guard: () => Promise<void>, readonly localFiles: boolean, readonly hubId: string, readonly implementation: string, private readonly instructionTask: ReturnType<typeof instructionImport>["task"], private readonly rexTask: ReturnType<typeof rexAllocation>["task"]) {}
+  private readonly inspector: RexInspector;
+  private constructor(readonly harness: Harness, readonly main: Conversation, private readonly guard: () => Promise<void>, readonly localFiles: boolean, readonly hubId: string, readonly implementation: string, private readonly instructionTask: ReturnType<typeof instructionImport>["task"], private readonly rexTask: ReturnType<typeof rexAllocation>["task"], private readonly reconcileTask: ReturnType<typeof rexReconciliation>["task"], host?: HostFiles) { this.inspector = new RexInspector(this, host); }
 
   static async open(path: string, options: RuntimeOptions): Promise<DeckRuntime> {
     let runtime: DeckRuntime | undefined;
@@ -75,6 +79,7 @@ export class DeckRuntime {
     if (options.hostFiles) registry.install(nativeFiles(options.hostFiles));
     const importer = instructionImport(options.hostFiles); registry.install(importer.extension);
     const rex = rexAllocation(options.hostFiles); registry.install(rex.extension);
+    const reconciler = rexReconciliation(options.hostFiles); registry.install(reconciler.extension);
     const implementation = bindImplementation(options.implementation ?? await defaultImplementation(), !!options.hostFiles);
     const storage = await openNodeSqliteStorage(path);
     try { await checkCompatibility(storage, implementation); }
@@ -110,7 +115,7 @@ export class DeckRuntime {
       }
       const hubId = await harness.commit(async (tx) => (await tx.doc(Identity)).id, context);
       // Bind Deck tool callbacks before recovered Pi tool tasks can run.
-      runtime = new DeckRuntime(harness, main, options.admissionGuard ?? (async () => {}), !!options.hostFiles, hubId, implementation, importer.task, rex.task);
+      runtime = new DeckRuntime(harness, main, options.admissionGuard ?? (async () => {}), !!options.hostFiles, hubId, implementation, importer.task, rex.task, reconciler.task, options.hostFiles);
       harness.resume();
       return runtime;
     } catch (error) {
@@ -292,6 +297,43 @@ export class DeckRuntime {
       }, context);
     });
   }
+
+  // Explicit internal provenance repair only. Never creates/replaces Rex objects.
+  reconcileTerminal(id: string, requestId: string, signal?: AbortSignal, expectedBinding?: Binding): Promise<TaskId<ReconcileResult>> {
+    return this.serial(async () => {
+      signal?.throwIfAborted();
+      if (typeof requestId !== "string" || !requestId || requestId.length > 200) throw new DeckError("invalid", "Invalid Rex reconciliation request ID");
+      const hash = createHash("sha256").update(JSON.stringify([id, this.hubId])).digest("hex");
+      const chat = await this.chat(id);
+      return chat.commit(async (tx) => {
+        const receipt = await tx.doc(RexReconcileRequest, chat.id, requestId, hash);
+        if (receipt.hash !== hash) throw new DeckError("conflict", "Rex reconciliation identity changed");
+        if (receipt.taskId) {
+          const input = (await tx.task(receipt.taskId as TaskId))?.input as { binding: Binding } | undefined;
+          if (expectedBinding && (input?.binding.machineId !== expectedBinding.machineId || input?.binding.cwd !== expectedBinding.cwd)) throw new DeckError("conflict", "Rex reconciliation request ID reused with another host/cwd");
+          return receipt.taskId as TaskId<ReconcileResult>;
+        }
+        if (!await rexCoherent(tx, chat.id)) throw new DeckError("invalid", "Rex reconciliation requires the original ownerless task worker/cwd");
+        const current = await tx.doc(ChatDoc, chat.id); const doc = await tx.doc(RexDoc, chat.id);
+        if (expectedBinding && (current.machineId !== expectedBinding.machineId || current.cwd !== expectedBinding.cwd)) throw new DeckError("settings_changed", "Saved Rex worker/cwd changed");
+        if (!this.localFiles) throw new DeckError("offline", "Rex reconciliation requires the assigned native worker");
+        if (doc.binding) throw new DeckError("conflict", "Rex binding is already known; use fresh inspection, not reconciliation");
+        const original = doc.taskId ? await tx.task(doc.taskId as TaskId) : undefined;
+        const input = original?.input as RexInput | undefined;
+        if (!original || original.kind !== REX_KIND || original.conversationId !== chat.id || !input?.binding || !validRexAllocationPlan(input.plan) || input.plan.chatId !== id || input.plan.hubId !== this.hubId || (input.plan.allocationId ?? undefined) !== doc.allocationId || input.binding.machineId !== current.machineId || input.binding.cwd !== current.cwd) throw new DeckError("conflict", "Rex reconciliation needs the original saved allocation intent");
+        if (original.state.status !== "terminal") throw new DeckError("busy", "Wait for the original Rex allocation task to settle");
+        if (doc.reconciliationTaskId && (await tx.task(doc.reconciliationTaskId as TaskId))?.state.status !== "terminal") throw new DeckError("busy", "Rex reconciliation already in progress");
+        const request = allocationRequest(doc.taskId, input);
+        if (!validRexAllocationReceiptQuery({ operationId: String(doc.taskId), request }) || Buffer.byteLength(request) > 128 * 1024) throw new DeckError("invalid", "Rex reconciliation intent is too large");
+        signal?.throwIfAborted();
+        const taskId = await tx.createTask(this.reconcileTask, { allocationTaskId: doc.taskId, binding: { machineId: current.machineId, cwd: current.cwd }, request }, { ownership: { kind: "conversation" } });
+        doc.reconciliationTaskId = taskId; receipt.taskId = taskId; return taskId;
+      }, context);
+    });
+  }
+
+  // Fresh read only, internal trusted operator API. No allocation or health write.
+  inspectTerminal(id: string, signal?: AbortSignal) { return this.inspector.inspect(id, signal); }
 
   async terminalBinding(id: string) {
     const chat = await this.chat(id);

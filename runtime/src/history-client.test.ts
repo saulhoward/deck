@@ -15,16 +15,18 @@ test("older history retries preserve cursors, polling stays independent and sele
   let holdNextPoll = false;
   let held: ServerResponse | undefined;
   const entry = (id: number, text: string) => ({ id, kind: "deck.input", data: { text } });
-  const send = (response: ServerResponse, result: unknown) => response.end(JSON.stringify({ ok: true, result }));
+  const ids = new WeakMap<ServerResponse, string>();
+  const send = (response: ServerResponse, result: unknown) => response.end(JSON.stringify({ version: 1, id: ids.get(response), ok: true, result }));
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
-    const { command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { command: string; args: Record<string, unknown> };
+    const { id, command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { id: string; command: string; args: Record<string, unknown> };
+    ids.set(response, id);
     response.setHeader("content-type", "application/json");
     if (command === "status") return void send(response, { chatId: args.chatId ?? "1", mainChatId: "1", hubId: "test-history", model: {}, tools: "offline" });
     assert.equal(command, "history");
     if (args.before) {
       older.push(String(args.before));
-      if (older.length === 1) return void response.end(JSON.stringify({ ok: false, error: { message: "Temporary history error" } }));
+      if (older.length === 1) return void response.end(JSON.stringify({ version: 1, id, ok: false, error: { code: "runtime_failed", message: "Temporary history error" } }));
       const pages: Record<string, unknown> = {
         "101": { items: [entry(100, "older100"), entry(99, "older99\u001b[31m")], next: "99" },
         "99": { items: [entry(98, "oldest98")] },
@@ -83,16 +85,16 @@ test("plain history reduces page size on frame overflow without advancing its cu
   const requests: Record<string, unknown>[] = [];
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
-    const { command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { command: string; args: Record<string, unknown> };
+    const { id, command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { id: string; command: string; args: Record<string, unknown> };
     let result: unknown;
     if (command === "status") result = { chatId: "1", mainChatId: "1", hubId: "test-history", model: {}, tools: "offline" };
     else {
       assert.equal(command, "history"); requests.push(args);
-      if (args.limit !== 1) return void response.end(JSON.stringify({ ok: false, error: { code: "too_large", message: "Response exceeds IPC limit" } }));
-      if (args.after !== undefined) return void response.end(JSON.stringify({ ok: true, result: { items: [] } }));
+      if (args.limit !== 1) return void response.end(JSON.stringify({ version: 1, id, ok: false, error: { code: "too_large", message: "Response exceeds IPC limit" } }));
+      if (args.after !== undefined) return void response.end(JSON.stringify({ version: 1, id, ok: true, result: { items: [] } }));
       result = { items: [{ id: args.before ? 1 : 2, kind: "deck.input", data: { text: args.before ? "old small page" : "recent small page" } }], ...(args.before ? {} : { next: "2" }) };
     }
-    response.end(JSON.stringify({ ok: true, result }));
+    response.end(JSON.stringify({ version: 1, id, ok: true, result }));
   });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const address = server.address(); assert.ok(address && typeof address !== "string");

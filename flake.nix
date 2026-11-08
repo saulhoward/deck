@@ -29,6 +29,8 @@
               fileset = pkgs.lib.fileset.unions [
                 ./build.zig
                 ./src
+                ./contracts
+                ./scripts
                 ./runtime/src
                 ./runtime/tsconfig.json
                 ./package.json
@@ -45,6 +47,7 @@
             buildPhase = ''
               runHook preBuild
               export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
+              npm run contracts:check
               zig build -Doptimize=ReleaseSafe --prefix "$TMPDIR/deck-zig"
               npm run build
               runHook postBuild

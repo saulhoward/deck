@@ -35,9 +35,9 @@ for (const guard of [false, true]) test(`pinned client rejects initial ${guard ?
   let writes = 0;
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
-    const value = JSON.parse(Buffer.concat(chunks).toString()) as { command: string; hubId: string };
+    const value = JSON.parse(Buffer.concat(chunks).toString()) as { id: string; command: string; hubId: string };
     assert.equal(value.hubId, "expected"); if (value.command !== "status") writes++;
-    response.end(JSON.stringify({ ok: true, result: { hubId: guard ? "different" : "expected", ...(guard ? { hubGuard: 1 } : {}), mainChatId: "1" } }));
+    response.end(JSON.stringify({ version: 1, id: value.id, ok: true, result: { hubId: guard ? "different" : "expected", ...(guard ? { hubGuard: 1 } : {}), mainChatId: "1" } }));
   });
   server.listen(0, "127.0.0.1"); await once(server, "listening"); const address = server.address(); assert.ok(address && typeof address !== "string"); const local = await clientEnv();
   try {
@@ -52,12 +52,12 @@ test("a client pins its discovered hub across port replacement and retains the o
   let current = "hub-A"; let writes = 0; let rejected = false; let ready = false;
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
-    const value = JSON.parse(Buffer.concat(chunks).toString()) as { command: string; hubId?: string; args: Record<string, unknown> };
+    const value = JSON.parse(Buffer.concat(chunks).toString()) as { id: string; command: string; hubId?: string; args: Record<string, unknown> };
     if (value.command === "admit") { assert.equal(value.hubId, "hub-A"); rejected = true; }
-    if (value.hubId && value.hubId !== current) { response.end(JSON.stringify({ ok: false, error: { code: "conflict", message: "Hub identity changed; no command applied" } })); return; }
-    if (value.command === "status") response.end(JSON.stringify({ ok: true, result: { hubId: current, hubGuard: 1, mainChatId: "1", provider: "faux", model: { provider: "faux", modelId: "faux-1" }, tools: "native", binding: { machineId: "worker", cwd: "/saved" } } }));
-    else if (value.command === "history") { ready = true; response.end(JSON.stringify({ ok: true, result: { items: [] } })); }
-    else { writes++; response.end(JSON.stringify({ ok: true, result: { submissionId: "2" } })); }
+    if (value.hubId && value.hubId !== current) { response.end(JSON.stringify({ version: 1, id: value.id, ok: false, error: { code: "conflict", message: "Hub identity changed; no command applied" } })); return; }
+    if (value.command === "status") response.end(JSON.stringify({ version: 1, id: value.id, ok: true, result: { hubId: current, hubGuard: 1, mainChatId: "1", provider: "faux", model: { provider: "faux", modelId: "faux-1" }, tools: "native", binding: { machineId: "worker", cwd: "/saved" } } }));
+    else if (value.command === "history") { ready = true; response.end(JSON.stringify({ version: 1, id: value.id, ok: true, result: { items: [] } })); }
+    else { writes++; response.end(JSON.stringify({ version: 1, id: value.id, ok: true, result: { submissionId: "2" } })); }
   });
   server.listen(0, "127.0.0.1"); await once(server, "listening"); const address = server.address(); assert.ok(address && typeof address !== "string"); const local = await clientEnv();
   const client = spawn(process.execPath, [fileURLToPath(new URL("./client.js", import.meta.url)), "--port", String(address.port)], { env: local.env }); const closed = once(client, "close");

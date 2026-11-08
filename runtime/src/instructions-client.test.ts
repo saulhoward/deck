@@ -29,9 +29,10 @@ test("SIGKILL after real Pi application/lost ACK: frozen import draft survives p
   const target = await runtime.createTask("Target", binding); const chatId = String(target.id); const store = new DraftStore(runtime.hubId, local.env.DECK_CLIENT_STATE_DIRECTORY);
   let advertised = binding; let committed = false; let taskId = ""; const imports: Record<string, unknown>[] = []; const clients: ReturnType<typeof launch>[] = [];
   const server = createServer(async (request, response) => {
+    let id: string | undefined;
     try {
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
-      const { command, args } = JSON.parse(Buffer.concat(chunks).toString()); let result: unknown;
+      const value = JSON.parse(Buffer.concat(chunks).toString()); id = value.id; const { command, args } = value; let result: unknown;
       if (command === "status") result = { hubId: runtime.hubId, chatId: args.chatId ?? chatId, mainChatId: String(runtime.main.id), model: {}, tools: "native-files", binding: advertised };
       else if (command === "history") result = { items: [], instructions: await runtime.instructionsStatus(String(args.chatId)) };
       else if (command === "instruction_status") result = await runtime.instructionsStatus(String(args.chatId), args.taskId);
@@ -45,8 +46,8 @@ test("SIGKILL after real Pi application/lost ACK: frozen import draft survives p
         if (imports.length === 1) return; // Real atomic application committed; client never gets its ACK.
         result = { taskId, chatId, requestId: args.requestId, admitted: true, completion: "not_waited" };
       }
-      response.end(JSON.stringify({ ok: true, result }));
-    } catch { response.end(JSON.stringify({ ok: false, error: { code: "test_failed", message: "Fixture failed" } })); }
+      response.end(JSON.stringify({ version: 1, id, ok: true, result }));
+    } catch { response.end(JSON.stringify({ version: 1, id, ok: false, error: { code: "test_failed", message: "Fixture failed" } })); }
   });
   let port = await listen(server);
   try {
@@ -70,7 +71,7 @@ for (const failure of ["malformed-ack", "cleanup"] as const) test(`import ${fail
   const local = await clientEnv(); const store = new DraftStore("import-ack", local.env.DECK_CLIENT_STATE_DIRECTORY); const calls: Record<string, unknown>[] = []; const clients: ReturnType<typeof launch>[] = [];
   let repaired = false;
   const server = createServer(async (request, response) => {
-    const chunks = []; for await (const chunk of request) chunks.push(chunk); const { command, args } = JSON.parse(Buffer.concat(chunks).toString()); let result: unknown;
+    const chunks = []; for await (const chunk of request) chunks.push(chunk); const { id, command, args } = JSON.parse(Buffer.concat(chunks).toString()); let result: unknown;
     if (command === "status") result = { hubId: "import-ack", chatId: "1", mainChatId: "1", model: {}, tools: "native-files", binding: { machineId: "worker", cwd: "/work" } };
     else if (command === "history") result = { items: [] };
     else if (command === "instruction_status") result = { version: 1, chatId: "1", source: null, import: { taskId: "9", state: "running" } };
@@ -79,7 +80,7 @@ for (const failure of ["malformed-ack", "cleanup"] as const) test(`import ${fail
       if (failure === "cleanup" && !repaired) await chmod(local.env.DECK_CLIENT_STATE_DIRECTORY, 0o755);
       result = { chatId: "1", taskId: "9", requestId: !repaired && failure === "malformed-ack" ? "wrong" : args.requestId, admitted: true, completion: "not_waited" };
     }
-    response.end(JSON.stringify({ ok: true, result }));
+    response.end(JSON.stringify({ version: 1, id, ok: true, result }));
   });
   const port = await listen(server);
   try {
@@ -102,10 +103,10 @@ for (const failure of ["malformed-ack", "cleanup"] as const) test(`import ${fail
 test("import save failure blocks initial send and retry; detach with a stalled ACK never sends stop", { timeout: 15_000 }, async () => {
   const local = await clientEnv(); let imports = 0; let stops = 0; const clients: ReturnType<typeof launch>[] = [];
   const server = createServer(async (request, response) => {
-    const chunks = []; for await (const chunk of request) chunks.push(chunk); const { command } = JSON.parse(Buffer.concat(chunks).toString());
+    const chunks = []; for await (const chunk of request) chunks.push(chunk); const { id, command } = JSON.parse(Buffer.concat(chunks).toString());
     if (command === "import_instructions") { imports++; return; }
     if (command === "stop") stops++;
-    response.end(JSON.stringify({ ok: true, result: command === "status" ? { hubId: "save-fail", chatId: "1", mainChatId: "1", model: {}, tools: "native-files", binding: { machineId: "worker", cwd: "/work" } } : { items: [] } }));
+    response.end(JSON.stringify({ version: 1, id, ok: true, result: command === "status" ? { hubId: "save-fail", chatId: "1", mainChatId: "1", model: {}, tools: "native-files", binding: { machineId: "worker", cwd: "/work" } } : { items: [] } }));
   });
   const port = await listen(server);
   try {

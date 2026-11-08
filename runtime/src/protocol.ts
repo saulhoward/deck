@@ -2,11 +2,12 @@ import { Transform, type TransformCallback } from "node:stream";
 
 export const PROTOCOL_VERSION = 1;
 export const MAX_FRAME_BYTES = 1024 * 1024;
+export class FrameSizeError extends Error { constructor() { super("Invalid IPC frame length"); } }
 
 // Four-byte unsigned big-endian byte length, followed by UTF-8 JSON. No newline framing.
 export function encodeFrame(value: unknown): Buffer {
   const body = Buffer.from(JSON.stringify(value), "utf8");
-  if (body.length === 0 || body.length > MAX_FRAME_BYTES) throw new Error("Invalid IPC frame length");
+  if (body.length === 0 || body.length > MAX_FRAME_BYTES) throw new FrameSizeError();
   const header = Buffer.alloc(4);
   header.writeUInt32BE(body.length);
   return Buffer.concat([header, body]);

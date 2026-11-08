@@ -4,6 +4,8 @@ const frame_limit = 1024 * 1024;
 const Request = struct { version: u32, id: []const u8, machineId: []const u8, cwd: []const u8, operation: []const u8, args: struct { path: []const u8 = "", content: ?[]const u8 = null, oldText: ?[]const u8 = null, newText: ?[]const u8 = null, command: ?[]const u8 = null, timeout: u32 = 60, target: []const u8 = "", plan: []const u8 = "" } };
 const shell = @import("shell.zig");
 const rex = @import("rex.zig");
+const rex_inspect = @import("rex_inspect.zig");
+const contracts = @import("generated/contracts.zig");
 const Result = shell.Result;
 const Receipt = struct { hash: []const u8, result: ?Result = null };
 
@@ -74,7 +76,17 @@ fn controlled(allocator: std.mem.Allocator, journal: std.fs.Dir, machine_id: []c
     var result: Result = undefined;
     if (!std.mem.eql(u8, machine_id, request.machineId)) {
         result = .{ .ok = false, .output = "offline: assigned worker is not this machine; no local fallback", .code = "offline" };
+    } else if (std.mem.eql(u8, request.operation, "rex_allocation_receipt")) {
+        // Historical evidence only: never accept/dispatch the embedded request or
+        // publish a receipt under either the lookup ID or original allocation ID.
+        result = allocationReceipt(allocator, journal, machine_id, request.cwd, request.args.plan) catch .{ .ok = false, .code = "receipt_unavailable", .output = "Receipt inconclusive" };
+    } else if (std.mem.eql(u8, request.operation, "rex_inspect")) {
+        // Ephemeral read namespace, disjoint from Pi's safe-integer task IDs.
+        // Never consult/publish acceptance or result receipts for fresh inspection.
+        if ((try std.fmt.parseInt(u64, request.id, 10)) < (@as(u64, 1) << 63)) return error.InvalidArguments;
+        result = rex_inspect.inspect(allocator, request.cwd, request.args.plan, cancelled orelse return error.Unsupported) catch .{ .ok = false, .code = "inspection_failed", .output = "Inspection inconclusive" };
     } else blk: {
+        if ((try std.fmt.parseInt(u64, request.id, 10)) >= (@as(u64, 1) << 63)) return error.InvalidArguments;
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(body, &digest, .{});
         const hash = std.fmt.bytesToHex(digest, .lower);
@@ -97,6 +109,53 @@ fn controlled(allocator: std.mem.Allocator, journal: std.fs.Dir, machine_id: []c
         try save(allocator, journal, name, .{ .hash = &hash, .result = result });
     }
     return std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = request.id, .result = result }, .{});
+}
+
+fn receiptProjection(allocator: std.mem.Allocator, query: contracts.RexAllocationReceiptQuery, hash: []const u8, state: contracts.RexAllocationReceiptState, creation: ?contracts.RexCreation) !Result {
+    const projection: contracts.RexAllocationReceipt = .{ .version = 1, .operationId = query.operationId, .requestHash = hash, .state = state, .creation = creation };
+    const output = try std.json.Stringify.valueAlloc(allocator, projection, .{});
+    if (output.len > 16 * 1024) return error.InvalidArguments;
+    const checked = try contracts.parseRexAllocationReceipt(allocator, output);
+    checked.deinit();
+    return .{ .ok = true, .code = "rex_receipt", .output = output };
+}
+fn allocationReceipt(allocator: std.mem.Allocator, journal: std.fs.Dir, machine_id: []const u8, cwd: []const u8, encoded: []const u8) !Result {
+    if (encoded.len > 256 * 1024) return error.InvalidArguments;
+    const parsed = try contracts.parseRexAllocationReceiptQuery(allocator, encoded);
+    defer parsed.deinit();
+    const query = parsed.value;
+    if (query.request.len > 128 * 1024) return error.InvalidArguments;
+    const original = try std.json.parseFromSlice(Request, allocator, query.request, .{});
+    defer original.deinit();
+    const request = original.value;
+    if (request.version != 1 or !std.mem.eql(u8, request.id, query.operationId) or (try std.fmt.parseInt(u64, request.id, 10)) > 9007199254740991 or !std.mem.eql(u8, request.machineId, machine_id) or !std.mem.eql(u8, request.cwd, cwd) or !std.fs.path.isAbsolute(cwd) or !std.mem.eql(u8, request.operation, "rex_allocate")) return error.InvalidArguments;
+    const plan = try contracts.parseRexAllocationPlan(allocator, request.args.plan);
+    plan.deinit();
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(query.request, &digest, .{});
+    const hash = std.fmt.bytesToHex(digest, .lower);
+    const name = try std.fmt.allocPrint(allocator, "{s}.json", .{query.operationId});
+    defer allocator.free(name);
+    const fd = std.posix.openat(journal.fd, name, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NONBLOCK = true, .NOFOLLOW = true }, 0) catch |err| return receiptProjection(allocator, query, &hash, if (err == error.FileNotFound) .missing else .inconclusive, null);
+    const file = std.fs.File{ .handle = fd };
+    defer file.close();
+    const stat = try file.stat();
+    if (stat.kind != .file or stat.size > frame_limit) return receiptProjection(allocator, query, &hash, .inconclusive, null);
+    const bytes = try file.readToEndAlloc(allocator, frame_limit);
+    defer allocator.free(bytes);
+    const receipt = std.json.parseFromSlice(Receipt, allocator, bytes, .{}) catch return receiptProjection(allocator, query, &hash, .inconclusive, null);
+    defer receipt.deinit();
+    if (!std.mem.eql(u8, receipt.value.hash, &hash)) return receiptProjection(allocator, query, &hash, .conflict, null);
+    const result = receipt.value.result orelse return receiptProjection(allocator, query, &hash, .accepted, null);
+    if (!result.ok) {
+        const code = result.code;
+        const refused = std.mem.eql(u8, code, "invalid") or std.mem.eql(u8, code, "offline") or std.mem.eql(u8, code, "cancelled") or std.mem.eql(u8, code, "server_unavailable");
+        return receiptProjection(allocator, query, &hash, if (refused) .not_allocated else .inconclusive, null);
+    }
+    if (!std.mem.eql(u8, result.code, "allocated") or result.truncated or result.output.len > 16 * 1024) return receiptProjection(allocator, query, &hash, .inconclusive, null);
+    const creation = contracts.parseRexCreation(allocator, result.output) catch return receiptProjection(allocator, query, &hash, .inconclusive, null);
+    defer creation.deinit();
+    return receiptProjection(allocator, query, &hash, .allocated, creation.value);
 }
 
 const Slot = struct {
@@ -188,7 +247,7 @@ fn processJob(state: *State, slot: *Slot, body: []u8) void {
     var progress = ProgressContext{ .state = state, .slot = slot };
     const response = controlled(allocator, state.journal, state.machine_id, body, &slot.cancelled, .{ .context = &progress, .publish = ProgressContext.publish }) catch blk: {
         const id = std.fmt.allocPrint(allocator, "{d}", .{slot.id}) catch return;
-        break :blk std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = id, .result = Result{ .ok = false, .output = "effect_uncertain: worker failed; inspect effects before retrying", .code = "effect_uncertain" } }, .{}) catch return;
+        break :blk std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = id, .result = Result{ .ok = false, .output = if (slot.id >= (@as(u64, 1) << 63)) "Inspection inconclusive" else "effect_uncertain: worker failed; inspect effects before retrying", .code = if (slot.id >= (@as(u64, 1) << 63)) "inspection_failed" else "effect_uncertain" } }, .{}) catch return;
     };
     state.send(response) catch {};
 }
@@ -246,7 +305,7 @@ pub fn serve(read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.
             state.mutex.unlock();
             const response = std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = request.id, .progress = .{ .output = tail[0..used], .truncated = truncated, .lossyUtf8 = lossy } }, .{}) catch return;
             state.send(response) catch return;
-        } else if (std.mem.eql(u8, parsed.value.operation, "bash") or std.mem.eql(u8, parsed.value.operation, "rex_allocate")) {
+        } else if (std.mem.eql(u8, parsed.value.operation, "bash") or std.mem.eql(u8, parsed.value.operation, "rex_allocate") or std.mem.eql(u8, parsed.value.operation, "rex_inspect")) {
             const id = std.fmt.parseInt(u64, parsed.value.id, 10) catch return;
             state.mutex.lock();
             var selected: ?*Slot = null;

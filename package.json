@@ -5,9 +5,11 @@
   "type": "module",
   "engines": { "node": ">=24 <25" },
   "scripts": {
+    "contracts:generate": "node scripts/generate-contracts.mjs",
+    "contracts:check": "node scripts/generate-contracts.mjs --check",
     "build": "tsc -p runtime/tsconfig.json",
-    "check": "tsc -p runtime/tsconfig.json --noEmit",
-    "test": "npm run build && node --test --test-concurrency=4 runtime/dist/*.test.js"
+    "check": "npm run contracts:check && tsc -p runtime/tsconfig.json --noEmit",
+    "test": "npm run build && node --test --test-concurrency=4 runtime/dist/*.test.js scripts/*.test.mjs"
   },
   "dependencies": {
     "@earendil-works/chord": "1.4.0",

@@ -309,4 +309,5 @@ test {
     _ = @import("worker_test.zig");
     _ = @import("worker_limits_test.zig");
     _ = @import("shell_test.zig");
+    _ = @import("contracts_test.zig");
 }

@@ -2,12 +2,14 @@ import assert from "node:assert/strict";
 import { execFile, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { constants } from "node:fs";
-import { access, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import type { RexBinding, RexResult, RexStartup } from "./rex-allocation.js";
+import type { ReconcileResult } from "./rex-reconciliation.js";
+import type { RexInspectionSnapshot } from "./generated/contracts.js";
 
 // Deliberately opt-in: never connect to an operator's existing Rex server. Rex is
 // externally managed, not installed/downloaded by the build or normal test suite.
@@ -79,11 +81,15 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
       const status = await json<{ endpoint: string; session_count: number; tailscale: { state: string }; you: { transport: string }; api_revision: number; rex_version: string }>("server", "status", "--json");
       assert.equal(status.endpoint, endpoint); assert.equal(status.session_count, 0); assert.equal(status.tailscale.state, "disabled"); assert.equal(status.you.transport, "unix");
       assert.equal((await stat(join(root, "rex.sock"))).mode & 0o077, 0);
-      assert.ok(Number.isInteger(status.api_revision));
+      assert.equal(status.api_revision, 8);
+      await assert.rejects(rex("api", "call", "session.view", JSON.stringify({ session_id: "session:00000000-0000-4000-8000-000000000001" })), /status=404 code=session_not_found/);
       t.diagnostic(`Rex ${status.rex_version}; API revision ${status.api_revision}; isolated Unix server`);
       const schema = await json<{ input_schema: { properties: Record<string, unknown>; additionalProperties: boolean } }>("api", "describe", "session.create", "--json");
       assert.deepEqual(Object.keys(schema.input_schema.properties).sort(), ["initial_windows", "label"]);
       assert.equal(schema.input_schema.additionalProperties, false);
+      const window = await json<{ input_schema: { properties: Record<string, unknown>; additionalProperties: boolean } }>("api", "describe", "session.new_window", "--json");
+      assert.deepEqual(Object.keys(window.input_schema.properties).sort(), ["focus", "layout", "session_id", "window_label"]);
+      assert.equal(window.input_schema.additionalProperties, false); // No expected revision/process guard or idempotency key.
     });
     await t.test("direct argv preserves metacharacters/cwd; terminals outlive creation CLI connections", async () => {
       const literal = ["space argument", "$(touch INJECTED)", "; touch INJECTED", "--server=not-an-option", "quotes'\"", "line\nbreak", "🌍"];
@@ -209,13 +215,19 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
       assert.doesNotMatch(JSON.stringify(await command("history", { chatId: status.mainChatId })), /DETACH_WORK/);
       assert.equal((await command("list_chats")).items.length, 2);
     });
-    await t.test("internal allocation joins native REX_BLOCK startup before apply; exit preserves historical evidence, not health", async () => {
+    await t.test("explicit native-receipt reconciliation repairs a lost creation reply; inspection and startup remain separate", async () => {
       const info = await json<{ host_id: string; instance_id: string }>("server", "status", "--json");
       const chat = await command("create_task", { requestId: "internal-rex-chat", title: "Internal allocated task", ...status.binding });
       const request = join(state, "allocator-request");
-      await writeFile(request, JSON.stringify({ chatId: chat.chatId, target: { executable: rexBinary, server: endpoint, hostId: info.host_id, instanceId: info.instance_id, client: await realpath(deckBinary!), port } }));
-      const value = await until(async () => { try { return JSON.parse(await readFile(`${request}.result`, "utf8")) as { taskId: number; duplicate: number; outcome: { status: string; result: RexResult }; binding: RexBinding; startup: RexStartup }; } catch { return undefined; } }, (value) => !!value);
-      assert.ok(value); assert.equal(value.taskId, value.duplicate); assert.equal(value.outcome.status, "completed"); assert.equal(value.outcome.result.status, "allocated");
+      await writeFile(request, JSON.stringify({ chatId: chat.chatId, loseReply: true, target: { executable: rexBinary, server: endpoint, hostId: info.host_id, instanceId: info.instance_id, client: await realpath(deckBinary!), port } }));
+      const original = await until(async () => { try { return JSON.parse(await readFile(`${request}.result`, "utf8")) as { taskId: number; duplicate: number; outcome: { status: string; result: RexResult }; binding?: RexBinding; startup: RexStartup }; } catch { return undefined; } }, (value) => !!value);
+      assert.ok(original); assert.equal(original.taskId, original.duplicate); assert.equal(original.outcome.status, "completed"); assert.equal(original.outcome.result.status, "uncertain");
+      assert.equal(original.binding, undefined); assert.equal(original.startup.observation, "unbound");
+      const beforeRepair = await readdir(join(state, "worker/operations"));
+      await writeFile(`${request}.reconcile`, "explicit operator request");
+      const value = await until(async () => { try { return JSON.parse(await readFile(`${request}.reconciled`, "utf8")) as { taskId: number; reconciliationTaskId: number; outcome: { status: string; result: ReconcileResult }; originalOutcome: unknown; binding: RexBinding; startup: RexStartup }; } catch { return undefined; } }, (value) => !!value);
+      assert.ok(value); assert.equal(value.taskId, original.taskId); assert.notEqual(value.reconciliationTaskId, value.taskId); assert.equal(value.outcome.status, "completed"); assert.equal(value.outcome.result.status, "reconciled");
+      assert.deepEqual(value.originalOutcome, original.outcome); assert.deepEqual(await readdir(join(state, "worker/operations")), beforeRepair);
       const saved = value.binding; sessionIds.push(saved.sessionId);
       assert.equal(saved.chatId, chat.chatId); assert.equal(saved.hubId, status.hubId); assert.equal(saved.readiness, "not_checked");
       await until(() => rex("capture", "--session", saved.sessionId, "--block", saved.blockId, "--trim", "--unwrap"), (text) => text.includes("Rex startup registered"));
@@ -225,11 +237,34 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
       assert.equal((await command("list_chats")).items.length, 3);
       const receipt = JSON.parse(await readFile(join(state, "worker", "operations", `${value.taskId}.json`), "utf8")) as { result: { code: string } };
       assert.equal(receipt.result.code, "allocated");
+      let sampleIndex = 0;
+      const sample = async () => {
+        const path = `${request}.presence.${sampleIndex++}`;
+        await writeFile(path, "read");
+        const result = await until(async () => { try { return JSON.parse(await readFile(`${path}.result`, "utf8")) as { presence: RexInspectionSnapshot; startup: RexStartup; binding: RexBinding }; } catch { return undefined; } }, (value) => !!value);
+        assert.ok(result); assert.equal(result.presence.status, "sampled"); assert.equal(result.startup.observation, "matched");
+        assert.equal(result.startup.live, "not_checked"); assert.deepEqual(result.binding, saved);
+        assert.doesNotMatch(JSON.stringify(result.presence), /argv0|foreground|home|pid/);
+        return result.presence;
+      };
+      const receipts = await readdir(join(state, "worker/operations"));
+      assert.equal((await sample()).observation?.state, "running");
       await rex("send", "--session", saved.sessionId, "--block", saved.blockId, "/exit\n");
       assert.equal((await exit(saved.sessionId, saved.blockId)).exit_code, 0);
       await writeFile(`${request}.inspect`, "");
       const afterExit = await until(async () => { try { return JSON.parse(await readFile(`${request}.inspect.result`, "utf8")) as RexStartup; } catch { return undefined; } }, (value) => !!value);
       assert.deepEqual(afterExit, value.startup); // Historical registration does not become an invented heartbeat.
+      const exited = await sample();
+      assert.equal(exited.observation?.state, "exited", JSON.stringify(exited)); assert.equal(exited.observation.exitCode, 0);
+      // Keep another ordinary scratch block in this session, making exact block
+      // removal distinguishable from destruction of the whole saved session.
+      const other = await json<Run>("run", "--session", saved.sessionId, "--focus=false", "--json", "--cwd", work, "--shell=none", "--keep-open", "--", process.execPath, "-e", "setInterval(()=>{},1000)");
+      fullId(other.window_id, "window");
+      await rex("block", "close", saved.blockId, "--session", saved.sessionId);
+      assert.equal((await sample()).observation?.state, "missing_terminal");
+      await rex("session", "kill", saved.sessionId);
+      assert.equal((await sample()).observation?.state, "missing_session");
+      assert.deepEqual(await readdir(join(state, "worker/operations")), receipts);
       assert.deepEqual((await command("history", { chatId: chat.chatId })).items, []);
     });
   } finally {

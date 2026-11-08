@@ -19,7 +19,7 @@ for (const kind of ["input", "task"] as const) test(`SIGKILL recovery preserves 
   let binding = { machineId: "offline-original", cwd: "/original" };
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
-    const { command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { command: string; args: Record<string, unknown> };
+    const { id, command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { id: string; command: string; args: Record<string, unknown> };
     let result: unknown = {};
     if (command === "status") result = { hubId: "durable-hub", chatId: args.chatId ?? "1", mainChatId: "1", model: {}, tools: "offline", binding };
     else if (command === "history") result = { items: [] };
@@ -32,7 +32,7 @@ for (const kind of ["input", "task"] as const) test(`SIGKILL recovery preserves 
       if (calls.length === 1) return; // Commit happened; acknowledgement is lost.
       result = kind === "input" ? { submissionId: "10" } : { chatId: "3" };
     }
-    response.end(JSON.stringify({ ok: true, result }));
+    response.end(JSON.stringify({ version: 1, id, ok: true, result }));
   });
   const listen = async () => { server.listen(0, "127.0.0.1"); await once(server, "listening"); const address = server.address(); assert.ok(address && typeof address !== "string"); return address.port; };
   let port = await listen();
@@ -64,9 +64,9 @@ test("one-shot malformed ACK remains recoverable; new one-shot text cannot repla
   const local = await clientEnv(); const store = new DraftStore("ack-hub", local.env.DECK_CLIENT_STATE_DIRECTORY); let admitted = 0;
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
-    const { command } = JSON.parse(Buffer.concat(chunks).toString()) as { command: string };
+    const { id, command } = JSON.parse(Buffer.concat(chunks).toString()) as { id: string; command: string };
     if (command === "admit") admitted++;
-    response.end(JSON.stringify({ ok: true, result: command === "status" ? { hubId: "ack-hub", mainChatId: "1", chatId: "1", model: {}, tools: "offline" } : command === "history" ? { items: [] } : {} }));
+    response.end(JSON.stringify({ version: 1, id, ok: true, result: command === "status" ? { hubId: "ack-hub", mainChatId: "1", chatId: "1", model: {}, tools: "offline" } : command === "history" ? { items: [] } : {} }));
   });
   server.listen(0, "127.0.0.1"); await once(server, "listening"); const address = server.address(); assert.ok(address && typeof address !== "string");
   const run = async (args: string[], input?: string) => {

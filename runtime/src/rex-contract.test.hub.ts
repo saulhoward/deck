@@ -37,6 +37,8 @@ const runtime = await DeckRuntime.open(args[0]!, { models, model: { provider: fa
       do { startup = await runtime.terminalStartup(plan.chatId); if (startup.observation !== "not_observed") break; await new Promise((resolve) => setTimeout(resolve, 25)); } while (performance.now() < deadline);
       if (startup.observation !== "unbound") throw new Error("Early startup not observed");
       await writeFile(`${process.env.DECK_REX_ALLOC_REQUEST}.early`, JSON.stringify(startup));
+      const control = JSON.parse(await readFile(process.env.DECK_REX_ALLOC_REQUEST, "utf8")) as { loseReply?: boolean };
+      if (control.loseReply) return { ok: false, code: "effect_uncertain", output: "Test-only lost creation reply" };
     }
     return result;
   } }, environment: () => undefined,
@@ -47,13 +49,29 @@ if (process.env.DECK_REX_ALLOC_REQUEST) void (async () => {
   const path = process.env.DECK_REX_ALLOC_REQUEST!;
   while (!closing && !await exists(path)) await new Promise((resolve) => setTimeout(resolve, 25));
   if (closing) return;
-  const request = JSON.parse(await readFile(path, "utf8")) as { chatId: string; target: RexTarget };
+  const request = JSON.parse(await readFile(path, "utf8")) as { chatId: string; target: RexTarget; loseReply?: boolean };
   const taskId = await runtime.allocateTerminal(request.chatId, "internal-allocation", request.target);
   const task = await runtime.harness.waitForTask(taskId, context);
   const duplicate = await runtime.allocateTerminal(request.chatId, "internal-allocation", request.target);
   await writeFile(`${path}.result`, JSON.stringify({ taskId, duplicate, outcome: task.state.outcome, binding: await runtime.terminalBinding(request.chatId), startup: await runtime.terminalStartup(request.chatId) }));
-  while (!closing && !await exists(`${path}.inspect`)) await new Promise((resolve) => setTimeout(resolve, 25));
-  if (!closing) await writeFile(`${path}.inspect.result`, JSON.stringify(await runtime.terminalStartup(request.chatId)));
+  if (request.loseReply) {
+    while (!closing && !await exists(`${path}.reconcile`)) await new Promise((resolve) => setTimeout(resolve, 25));
+    if (closing) return;
+    const reconciliationTaskId = await runtime.reconcileTerminal(request.chatId, "explicit-reconciliation");
+    const reconciled = await runtime.harness.waitForTask(reconciliationTaskId, context);
+    await writeFile(`${path}.reconciled`, JSON.stringify({ taskId, reconciliationTaskId, outcome: reconciled.state.outcome, originalOutcome: (await runtime.harness.waitForTask(taskId, context)).state.outcome, binding: await runtime.terminalBinding(request.chatId), startup: await runtime.terminalStartup(request.chatId) }));
+  }
+  const historical = (async () => {
+    while (!closing && !await exists(`${path}.inspect`)) await new Promise((resolve) => setTimeout(resolve, 25));
+    if (!closing) await writeFile(`${path}.inspect.result`, JSON.stringify(await runtime.terminalStartup(request.chatId)));
+  })().catch(() => { process.stderr.write("Rex historical test read failed\n"); });
+  // Repeated fresh reads, never another durable operation or public mutation API.
+  for (let index = 0; !closing; index++) {
+    const read = `${path}.presence.${index}`;
+    while (!closing && !await exists(read)) await new Promise((resolve) => setTimeout(resolve, 25));
+    if (!closing) await writeFile(`${read}.result`, JSON.stringify({ presence: await runtime.inspectTerminal(request.chatId), startup: await runtime.terminalStartup(request.chatId), binding: await runtime.terminalBinding(request.chatId) }));
+  }
+  await historical;
 })().catch(() => { process.stderr.write("Rex allocation test control failed\n"); });
 async function shutdown() { if (closing) return; closing = true; process.stdin.destroy(); await runtime.close(); await files.close(); }
 process.once("SIGTERM", () => { void shutdown().then(() => process.exit(0)); });

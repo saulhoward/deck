@@ -65,7 +65,7 @@ export class PipeFiles implements HostFiles {
   }
   async call(binding: Binding, id: string, operation: string, args: Args, signal?: AbortSignal, onProgress?: (progress: ShellProgress) => void): Promise<FileResult> {
     signal?.throwIfAborted();
-    const processOperation = operation === "bash" || operation === "rex_allocate";
+    const processOperation = operation === "bash" || operation === "rex_allocate" || operation === "rex_inspect";
     if (processOperation && !this.control) throw new Error("offline: process cancellation channel unavailable");
     if (this.failed) throw new Error("offline: local worker unavailable");
     if ([...this.pending.values()].filter((item) => item.kind === "result").length >= 16 || this.pending.has(id)) throw new Error("busy: native operation capacity reached");

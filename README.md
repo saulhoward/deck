@@ -33,7 +33,7 @@ The flake targets arm64/x86_64 macOS and Linux. CI checks macOS and Linux on its
 ## Layout
 
 - `src/`, `build.zig`: Zig CLI, private-state initialization, writer locking/supervision and tests.
-- `runtime/`: strict ESM TypeScript, version-pinned Pi adapter, IPC frame codec and offline contract tests.
+- `runtime/`: strict ESM TypeScript, version-pinned Pi adapter, IPC frame codec, schema-generated request/response envelope validation with exact reply correlation, and offline contract tests.
 - `docs/implementation-plan.md`: phased rollout, completed checks and implementation limitations.
 - `docs/architecture.md`: proposed system design (not an implementation claim).
 - `flake.nix`, `flake.lock`: reproducible package and development environment.
@@ -58,7 +58,7 @@ Use `/instructions load` to explicitly import saved-worker `AGENTS.md` into Pi's
 
 ## Rex allocation foundation (internal only)
 
-An opt-in [isolated Rex CLI test](docs/rex-contract.md) exercises real Deck clients, stable IDs, hub reconnect and continued central Pi execution after Rex destruction. The new [internal Pi/native allocator](docs/rex-allocation.md) persists launch intent, retains a native effect receipt and atomically binds full Rex IDs without inference. It refuses duplicate/uncertain retries and launches clients pinned to the intended hub. [Allocation-bound startup registration](docs/rex-startup.md) now joins the saved intent, native `REX_BLOCK` and retained binding, including early/lost-ACK recovery. It is a **historical observation, not current health**. Uncertain-create reconciliation, public save-before-send allocation and open/reopen/replacement remain deferred. Normal tests never connect to your Rex server.
+An opt-in [isolated Rex CLI test](docs/rex-contract.md) exercises real Deck clients, stable IDs, hub reconnect and continued central Pi execution after Rex destruction. The new [internal Pi/native allocator](docs/rex-allocation.md) persists launch intent, retains a native effect receipt and atomically binds full Rex IDs without inference. It refuses duplicate/uncertain retries and launches clients pinned to the intended hub. [Allocation-bound startup registration](docs/rex-startup.md) now joins the saved intent, native `REX_BLOCK` and retained binding, including early/lost-ACK recovery. It is a **historical observation, not current health**. New [internal read-only inspection](docs/rex-inspection.md) separately samples the saved worker/full Rex IDs without creating objects, Pi work or read receipts; running process presence is not responsive-client readiness. [Explicit receipt-based reconciliation](docs/rex-reconciliation.md) can now repair an unbound creation binding only from hash-matched native success, preserving the original uncertain/aborted result and never calling Rex. Missing evidence stays unresolved. Broader reconciliation, public save-before-send allocation and open/reopen/replacement remain deferred. Normal tests never connect to your Rex server.
 
 ## Offline backup and restore
 

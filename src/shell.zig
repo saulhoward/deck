@@ -18,6 +18,19 @@ pub fn runObserved(allocator: std.mem.Allocator, cwd: []const u8, command: []con
 // Shared owned-process runner. Raw mode is for bounded native CLI JSON, not a
 // model tool: malformed/truncated/lossy output cannot become a trusted result.
 pub fn runArgv(allocator: std.mem.Allocator, cwd: []const u8, argv: []const []const u8, seconds: u32, cancelled: *std.atomic.Value(bool), progress: ?Progress, raw: bool) !Result {
+    return runOwned(allocator, cwd, argv, seconds, cancelled, progress, raw, null);
+}
+pub const Captured = struct { result: Result, stdout: []const u8, stderr: []const u8 };
+const Capture = struct { streams: [2]std.array_list.Managed(u8) };
+// Separate bounded channels are needed to recognize an exact native error, never
+// a diagnostic-looking string in stdout. Neither channel is retained as a receipt.
+pub fn runArgvCaptured(allocator: std.mem.Allocator, cwd: []const u8, argv: []const []const u8, seconds: u32, cancelled: *std.atomic.Value(bool)) !Captured {
+    var capture = Capture{ .streams = .{ .init(allocator), .init(allocator) } };
+    defer for (&capture.streams) |*stream| stream.deinit();
+    const result = try runOwned(allocator, cwd, argv, seconds, cancelled, null, true, &capture);
+    return .{ .result = result, .stdout = try allocator.dupe(u8, capture.streams[0].items), .stderr = try allocator.dupe(u8, capture.streams[1].items) };
+}
+fn runOwned(allocator: std.mem.Allocator, cwd: []const u8, argv: []const []const u8, seconds: u32, cancelled: *std.atomic.Value(bool), progress: ?Progress, raw: bool, capture: ?*Capture) !Result {
     if (!std.fs.path.isAbsolute(cwd) or argv.len == 0 or seconds == 0 or seconds > 300) return error.InvalidArguments;
     if (cancelled.load(.acquire)) return .{ .ok = false, .output = "Cancelled before spawn", .code = "cancelled" };
     var env = try std.process.getEnvMap(allocator);
@@ -100,6 +113,10 @@ pub fn runArgv(allocator: std.mem.Allocator, cwd: []const u8, argv: []const []co
             if (count == 0) {
                 open[index] = false;
                 continue;
+            }
+            if (capture) |sink| {
+                const stream = &sink.streams[index];
+                try stream.appendSlice(chunk[0..@min(count, limit - stream.items.len)]);
             }
             if (used + count > limit) {
                 const drop = used + count - limit;

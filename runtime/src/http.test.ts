@@ -33,6 +33,17 @@ test("loopback hub and plain detached client: admission, security checks, task i
     assert.ok(ready);
     assert.equal((await raw("not json")).status, 400);
     assert.equal((await raw('{"version":2}')).status, 400);
+    // The public Zig guard and private TS guard consume the same schema.
+    for (const envelope of [{ version: 1, id: "id" }, { version: 1, id: "id", command: [] }, { version: 1, id: "🤖".repeat(201), command: "status" }, { version: 1, id: null, command: "status" }]) {
+      assert.equal((await raw(JSON.stringify(envelope))).status, 400);
+    }
+    const unicode = await raw(JSON.stringify({ version: 1, id: "🤖".repeat(200), command: "status", extension: true }));
+    assert.equal(unicode.status, 200);
+    const echoed = await unicode.json() as { ok: boolean; id: string };
+    assert.equal(echoed.ok, true); assert.equal(echoed.id, "🤖".repeat(200));
+    // Envelope validation does not replace command/hub authority checks.
+    const invalidArgs = await (await raw(JSON.stringify({ version: 1, id: "args", command: "status", args: 42 }))).json() as { ok: boolean; error: { code: string } };
+    assert.equal(invalidArgs.ok, false); assert.equal(invalidArgs.error.code, "invalid");
     assert.equal((await raw("{}", { origin: "https://evil.example" })).status, 403);
     const badHost = await new Promise<number>((resolve, reject) => {
       const request = httpRequest(url, { method: "POST", headers: { host: "evil.example", "content-length": "2" } }, (response) => { response.resume(); resolve(response.statusCode!); });

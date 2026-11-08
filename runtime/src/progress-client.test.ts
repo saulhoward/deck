@@ -19,20 +19,21 @@ test("plain previews are bounded/sanitized snapshots; outages, replacements and 
   const final = "FINAL_CANONICAL_" + "f".repeat(5000) + "_END";
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
-    const { command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { command: string; args: Record<string, unknown> };
+    const { id, command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { id: string; command: string; args: Record<string, unknown> };
     if (command === "stop") stopCalls++;
-    if (command === "status") { response.end(JSON.stringify({ ok: true, result: { chatId: args.chatId ?? "1", mainChatId: "1", hubId: "progress-client", model: {} } })); return; }
+    const reply = (result: unknown) => response.end(JSON.stringify({ version: 1, id, ok: true, result }));
+    if (command === "status") { reply({ chatId: args.chatId ?? "1", mainChatId: "1", hubId: "progress-client", model: {} }); return; }
     assert.equal(command, "history"); assert.equal(args.includeProgress, true); assert.equal(args.includeInstructions, true); polls++;
     if (failNext) { failNext = false; failed = true; response.writeHead(503); response.end(); return; }
     const chatId = String(args.chatId);
     if (holdOld && chatId === "1") {
       holdOld = false;
-      releaseOld = () => response.end(JSON.stringify({ ok: true, result: { items: [], progress: preview("1", "STALE_SELECTION_MUST_NOT_PRINT"), instructions: { version: 1, chatId: "1", source: { machineId: "STALE_SELECTION_INSTRUCTION_SOURCE", cwd: "/old", path: "AGENTS.md", sha256: "a".repeat(64), bytes: 1, taskId: "9" }, import: null } } })); return;
+      releaseOld = () => reply({ items: [], progress: preview("1", "STALE_SELECTION_MUST_NOT_PRINT"), instructions: { version: 1, chatId: "1", source: { machineId: "STALE_SELECTION_INSTRUCTION_SOURCE", cwd: "/old", path: "AGENTS.md", sha256: "a".repeat(64), bytes: 1, taskId: "9" }, import: null } }); return;
     }
-    response.end(JSON.stringify({ ok: true, result: {
+    reply({
       items: chatId === "1" && settled && args.after === "0" ? [{ id: 1, kind: "pi.assistant", model: [{ content: [{ type: "text", text: final }] }] }] : [],
       progress: chatId === "2" ? preview("2", "SECOND_CHAT") : settled ? { version: 1, chatId, provisional: true } : preview(chatId, text, attempt),
-    } }));
+    });
   });
   server.listen(0, "127.0.0.1"); await once(server, "listening"); const address = server.address(); assert.ok(address && typeof address !== "string");
   const local = await clientEnv();
@@ -68,11 +69,11 @@ for (const detach of ["exit", "SIGINT"] as const) test(`blocked stdout backpress
   let polls = 0; let stopCalls = 0;
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
-    const { command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { command: string; args: Record<string, unknown> };
+    const { id, command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { id: string; command: string; args: Record<string, unknown> };
     if (command === "stop") stopCalls++;
-    if (command === "status") { response.end(JSON.stringify({ ok: true, result: { chatId: "1", mainChatId: "1", hubId: "progress-backpressure", model: {} } })); return; }
+    if (command === "status") { response.end(JSON.stringify({ version: 1, id, ok: true, result: { chatId: "1", mainChatId: "1", hubId: "progress-backpressure", model: {} } })); return; }
     assert.equal(command, "history"); polls++;
-    response.end(JSON.stringify({ ok: true, result: {
+    response.end(JSON.stringify({ version: 1, id, ok: true, result: {
       items: polls === 2 ? [{ id: 1, kind: "pi.assistant", model: [{ content: [{ type: "text", text: "x".repeat(500_000) }] }] }] : [],
       progress: polls === 1 ? { version: 1, chatId: "1", provisional: true } : preview(String(args.chatId), `snapshot-${polls}`),
       instructions: { version: 1, chatId: String(args.chatId), source: null, import: { taskId: String(polls), state: "running" } },

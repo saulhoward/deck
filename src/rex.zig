@@ -1,33 +1,11 @@
 const std = @import("std");
 const process = @import("shell.zig");
 const Result = process.Result;
-pub const Plan = struct {
-    executable: []const u8,
-    server: []const u8,
-    hostId: []const u8,
-    instanceId: []const u8,
-    client: []const u8,
-    port: u16,
-    hubId: []const u8,
-    chatId: []const u8,
-    label: []const u8,
-    allocationId: ?[]const u8 = null,
-};
+const contracts = @import("generated/contracts.zig");
+pub const Plan = contracts.RexAllocationPlan;
 fn refuse(code: []const u8) Result {
     // Never expose CLI stderr, session contents or authentication diagnostics.
     return .{ .ok = false, .output = code, .code = code };
-}
-fn uuid(value: []const u8) bool {
-    if (value.len != 36) return false;
-    for (value, 0..) |byte, i| {
-        if (i == 8 or i == 13 or i == 18 or i == 23) {
-            if (byte != '-') return false;
-        } else if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
-    }
-    return true;
-}
-fn id(value: []const u8, prefix: []const u8) bool {
-    return std.mem.startsWith(u8, value, prefix) and uuid(value[prefix.len..]);
 }
 fn absolute(value: []const u8) bool {
     return value.len > 0 and value.len <= 4096 and value[0] == '/' and std.mem.indexOfScalar(u8, value, 0) == null;
@@ -36,12 +14,6 @@ fn valid(plan: Plan) bool {
     if (!absolute(plan.executable) or !absolute(plan.client) or !std.mem.startsWith(u8, plan.server, "unix:///")) return false;
     const socket = plan.server["unix://".len..];
     if (!absolute(socket) or socket.len > 100 or std.mem.indexOfAny(u8, socket, "?#%\r\n") != null) return false;
-    if (plan.allocationId) |allocation| if (!uuid(allocation)) return false;
-    if (!uuid(plan.hostId) or !uuid(plan.instanceId) or !uuid(plan.hubId) or plan.port == 0) return false;
-    if (plan.chatId.len == 0 or plan.chatId.len > 16 or plan.chatId[0] == '0') return false;
-    for (plan.chatId) |byte| if (!std.ascii.isDigit(byte)) return false;
-    if (plan.label.len == 0 or plan.label.len > 120) return false;
-    for (plan.label) |byte| if (byte < 32 or byte >= 127) return false;
     return true;
 }
 fn cli(allocator: std.mem.Allocator, cwd: []const u8, plan: Plan, suffix: []const []const u8, cancelled: *std.atomic.Value(bool)) !Result {
@@ -60,7 +32,8 @@ fn sameServer(allocator: std.mem.Allocator, cwd: []const u8, plan: Plan, cancell
 
 pub fn allocate(allocator: std.mem.Allocator, cwd: []const u8, encoded: []const u8, cancelled: *std.atomic.Value(bool)) !Result {
     if (encoded.len > 16 * 1024) return refuse("invalid");
-    const parsed = std.json.parseFromSlice(Plan, allocator, encoded, .{}) catch return refuse("invalid");
+    const parsed = contracts.parseRexAllocationPlan(allocator, encoded) catch return refuse("invalid");
+    defer parsed.deinit();
     const plan = parsed.value;
     if (!valid(plan)) return refuse("invalid");
     // Only our own Deck client (the packaged wrapper when present), never an
@@ -83,9 +56,9 @@ pub fn allocate(allocator: std.mem.Allocator, cwd: []const u8, encoded: []const 
     const Created = struct { session_id: []const u8, initial_windows: []struct { window_id: []const u8, block_ids: [][]const u8 } };
     const value = std.json.parseFromSlice(Created, allocator, created.output, .{ .ignore_unknown_fields = true }) catch return refuse("effect_uncertain");
     const session = value.value;
-    if (!id(session.session_id, "session:") or session.initial_windows.len != 1) return refuse("effect_uncertain");
+    if (!contracts.validRexSessionId(.{ .string = session.session_id }) or session.initial_windows.len != 1) return refuse("effect_uncertain");
     const window = session.initial_windows[0];
-    if (!id(window.window_id, "window:") or window.block_ids.len != 1 or !id(window.block_ids[0], "block:")) return refuse("effect_uncertain");
+    if (!contracts.validRexWindowId(.{ .string = window.window_id }) or window.block_ids.len != 1 or !contracts.validRexBlockId(.{ .string = window.block_ids[0] })) return refuse("effect_uncertain");
     const listed = cli(allocator, cwd, plan, &.{ "block", "ls", "--session", session.session_id, "--json", "--short=false" }, cancelled) catch return refuse("effect_uncertain");
     if (!listed.ok) return refuse("effect_uncertain");
     const Blocks = struct { blocks: []struct { block_id: []const u8, window_id: ?[]const u8 = null, host_id: []const u8, flavor: []const u8 } };
@@ -96,5 +69,9 @@ pub fn allocate(allocator: std.mem.Allocator, cwd: []const u8, encoded: []const 
         matched += 1;
     };
     if (matched != 1 or !(sameServer(allocator, cwd, plan, cancelled) catch false) or cancelled.load(.acquire)) return refuse("effect_uncertain");
-    return .{ .ok = true, .code = "allocated", .output = try std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .server = plan.server, .hostId = plan.hostId, .instanceId = plan.instanceId, .sessionId = session.session_id, .windowId = window.window_id, .blockId = window.block_ids[0], .chatId = plan.chatId, .hubId = plan.hubId, .allocationId = plan.allocationId, .readiness = "not_checked" }, .{}) };
+    const creation: contracts.RexCreation = .{ .version = 1, .server = plan.server, .hostId = plan.hostId, .instanceId = plan.instanceId, .sessionId = session.session_id, .windowId = window.window_id, .blockId = window.block_ids[0], .chatId = plan.chatId, .hubId = plan.hubId, .allocationId = plan.allocationId, .readiness = "not_checked" };
+    const output = try std.json.Stringify.valueAlloc(allocator, creation, .{});
+    const checked = contracts.parseRexCreation(allocator, output) catch return refuse("effect_uncertain");
+    checked.deinit();
+    return .{ .ok = true, .code = "allocated", .output = output };
 }

@@ -26,7 +26,7 @@ for (const mode of ["killed", "clean exit", "in-flight killed", "active shell ki
       setInterval(()=>{if(existsSync(database+'.exit'))process.exit(0)},20);
       ${mode === "failed harness" ? `const {DeckRuntime}=await import(${JSON.stringify(pathToFileURL(resolve("runtime/dist/deck.js")).href)});
         const open=DeckRuntime.open; DeckRuntime.open=async(...args)=>{const runtime=await open(...args);
-          Object.defineProperty(runtime.harness,'closed',{value:new Promise(resolve=>{setInterval(()=>{if(existsSync(database+'.fail'))resolve({reason:'failed',error:new Error('PRIVATE_FAILURE_SENTINEL')})},20)})});return runtime};
+          Object.defineProperty(runtime.harness,'closed',{value:new Promise(resolve=>{setInterval(()=>{if(existsSync(database+'.fail'))resolve({reason:'failed',error:new Error('PRIVATE_FAILURE_SENTINEL')})},20)})});writeFileSync(database+'.ready','ready');return runtime};
         await import(${JSON.stringify(pathToFileURL(resolve("runtime/dist/main.js")).href)});` : ""}
       ${mode === "active shell killed" ? `const {PipeFiles}=await import(${JSON.stringify(pathToFileURL(resolve("runtime/dist/host-files.js")).href)});
         const tools=new PipeFiles(Number(args[6]),Number(args[7]),Number(args[8]));
@@ -61,7 +61,18 @@ for (const mode of ["killed", "clean exit", "in-flight killed", "active shell ki
         assert.ok(shellPid, "Native shell never started");
       }
       if (mode === "clean exit") await writeFile(join(directory, "session.sqlite.exit"), "exit");
-      else if (mode === "failed harness") await writeFile(join(directory, "session.sqlite.fail"), "fail");
+      else if (mode === "failed harness") {
+        // Listener/PID readiness precedes implementation hashing and Harness.open.
+        // Measure failure shutdown only after the synthetic observer is installed,
+        // not against startup cost under concurrent native/fingerprint tests.
+        let observerReady = false;
+        for (let i = 0; i < 500; i++) {
+          try { await readFile(join(directory, "session.sqlite.ready")); observerReady = true; break; }
+          catch { await new Promise((resolve) => setTimeout(resolve, 10)); }
+        }
+        assert.ok(observerReady, "Synthetic Harness observer never became ready");
+        await writeFile(join(directory, "session.sqlite.fail"), "fail");
+      }
       else process.kill(pid, "SIGKILL");
       const result = await Promise.race([closed, new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new Error(`Hub kept listening after writer failure: ${errors}`)), 2000);

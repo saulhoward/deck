@@ -1,4 +1,5 @@
 const std = @import("std");
+const contracts = @import("generated/contracts.zig");
 const max_frame = 1024 * 1024;
 
 // This thread is the sole child waiter until serve returns. Cache a reaped status
@@ -100,20 +101,19 @@ fn handle(allocator: std.mem.Allocator, connection: std.net.Server.Connection, c
         return;
     };
     defer parsed.deinit();
-    const valid = blk: {
-        if (parsed.value != .object) break :blk false;
-        const obj = parsed.value.object;
-        const version = obj.get("version") orelse break :blk false;
-        const id = obj.get("id") orelse break :blk false;
-        const command = obj.get("command") orelse break :blk false;
-        break :blk version == .integer and version.integer == 1 and id == .string and id.string.len > 0 and id.string.len <= 200 and command == .string;
-    };
-    if (!valid) {
+    if (!contracts.validRequestEnvelope(parsed.value)) {
         try request.respond("Invalid command envelope", .{ .status = .bad_request, .keep_alive = false });
         return;
     }
     const response = try exchange(allocator, child, body);
     defer allocator.free(response);
+    // A bad/mis-correlated private reply cannot be forwarded as a mutation ACK.
+    // Stop this transport rather than leaving an out-of-sync writer available.
+    // Dispatch may already have executed; never retry or report no effect.
+    if (!std.unicode.utf8ValidateSlice(response)) return error.InvalidFrame;
+    const reply = std.json.parseFromSlice(std.json.Value, allocator, response, .{}) catch return error.InvalidFrame;
+    defer reply.deinit();
+    if (!contracts.validResponseEnvelope(reply.value) or !std.mem.eql(u8, reply.value.object.get("id").?.string, parsed.value.object.get("id").?.string)) return error.InvalidFrame;
     try request.respond(response, .{ .keep_alive = false, .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }} });
 }
 

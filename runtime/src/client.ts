@@ -6,11 +6,9 @@ import { DraftStore, type Draft } from "./drafts.js";
 import { InstructionsDisplay, validInstructionId } from "./instructions-view.js";
 import { ProgressDisplay } from "./progress.js";
 import { loginClient } from "./login-client.js";
+import { HubError, responseResult } from "./responses.js";
 
 type ObjectValue = Record<string, unknown>;
-class HubError extends Error {
-  constructor(readonly code: unknown, message: string) { super(message); }
-}
 function object(value: unknown): ObjectValue {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Invalid hub response");
   return value as ObjectValue;
@@ -78,15 +76,14 @@ async function main() {
   const transport = new AbortController();
   let detached = false;
   const command = async (name: string, args: ObjectValue = {}) => {
+    const id = randomUUID();
     const response = await fetch(`http://127.0.0.1:${port}/v1/command`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ version: 1, id: randomUUID(), command: name, args, ...(expectedHubId ? { hubId: expectedHubId } : {}) }),
+      body: JSON.stringify({ version: 1, id, command: name, args, ...(expectedHubId ? { hubId: expectedHubId } : {}) }),
       signal: AbortSignal.any([transport.signal, AbortSignal.timeout(10_000)]),
     });
     if (!response.ok) throw new Error(`Hub HTTP ${response.status}`);
-    const envelope = object(await response.json());
-    if (!envelope.ok) { const error = object(envelope.error); throw new HubError(error.code, String(error.message)); }
-    return object(envelope.result);
+    return object(responseResult(await response.json(), id));
   };
   const historyPage = async (args: ObjectValue, limit: number) => {
     for (;;) {

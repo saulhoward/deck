@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://deck.invalid/contracts/wire-v1",
+  "$ref": "#/$defs/RequestEnvelope",
+  "$defs": {
+    "RequestEnvelope": {
+      "description": "Transport envelope only. Command arguments and hub identity remain semantic dispatch checks during incremental migration. Extensions remain accepted for v1 compatibility.",
+      "type": "object",
+      "properties": {
+        "version": { "const": 1 },
+        "id": { "$ref": "#/$defs/TransportId" },
+        "command": { "type": "string" },
+        "args": {},
+        "hubId": {}
+      },
+      "required": ["version", "id", "command"],
+      "additionalProperties": true
+    },
+    "TransportId": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "CommandError": {
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,79}$(?![\\s\\S])" },
+        "message": { "type": "string", "minLength": 1, "maxLength": 4096 }
+      },
+      "required": ["code", "message"],
+      "additionalProperties": false
+    },
+    "SuccessResponse": {
+      "type": "object",
+      "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "ok": { "const": true }, "result": {} },
+      "required": ["version", "id", "ok", "result"],
+      "additionalProperties": false
+    },
+    "ErrorResponse": {
+      "type": "object",
+      "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "ok": { "const": false }, "error": { "$ref": "#/$defs/CommandError" } },
+      "required": ["version", "id", "ok", "error"],
+      "additionalProperties": false
+    },
+    "ResponseEnvelope": {
+      "description": "Closed v1 success/error variants. Payload semantics and exact request-ID correlation are additional boundary checks; an error never proves a mutation did not execute.",
+      "oneOf": [{ "$ref": "#/$defs/SuccessResponse" }, { "$ref": "#/$defs/ErrorResponse" }]
+    },
+    "RexUuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])" },
+    "RexSessionId": { "type": "string", "pattern": "^session:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])" },
+    "RexWindowId": { "type": "string", "pattern": "^window:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])" },
+    "RexBlockId": { "type": "string", "pattern": "^block:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])" },
+    "ChatId": { "type": "string", "pattern": "^[1-9][0-9]{0,15}$(?![\\s\\S])" },
+    "NullableRexUuid": { "anyOf": [{ "$ref": "#/$defs/RexUuid" }, { "type": "null" }] },
+    "RexAllocationPlan": {
+      "description": "Native allocation input. Absolute paths, UTF-8 byte limits, socket syntax, assigned-worker authority and executable identity are additional semantic checks.",
+      "type": "object",
+      "properties": {
+        "executable": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "server": { "type": "string", "minLength": 1, "maxLength": 107 },
+        "hostId": { "$ref": "#/$defs/RexUuid" },
+        "instanceId": { "$ref": "#/$defs/RexUuid" },
+        "client": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+        "hubId": { "$ref": "#/$defs/RexUuid" },
+        "chatId": { "$ref": "#/$defs/ChatId" },
+        "label": { "type": "string", "pattern": "^[ -~]{1,120}$(?![\\s\\S])" },
+        "allocationId": { "$ref": "#/$defs/NullableRexUuid" }
+      },
+      "required": ["executable", "server", "hostId", "instanceId", "client", "port", "hubId", "chatId", "label"],
+      "additionalProperties": false
+    },
+    "RexCreation": {
+      "description": "Retained creation evidence, not readiness. Unknown fields remain accepted for legacy compatibility but are never copied into the public binding.",
+      "type": "object",
+      "properties": {
+        "version": { "const": 1 },
+        "server": { "type": "string", "minLength": 1, "maxLength": 107 },
+        "hostId": { "$ref": "#/$defs/RexUuid" },
+        "instanceId": { "$ref": "#/$defs/RexUuid" },
+        "sessionId": { "$ref": "#/$defs/RexSessionId" },
+        "windowId": { "$ref": "#/$defs/RexWindowId" },
+        "blockId": { "$ref": "#/$defs/RexBlockId" },
+        "chatId": { "$ref": "#/$defs/ChatId" },
+        "hubId": { "$ref": "#/$defs/RexUuid" },
+        "allocationId": { "$ref": "#/$defs/NullableRexUuid" },
+        "readiness": { "const": "not_checked" }
+      },
+      "required": ["version", "server", "hostId", "instanceId", "sessionId", "windowId", "blockId", "chatId", "hubId", "readiness"],
+      "additionalProperties": true
+    },
+    "RexInspectionScope": {
+      "type": "object",
+      "properties": {
+        "server": { "type": "string", "minLength": 1, "maxLength": 107 },
+        "hostId": { "$ref": "#/$defs/RexUuid" },
+        "instanceId": { "$ref": "#/$defs/RexUuid" },
+        "sessionId": { "$ref": "#/$defs/RexSessionId" },
+        "windowId": { "$ref": "#/$defs/RexWindowId" },
+        "blockId": { "$ref": "#/$defs/RexBlockId" }
+      },
+      "required": ["server", "hostId", "instanceId", "sessionId", "windowId", "blockId"],
+      "additionalProperties": false
+    },
+    "RexInspectionQuery": {
+      "type": "object",
+      "properties": {
+        "executable": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "scope": { "$ref": "#/$defs/RexInspectionScope" }
+      },
+      "required": ["executable", "scope"],
+      "additionalProperties": false
+    },
+    "RexPresenceState": { "enum": ["unavailable", "identity_changed", "missing_session", "missing_terminal", "pending", "running", "exited", "conflict", "inconclusive", "cancelled"] },
+    "RexInspectionObservation": {
+      "type": "object",
+      "properties": {
+        "version": { "const": 1 },
+        "scope": { "$ref": "#/$defs/RexInspectionScope" },
+        "state": { "$ref": "#/$defs/RexPresenceState" },
+        "exitCode": { "anyOf": [{ "type": "integer", "minimum": -2147483648, "maximum": 2147483647 }, { "type": "null" }] },
+        "revision": { "anyOf": [{ "type": "integer", "minimum": 0, "maximum": 9007199254740991 }, { "type": "null" }] }
+      },
+      "required": ["version", "scope", "state", "exitCode", "revision"],
+      "additionalProperties": false
+    },
+    "RexInspectionStatus": { "enum": ["sampled", "unbound", "unavailable", "conflict", "stale", "cancelled"] },
+    "RexInspectionSnapshot": {
+      "type": "object",
+      "properties": {
+        "version": { "const": 1 },
+        "hubId": { "$ref": "#/$defs/RexUuid" },
+        "chatId": { "$ref": "#/$defs/ChatId" },
+        "requestId": { "$ref": "#/$defs/RexUuid" },
+        "taskId": { "anyOf": [{ "$ref": "#/$defs/ChatId" }, { "type": "null" }] },
+        "startedAtMs": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "finishedAtMs": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "status": { "$ref": "#/$defs/RexInspectionStatus" },
+        "observation": { "anyOf": [{ "$ref": "#/$defs/RexInspectionObservation" }, { "type": "null" }] }
+      },
+      "required": ["version", "hubId", "chatId", "requestId", "taskId", "startedAtMs", "finishedAtMs", "status", "observation"],
+      "additionalProperties": false
+    },
+    "Sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$(?![\\s\\S])" },
+    "RexAllocationReceiptQuery": {
+      "description": "Read-only lookup of exactly the original allocation request bytes; never dispatch that request.",
+      "type": "object",
+      "properties": {
+        "operationId": { "$ref": "#/$defs/ChatId" },
+        "request": { "type": "string", "minLength": 1, "maxLength": 131072 }
+      },
+      "required": ["operationId", "request"],
+      "additionalProperties": false
+    },
+    "RexAllocationReceiptState": { "enum": ["missing", "accepted", "allocated", "not_allocated", "conflict", "inconclusive"] },
+    "RexAllocationReceipt": {
+      "description": "Historical native receipt evidence, not a fresh Rex observation or permission to replay.",
+      "type": "object",
+      "properties": {
+        "version": { "const": 1 },
+        "operationId": { "$ref": "#/$defs/ChatId" },
+        "requestHash": { "$ref": "#/$defs/Sha256" },
+        "state": { "$ref": "#/$defs/RexAllocationReceiptState" },
+        "creation": { "anyOf": [{ "$ref": "#/$defs/RexCreation" }, { "type": "null" }] }
+      },
+      "required": ["version", "operationId", "requestHash", "state", "creation"],
+      "additionalProperties": false
+    }
+  }
+}

@@ -12,7 +12,7 @@ test("plain chat switching pins retries, blocks switching unacknowledged drafts 
   const pages: Record<string, unknown>[] = [];
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
-    const envelope = JSON.parse(Buffer.concat(chunks).toString()) as { command: string; args: Record<string, unknown> };
+    const envelope = JSON.parse(Buffer.concat(chunks).toString()) as { id: string; command: string; args: Record<string, unknown> };
     const args = envelope.args;
     let result: unknown = {};
     let failed = false;
@@ -29,7 +29,7 @@ test("plain chat switching pins retries, blocks switching unacknowledged drafts 
       default: assert.fail(`Unexpected command ${envelope.command}`);
     }
     response.setHeader("content-type", "application/json");
-    response.end(JSON.stringify(failed ? { ok: false, error: { message: "Simulated lost acknowledgement" } } : { ok: true, result }));
+    response.end(JSON.stringify({ version: 1, id: envelope.id, ...(failed ? { ok: false, error: { code: "runtime_failed", message: "Simulated lost acknowledgement" } } : { ok: true, result }) }));
   });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   const address = server.address(); assert.ok(address && typeof address !== "string");
