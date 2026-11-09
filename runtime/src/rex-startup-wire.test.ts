@@ -7,6 +7,7 @@ import test from "node:test";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { DeckRuntime } from "./deck.js";
 import { serveIpc } from "./ipc.js";
+import { validRexStartupAck } from "./generated/contracts.js";
 import { encodeFrame, FrameDecoder } from "./protocol.js";
 import { IMPLEMENTATION, model, provider, gate, within } from "./instructions.test.support.js";
 import type { RexPlan } from "./rex-allocation.js";
@@ -25,8 +26,9 @@ test("Rex startup wire requires explicit hub and exact intent/block arguments; n
     assert.equal((await send("rex_startup", args, "other-hub")).error.code, "conflict");
     assert.equal((await send("rex_startup", { ...args, label: "not-provenance" }, runtime.hubId)).error.code, "invalid");
     assert.equal((await send("rex_startup", { ...args, allocationId: uuid }, runtime.hubId)).error.code, "conflict");
+    for (const change of [{ chatId: 2 }, { chatId: "9007199254740992" }, { allocationId: `${plan.allocationId}\n` }, { blockId: `block:${uuid}\n` }, { blockId: "block:short" }]) assert.equal((await send("rex_startup", { ...args, ...change }, runtime.hubId)).error.code, "invalid");
     assert.equal((await runtime.terminalStartup(id)).observation, "not_observed");
-    const ack = await send("rex_startup", args, runtime.hubId); assert.equal(ack.ok, true); assert.equal(ack.result.observation, "unbound"); assert.equal(ack.result.live, "not_checked");
+    const ack = await send("rex_startup", args, runtime.hubId); assert.equal(ack.ok, true); assert.ok(validRexStartupAck(ack.result)); assert.equal(ack.result.observation, "unbound"); assert.equal(ack.result.live, "not_checked");
     assert.deepEqual(await send("rex_startup", args, runtime.hubId), ack);
     release.release(); await runtime.harness.waitForTask(task, context);
     assert.equal((await runtime.terminalStartup(id)).observation, "unbound"); assert.equal(await runtime.terminalBinding(id), undefined); assert.deepEqual((await runtime.history(id)).items, []);

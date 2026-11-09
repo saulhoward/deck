@@ -21,7 +21,7 @@ test("plain chat switching pins retries, blocks switching unacknowledged drafts 
       case "history": result = { items: [] }; break;
       case "list_chats": {
         pages.push(args);
-        result = args.after ? { items: [{ chatId: "2", kind: "task", title: "Saved task\u001b[31m", machineId: "offline", cwd: "/task" }] } : { items: [{ chatId: "1", kind: "main", title: "Main" }], next: "1" };
+        result = args.after ? { items: [{ chatId: "2", kind: "task", title: "Saved task\u001b[31m", machineId: "offline", cwd: "/task" }] } : { items: [{ chatId: "1", kind: "main", title: "Main", machineId: "host", cwd: "/work" }], next: "1" };
         break;
       }
       case "admit": admissions.push(args); failed = admissions.length === 1; result = { submissionId: "1" }; break;

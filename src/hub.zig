@@ -50,6 +50,68 @@ fn exchange(allocator: std.mem.Allocator, child: *std.process.Child, payload: []
     return response;
 }
 
+fn safePiId(value: std.json.Value) bool {
+    if (!contracts.validPiId(value)) return false;
+    return (std.fmt.parseInt(u64, value.string, 10) catch return false) <= 9007199254740991;
+}
+fn validDiscoveryReply(args: std.json.Value, result: std.json.Value) bool {
+    if ((args != .null and !contracts.validListChatsArgs(args)) or !contracts.validChatListPage(result)) return false;
+    var limit: u64 = 50;
+    var after: u64 = 0;
+    if (args != .null) {
+        if (args.object.get("limit")) |value| limit = switch (value) {
+            .integer => |n| @intCast(n),
+            .float => |n| @intFromFloat(n),
+            else => unreachable, // Generated integer guard ran above.
+        };
+        if (args.object.get("after")) |value| {
+            if (!safePiId(value)) return false;
+            after = std.fmt.parseInt(u64, value.string, 10) catch return false;
+        }
+    }
+    const items = result.object.get("items").?.array.items;
+    if (items.len > limit) return false;
+    var previous = after;
+    for (items) |item| {
+        const id = item.object.get("chatId").?;
+        if (!safePiId(id)) return false;
+        const current = std.fmt.parseInt(u64, id.string, 10) catch return false;
+        if (current <= previous) return false;
+        previous = current;
+        const parent = item.object.get("parentChatId");
+        const owner = item.object.get("ownerTaskId");
+        if ((parent == null) != (owner == null)) return false;
+        if (parent) |value| if (!safePiId(value) or !safePiId(owner.?)) return false;
+    }
+    if (result.object.get("next")) |value| {
+        if (!safePiId(value)) return false;
+        const next = std.fmt.parseInt(u64, value.string, 10) catch return false;
+        if (next <= after or next < previous) return false;
+    }
+    return true;
+}
+// Called only after generated envelope validation. Unknown commands still use
+// their existing runtime/client checks; this is not permission to dispatch them.
+fn validCommandReply(request: std.json.Value, reply: std.json.Value) bool {
+    if (!reply.object.get("ok").?.bool) return true;
+    const command = request.object.get("command").?.string;
+    const args = request.object.get("args") orelse .null;
+    const result = reply.object.get("result").?;
+    if (std.mem.eql(u8, command, "list_chats")) return validDiscoveryReply(args, result);
+    if (std.mem.eql(u8, command, "admit")) return contracts.validAdmitArgs(args) and safePiId(args.object.get("chatId").?) and contracts.validAdmitAck(result) and safePiId(result.object.get("submissionId").?);
+    if (std.mem.eql(u8, command, "create_task")) return contracts.validCreateTaskArgs(args) and contracts.validCreateTaskAck(result) and safePiId(result.object.get("chatId").?);
+    if (std.mem.eql(u8, command, "import_instructions")) return contracts.validInstructionImportArgs(args) and safePiId(args.object.get("chatId").?) and contracts.validInstructionImportAck(result) and safePiId(result.object.get("chatId").?) and safePiId(result.object.get("taskId").?) and std.mem.eql(u8, args.object.get("chatId").?.string, result.object.get("chatId").?.string) and std.mem.eql(u8, args.object.get("requestId").?.string, result.object.get("requestId").?.string);
+    if (std.mem.eql(u8, command, "stop")) return contracts.validStopArgs(args) and safePiId(args.object.get("chatId").?) and contracts.validStopAck(result);
+    if (std.mem.eql(u8, command, "rex_startup")) {
+        const hub_id = request.object.get("hubId") orelse return false;
+        if (!contracts.validTransportId(hub_id) or !contracts.validRexStartupArgs(args) or !safePiId(args.object.get("chatId").?) or !contracts.validRexStartupAck(result) or !safePiId(result.object.get("chatId").?) or !safePiId(result.object.get("taskId").?)) return false;
+        return std.mem.eql(u8, args.object.get("chatId").?.string, result.object.get("chatId").?.string) and
+            std.mem.eql(u8, args.object.get("allocationId").?.string, result.object.get("allocationId").?.string) and
+            std.mem.eql(u8, args.object.get("blockId").?.string, result.object.get("blockId").?.string);
+    }
+    return true;
+}
+
 fn handle(allocator: std.mem.Allocator, connection: std.net.Server.Connection, child: *std.process.Child, port: u16) !void {
     defer connection.stream.close();
     // Bound stalled headers/bodies on the trusted local listener.
@@ -113,7 +175,7 @@ fn handle(allocator: std.mem.Allocator, connection: std.net.Server.Connection, c
     if (!std.unicode.utf8ValidateSlice(response)) return error.InvalidFrame;
     const reply = std.json.parseFromSlice(std.json.Value, allocator, response, .{}) catch return error.InvalidFrame;
     defer reply.deinit();
-    if (!contracts.validResponseEnvelope(reply.value) or !std.mem.eql(u8, reply.value.object.get("id").?.string, parsed.value.object.get("id").?.string)) return error.InvalidFrame;
+    if (!contracts.validResponseEnvelope(reply.value) or !std.mem.eql(u8, reply.value.object.get("id").?.string, parsed.value.object.get("id").?.string) or !validCommandReply(parsed.value, reply.value)) return error.InvalidFrame;
     try request.respond(response, .{ .keep_alive = false, .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }} });
 }
 

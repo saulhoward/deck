@@ -42,6 +42,91 @@
       "description": "Closed v1 success/error variants. Payload semantics and exact request-ID correlation are additional boundary checks; an error never proves a mutation did not execute.",
       "oneOf": [{ "$ref": "#/$defs/SuccessResponse" }, { "$ref": "#/$defs/ErrorResponse" }]
     },
+    "PiId": {
+      "description": "Lossless decimal Pi identity. Positive safe-integer range remains an additional semantic guard; never coerce a numeric JSON ID to a string.",
+      "$ref": "#/$defs/ChatId"
+    },
+    "DurableRequestId": {
+      "description": "Durable mutation identity, distinct from transport correlation. Existing runtime UTF-16 length limits remain semantic checks during migration.",
+      "$ref": "#/$defs/TransportId"
+    },
+    "CommandString": {
+      "description": "Nonempty well-formed wire string. Existing UTF-16 limits, nonblank text, absolute cwd and saved host authority remain semantic checks.",
+      "type": "string", "minLength": 1, "maxLength": 200000
+    },
+    "AdmissionMode": { "enum": ["steer", "followUp"] },
+    "AdmitArgs": {
+      "description": "Legacy v1 extensions remain accepted but are not forwarded to Pi; origin cannot be supplied through this command.",
+      "type": "object",
+      "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "requestId": { "$ref": "#/$defs/DurableRequestId" }, "text": { "$ref": "#/$defs/CommandString" }, "mode": { "$ref": "#/$defs/AdmissionMode" } },
+      "required": ["chatId", "requestId", "text", "mode"], "additionalProperties": true
+    },
+    "CreateTaskArgs": {
+      "description": "Legacy v1 extensions remain accepted but are not forwarded to conversation creation.",
+      "type": "object",
+      "properties": { "requestId": { "$ref": "#/$defs/DurableRequestId" }, "title": { "$ref": "#/$defs/CommandString" }, "machineId": { "$ref": "#/$defs/CommandString" }, "cwd": { "$ref": "#/$defs/CommandString" } },
+      "required": ["requestId", "title", "machineId", "cwd"], "additionalProperties": true
+    },
+    "InstructionImportArgs": {
+      "type": "object",
+      "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "requestId": { "$ref": "#/$defs/DurableRequestId" }, "machineId": { "$ref": "#/$defs/CommandString" }, "cwd": { "$ref": "#/$defs/CommandString" } },
+      "required": ["chatId", "requestId", "machineId", "cwd"], "additionalProperties": false
+    },
+    "AdmitAck": {
+      "description": "Durable submission only, not generation or effect completion.",
+      "type": "object", "properties": { "submissionId": { "$ref": "#/$defs/PiId" } }, "required": ["submissionId"], "additionalProperties": false
+    },
+    "CreateTaskAck": {
+      "description": "Created/retrieved conversation only, not inference or terminal allocation.",
+      "type": "object", "properties": { "chatId": { "$ref": "#/$defs/PiId" } }, "required": ["chatId"], "additionalProperties": false
+    },
+    "InstructionImportAck": {
+      "description": "Administrative task admitted, not instructions applied. Echoed chat/request identities must additionally match the original request.",
+      "type": "object",
+      "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "requestId": { "$ref": "#/$defs/DurableRequestId" }, "taskId": { "$ref": "#/$defs/PiId" }, "admitted": { "const": true }, "completion": { "const": "not_waited" } },
+      "required": ["chatId", "requestId", "taskId", "admitted", "completion"], "additionalProperties": false
+    },
+    "ListChatsArgs": {
+      "description": "Canonical conversation scan, not a lifecycle/health catalog. Legacy request extensions remain ignored. Omitted limit defaults to 50; after is the exclusive last-scanned Pi ID.",
+      "type": "object",
+      "properties": { "limit": { "type": "integer", "minimum": 1, "maximum": 100 }, "after": { "$ref": "#/$defs/PiId" } },
+      "required": [], "additionalProperties": true
+    },
+    "ChatListKind": { "enum": ["main", "task", "subagent"] },
+    "ChatListLabel": { "description": "Well-formed display metadata only, not host/path authority or a command argument. No trimming/normalization of canonical metadata.", "type": "string", "maxLength": 200000 },
+    "ChatListItem": {
+      "description": "Read-only canonical metadata projection. Optional link IDs are display hints, never Pi ownership authority. Unknown/private fields refuse at the wire boundary.",
+      "type": "object",
+      "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "kind": { "$ref": "#/$defs/ChatListKind" }, "title": { "$ref": "#/$defs/ChatListLabel" }, "machineId": { "$ref": "#/$defs/ChatListLabel" }, "cwd": { "$ref": "#/$defs/ChatListLabel" }, "parentChatId": { "$ref": "#/$defs/PiId" }, "ownerTaskId": { "$ref": "#/$defs/PiId" } },
+      "required": ["chatId", "kind", "title", "machineId", "cwd"], "additionalProperties": false
+    },
+    "ChatListItems": { "type": "array", "items": { "$ref": "#/$defs/ChatListItem" }, "maxItems": 100 },
+    "ChatListPage": {
+      "description": "Bounded scan projection, not a frozen snapshot. Items may be empty with a next cursor when scanned records lack Deck metadata. ID safety, ordering, requested limit, link pairing and last-scanned cursor consistency remain semantic checks.",
+      "type": "object", "properties": { "items": { "$ref": "#/$defs/ChatListItems" }, "next": { "$ref": "#/$defs/PiId" } },
+      "required": ["items"], "additionalProperties": false
+    },
+    "StopArgs": {
+      "description": "Selected-chat stop request. Legacy ignored extensions remain accepted; no durable request or cancellation-completion receipt is created.",
+      "type": "object", "properties": { "chatId": { "$ref": "#/$defs/PiId" } }, "required": ["chatId"], "additionalProperties": true
+    },
+    "StopAck": {
+      "description": "The stop was requested, not proof Pi is idle, effects drained or rolled back.",
+      "type": "object", "properties": { "requested": { "const": true } }, "required": ["requested"], "additionalProperties": false
+    },
+    "RexStartupArgs": {
+      "description": "Historical registration only. Explicit matching envelope hubId, original ownerless allocation intent and saved worker/cwd remain semantic requirements.",
+      "type": "object",
+      "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "allocationId": { "$ref": "#/$defs/RexUuid" }, "blockId": { "$ref": "#/$defs/RexBlockId" } },
+      "required": ["chatId", "allocationId", "blockId"], "additionalProperties": false
+    },
+    "RexRegistrationObservation": { "enum": ["unbound", "matched"] },
+    "RexStartupAck": {
+      "description": "Historical startup ACK, not the broader read-only startup snapshot, live presence, allocation proof or input-delivery receipt. Echoed identities and explicit expected hub require separate checks.",
+      "type": "object",
+      "properties": { "version": { "const": 1 }, "chatId": { "$ref": "#/$defs/PiId" }, "taskId": { "$ref": "#/$defs/PiId" }, "allocationId": { "$ref": "#/$defs/RexUuid" }, "blockId": { "$ref": "#/$defs/RexBlockId" }, "registered": { "const": true }, "observation": { "$ref": "#/$defs/RexRegistrationObservation" }, "historical": { "const": true }, "live": { "const": "not_checked" } },
+      "required": ["version", "chatId", "taskId", "allocationId", "blockId", "registered", "observation", "historical", "live"], "additionalProperties": false
+    },
     "RexUuid": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])" },
     "RexSessionId": { "type": "string", "pattern": "^session:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])" },
     "RexWindowId": { "type": "string", "pattern": "^window:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])" },

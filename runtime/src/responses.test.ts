@@ -50,7 +50,7 @@ test("invalid post-commit IPC egress returns correlated uncertainty, never dispa
   const input = new PassThrough(), output = new PassThrough(); const chunks: Buffer[] = [];
   output.on("data", (chunk: Buffer) => chunks.push(chunk));
   const serving = serveIpc(runtime, input, output);
-  input.end(encodeFrame({ version: 1, id: "original-id", command: "rex_startup", hubId: "hub", args: { chatId: "2", allocationId: "saved-allocation", blockId: "saved-block" } }));
+  input.end(encodeFrame({ version: 1, id: "original-id", command: "rex_startup", hubId: "hub", args: { chatId: "2", allocationId: "11111111-1111-4111-8111-111111111111", blockId: "block:11111111-1111-4111-8111-111111111111" } }));
   await serving;
   assert.equal(commits, 1);
   assert.deepEqual(unpack(Buffer.concat(chunks)), { version: 1, id: "original-id", ok: false, error: { code: "invalid_response", message: "Runtime response invalid; inspect the request outcome before retrying" } });

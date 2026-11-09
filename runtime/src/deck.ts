@@ -9,7 +9,7 @@ import { projectProgress } from "./progress.js";
 import { configurationIdle, importingInstructions, instructionHash, instructionImport, IMPORT_KIND, InstructionRequest, InstructionSourceDoc, type InstructionImportResult } from "./instruction-import.js";
 import { RexInspector } from "./rex-inspection.js";
 import { rexReconciliation, RexReconcileRequest, allocationRequest, type ReconcileResult } from "./rex-reconciliation.js";
-import { validRexAllocationPlan, validRexAllocationReceiptQuery } from "./generated/contracts.js";
+import { validRexAllocationPlan, validRexAllocationReceiptQuery, type ChatListPage } from "./generated/contracts.js";
 import { REX_KIND, rexAllocation, RexDoc, RexRequest, rexCoherent, rexTarget, rexUuid, rexBlock, rexStartup, type RexInput, type RexTarget, type RexResult } from "./rex-allocation.js";
 import { bindImplementation, checkCompatibility, defaultImplementation, stampImplementation } from "./compatibility.js";
 import { nativeFiles, type HostFiles } from "./host-files.js";
@@ -137,13 +137,13 @@ export class DeckRuntime {
     return chat;
   }
 
-  async listChats({ limit = 50, after }: { limit?: number; after?: string } = {}) {
+  async listChats({ limit = 50, after }: { limit?: number; after?: string } = {}): Promise<ChatListPage> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new DeckError("invalid", "Chat page limit must be an integer from 1 to 100");
     // Pi 1.4.0's ID-ordered scan cursor stays behind this adapter. The wire continuation
     // is the last scanned conversation ID, including records without Deck metadata.
     const cursor = after === undefined ? undefined : { after: chatId(after), order: "ascending" };
     const page = await this.harness.commit((tx) => tx.scanConversations({ order: "ascending" }, limit, cursor), context);
-    const items = [];
+    const items: ChatListPage["items"] = [];
     for (const record of page.items) {
       const metadata = await this.harness.snapshot(ChatDoc, record.id, context);
       if (metadata) items.push({ chatId: String(record.id), kind: metadata.kind, title: metadata.title, machineId: metadata.machineId, cwd: metadata.cwd, ...(metadata.parentChatId ? { parentChatId: metadata.parentChatId } : {}), ...(metadata.ownerTaskId ? { ownerTaskId: metadata.ownerTaskId } : {}) });

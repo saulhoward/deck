@@ -51,6 +51,27 @@ test("loopback hub and plain detached client: admission, security checks, task i
     });
     assert.equal(badHost, 403);
     const status = await command("status");
+    const saved = status.binding as Record<string, unknown>;
+    // Command-level shape failures remain correlated application errors, not
+    // fatal framing errors, and cannot admit/create/import before validation.
+    for (const [name, args] of [
+      ["admit", { chatId: status.mainChatId, requestId: "bad-mode", text: "DO_NOT_ADMIT", mode: "queue" }],
+      ["stop", { chatId: 0 }],
+      ["stop", { chatId: `${status.mainChatId}\n` }],
+      ["admit", { chatId: 1, requestId: "numeric-chat", text: "DO_NOT_ADMIT", mode: "steer" }],
+      ["admit", { chatId: status.mainChatId, requestId: "x".repeat(201), text: "DO_NOT_ADMIT", mode: "steer" }],
+      ["create_task", { requestId: "missing-host", title: "DO_NOT_CREATE", cwd: saved.cwd }],
+      ["create_task", { requestId: "numeric-title", title: 7, machineId: saved.machineId, cwd: saved.cwd }],
+      ["import_instructions", { chatId: status.mainChatId, requestId: "arbitrary-path", machineId: saved.machineId, cwd: saved.cwd, path: "OTHER.md" }],
+    ] as const) {
+      const response = await raw(JSON.stringify({ version: 1, id: "bad-mutation", command: name, args }));
+      assert.equal(response.status, 200);
+      const result = await response.json() as { id: string; ok: boolean; error: { code: string } };
+      assert.equal(result.id, "bad-mutation"); assert.equal(result.ok, false); assert.equal(result.error.code, "invalid");
+    }
+    assert.deepEqual((await command("history", { chatId: status.mainChatId })).items, []);
+    assert.equal(((await command("list_chats")).items as unknown[]).length, 1);
+    assert.equal((await command("instruction_status")).import, null);
     const idle = await command("activity", { chatId: status.mainChatId });
     assert.equal(idle.chatId, status.mainChatId); assert.equal(idle.busy, false); assert.deepEqual(idle.tools, []);
     const client = spawn(binary!, ["agent", "--no-tui", "--port", String(port), "--message", "Hello from client"], { env });
@@ -100,7 +121,7 @@ test("loopback hub and plain detached client: admission, security checks, task i
     assert.equal((listed.items as Record<string, unknown>[])[0]!.chatId, status.mainChatId);
     const next = await command("list_chats", { limit: 1, after: listed.next });
     assert.equal((next.items as Record<string, unknown>[])[0]!.title, "Separate task");
-    for (const args of [{ limit: 0 }, { limit: "2" }, { after: "oops" }, { after: 1 }]) {
+    for (const args of [{ limit: 0 }, { limit: 101 }, { limit: 1.5 }, { limit: "2" }, { limit: null }, { after: "oops" }, { after: 1 }, { after: null }, { after: "9007199254740992" }]) {
       const result = await (await raw(JSON.stringify({ version: 1, id: "bad-list", command: "list_chats", args }))).json() as { ok: boolean; error: { code: string } };
       assert.equal(result.ok, false); assert.equal(result.error.code, "invalid");
     }

@@ -4,6 +4,8 @@ import { ChatDoc, DeckError, type DeckRuntime } from "./deck.js";
 import type { Login } from "./login.js";
 import { encodeFrame, FrameDecoder, PROTOCOL_VERSION } from "./protocol.js";
 import { responseFrame } from "./responses.js";
+import { validDiscoveryArgs } from "./discovery-contracts.js";
+import { validMutationArgs, type ReplyContext } from "./mutation-contracts.js";
 import { validRequestEnvelope, type ResponseEnvelope } from "./generated/contracts.js";
 
 function object(value: unknown): Record<string, unknown> {
@@ -38,23 +40,24 @@ async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, 
     }
     case "rex_startup": {
       if (request.hubId !== runtime.hubId) throw new DeckError("invalid", "Rex startup requires an explicit expected hub identity");
-      if (Object.keys(args).some((key) => !["chatId", "allocationId", "blockId"].includes(key))) throw new DeckError("invalid", "Invalid Rex startup arguments");
-      return runtime.registerTerminalStartup(text(args.chatId, "chatId"), text(args.allocationId, "allocationId"), text(args.blockId, "blockId"));
+      if (!validMutationArgs("rex_startup", args)) throw new DeckError("invalid", "Invalid Rex startup arguments");
+      return runtime.registerTerminalStartup(args.chatId, args.allocationId, args.blockId);
     }
     case "activity": return runtime.activity(args.chatId === undefined ? String(runtime.main.id) : text(args.chatId, "chatId"));
     case "progress": return runtime.progress(args.chatId === undefined ? String(runtime.main.id) : text(args.chatId, "chatId"));
     case "list_chats": {
-      if (args.limit !== undefined && typeof args.limit !== "number") throw new DeckError("invalid", "Invalid limit");
-      return runtime.listChats({ ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.after === undefined ? {} : { after: text(args.after, "after") }) });
+      if (!validDiscoveryArgs(args)) throw new DeckError("invalid", "Invalid chat discovery arguments");
+      return runtime.listChats({ ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.after === undefined ? {} : { after: args.after }) });
     }
     case "create_task": {
-      const chat = await runtime.createTask(text(args.title, "title"), { machineId: text(args.machineId, "machineId"), cwd: text(args.cwd, "cwd") }, text(args.requestId, "requestId"));
+      if (!validMutationArgs("create_task", args)) throw new DeckError("invalid", "Invalid task creation arguments");
+      const chat = await runtime.createTask(args.title, { machineId: args.machineId, cwd: args.cwd }, args.requestId);
       return { chatId: String(chat.id) };
     }
     case "import_instructions": {
-      if (Object.keys(args).some((key) => !["chatId", "requestId", "machineId", "cwd"].includes(key))) throw new DeckError("invalid", "Instruction import accepts only a saved chat/binding and request ID; path is fixed to AGENTS.md");
-      const chatId = text(args.chatId, "chatId"); const requestId = text(args.requestId, "requestId");
-      const taskId = await runtime.importInstructions(chatId, requestId, undefined, { machineId: text(args.machineId, "machineId"), cwd: text(args.cwd, "cwd") });
+      if (!validMutationArgs("import_instructions", args)) throw new DeckError("invalid", "Instruction import accepts only a saved chat/binding and request ID; path is fixed to AGENTS.md");
+      const { chatId, requestId } = args;
+      const taskId = await runtime.importInstructions(chatId, requestId, undefined, { machineId: args.machineId, cwd: args.cwd });
       return { chatId, requestId, taskId: String(taskId), admitted: true, completion: "not_waited" };
     }
     case "instruction_status": {
@@ -62,8 +65,8 @@ async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, 
       return runtime.instructionsStatus(args.chatId === undefined ? String(runtime.main.id) : text(args.chatId, "chatId"), args.taskId === undefined ? undefined : text(args.taskId, "taskId"));
     }
     case "admit": {
-      if (args.mode !== "steer" && args.mode !== "followUp") throw new DeckError("invalid", "Invalid admission mode");
-      const submission = await runtime.admit(text(args.chatId, "chatId"), { requestId: text(args.requestId, "requestId"), text: text(args.text, "text"), mode: args.mode });
+      if (!validMutationArgs("admit", args)) throw new DeckError("invalid", "Invalid admission arguments");
+      const submission = await runtime.admit(args.chatId, { requestId: args.requestId, text: args.text, mode: args.mode });
       return { submissionId: String(submission.id) };
     }
     case "history": {
@@ -83,7 +86,8 @@ async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, 
       return combined;
     }
     case "stop": {
-      const chat = await runtime.chat(text(args.chatId, "chatId"));
+      if (!validMutationArgs("stop", args)) throw new DeckError("invalid", "Invalid stop arguments");
+      const chat = await runtime.chat(args.chatId);
       // Pi owns cancellation and draining. Do not hold the command pipe while an
       // already-issued native effect drains; this receipt is a request, not idle.
       void chat.abort(context).catch(() => { process.stderr.write("deck runtime: stop failed; inspect activity\n"); });
@@ -102,8 +106,8 @@ export async function serveIpc(runtime: DeckRuntime, input: Readable, output: Wr
   output.on("error", fail);
   const active = new Set<Promise<void>>();
   let writes: Promise<void> = Promise.resolve();
-  const send = (value: ResponseEnvelope) => {
-    const frame = responseFrame(value);
+  const send = (value: ResponseEnvelope, request?: ReplyContext) => {
+    const frame = responseFrame(value, request);
     const write = writes.then(() => new Promise<void>((resolve, reject) => {
       output.write(frame, (error) => error ? reject(error) : resolve());
     }));
@@ -122,7 +126,7 @@ export async function serveIpc(runtime: DeckRuntime, input: Readable, output: Wr
         let response: ResponseEnvelope;
         try { response = { version: 1, id: request.id, ok: true, result: await dispatch(runtime, request, login) }; }
         catch (error) { response = { version: 1, id: request.id, ok: false, error: { code: error instanceof DeckError ? error.code : "runtime_failed", message: error instanceof DeckError ? error.message : "Runtime command failed" } }; }
-        await send(response);
+        await send(response, request);
       })();
       active.add(job);
       // Keep a rejection handler attached even before EOF joins outstanding commands.

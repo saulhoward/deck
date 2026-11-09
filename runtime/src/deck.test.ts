@@ -13,6 +13,7 @@ import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-work
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { defineTask, defineDocFamily } from "@earendil-works/pi-durable";
 import { DeckRuntime, ChatDoc, type RuntimeOptions } from "./deck.js";
+import { validDiscoveryPage } from "./discovery-contracts.js";
 
 async function fixture(run: (runtime: DeckRuntime, options: RuntimeOptions, path: string, faux: ReturnType<typeof fauxProvider>, directory: string) => Promise<void>) {
   const directory = await mkdtemp(join(tmpdir(), "deck-contract-"));
@@ -42,11 +43,14 @@ test("chat discovery pages canonical Pi records, preserves offline bindings and 
     const last = await runtime.createTask("Last", options.binding, "last-task");
     const page1 = await runtime.listChats({ limit: 2 });
     assert.deepEqual(page1.items.map((chat) => chat.chatId), [String(runtime.main.id), String(first.id)]);
-    assert.equal(page1.next, String(first.id));
+    assert.equal(page1.next, String(first.id)); assert.equal(validDiscoveryPage(page1, { limit: 2 }), true);
     const page2 = await runtime.listChats({ limit: 2, after: page1.next! });
     assert.deepEqual(page2.items, [{ chatId: String(offline.id), kind: "task", title: "Offline task", machineId: "offline-worker", cwd: "/saved/work" }]);
     assert.equal(await runtime.harness.snapshot(ChatDoc, unmanaged.id, context), undefined);
-    assert.equal((await runtime.listChats({ limit: 1, after: String(first.id) })).items.length, 0);
+    assert.equal(validDiscoveryPage(page2, { limit: 2, after: page1.next }), true);
+    const sparse = await runtime.listChats({ limit: 1, after: String(first.id) });
+    assert.equal(sparse.items.length, 0); assert.equal(sparse.next, String(unmanaged.id));
+    assert.equal(validDiscoveryPage(sparse, { limit: 1, after: String(first.id) }), true);
     for (const limit of [0, -1, 101, 1.5, NaN]) await assert.rejects(runtime.listChats({ limit }), { code: "invalid" });
     for (const after of ["0", "-1", "oops", "1.5", "9007199254740992"]) await assert.rejects(runtime.listChats({ after }), { code: "invalid" });
     await runtime.close();
@@ -54,7 +58,7 @@ test("chat discovery pages canonical Pi records, preserves offline bindings and 
     try {
       const page3 = await reopened.listChats({ limit: 2, after: page2.next! });
       assert.deepEqual(page3.items.map((chat) => chat.chatId), [String(last.id)]);
-      assert.equal(page3.next, undefined);
+      assert.equal(page3.next, undefined); assert.equal(validDiscoveryPage(page3, { limit: 2, after: page2.next }), true);
       assert.equal((await reopened.listChats()).items.length, 4);
       assert.equal(await reopened.harness.snapshot(ChatDoc, unmanaged.id, context), undefined);
       assert.equal(faux.state.callCount, 0);

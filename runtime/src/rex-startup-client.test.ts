@@ -7,7 +7,7 @@ import test from "node:test";
 import { DraftStore } from "./drafts.js";
 import { clientEnv } from "./client.test.env.js";
 const allocation = "12345678-1234-1234-1234-123456789abc"; const block = `block:${allocation}`;
-for (const mode of ["unbound", "matched", "old_hub", "wrong_chat", "bad_history", "refused", "malformed_ack", "lost_ack"]) test(`Rex client startup ${mode}: native block identity and checks before any input`, { timeout: 10_000 }, async () => {
+for (const mode of ["unbound", "matched", "old_hub", "wrong_chat", "bad_history", "refused", "malformed_ack", "lost_ack", "wrong_allocation", "wrong_block", "wrong_ack_chat", "numeric_task", "unsafe_task", "extra_ack", "non_historical", "live_claim", "conflict_observation", "unregistered"]) test(`Rex client startup ${mode}: native block identity and checks before any input`, { timeout: 10_000 }, async () => {
   let startups = 0; let admits = 0; let acknowledged = false; const calls: string[] = [];
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
@@ -23,7 +23,21 @@ for (const mode of ["unbound", "matched", "old_hub", "wrong_chat", "bad_history"
       await new Promise((resolve) => setTimeout(resolve, 40)); assert.equal(admits, 0);
       if (mode === "refused") fail();
       else if (mode === "lost_ack") response.destroy();
-      else { acknowledged = true; reply({ version: 1, taskId: "8", chatId: "2", allocationId: allocation, blockId: mode === "malformed_ack" ? "other" : block, registered: true, observation: mode === "matched" ? "matched" : "unbound", historical: true, live: "not_checked" }); }
+      else {
+        acknowledged = true;
+        const ack: Record<string, unknown> = { version: 1, taskId: "8", chatId: "2", allocationId: allocation, blockId: mode === "malformed_ack" ? "other" : block, registered: true, observation: mode === "matched" ? "matched" : "unbound", historical: true, live: "not_checked" };
+        if (mode === "wrong_allocation") ack.allocationId = "00000000-0000-0000-0000-000000000000";
+        if (mode === "wrong_block") ack.blockId = "block:00000000-0000-0000-0000-000000000000";
+        if (mode === "wrong_ack_chat") ack.chatId = "3";
+        if (mode === "numeric_task") ack.taskId = 8;
+        if (mode === "unsafe_task") ack.taskId = "9007199254740992";
+        if (mode === "extra_ack") ack.private = "PRIVATE_ACK";
+        if (mode === "non_historical") ack.historical = false;
+        if (mode === "live_claim") ack.live = "running";
+        if (mode === "conflict_observation") ack.observation = "conflict";
+        if (mode === "unregistered") ack.registered = false;
+        reply(ack);
+      }
     } else if (value.command === "admit") { assert.equal(acknowledged, true); admits++; reply({ submissionId: "9" }); }
     else assert.fail("Unexpected startup command");
   });
@@ -37,16 +51,17 @@ for (const mode of ["unbound", "matched", "old_hub", "wrong_chat", "bad_history"
     const success = mode === "unbound" || mode === "matched";
     assert.equal((await closed)[0], success ? 0 : 1, errors); assert.equal(admits, success ? 1 : 0);
     assert.equal(startups, ["old_hub", "wrong_chat", "bad_history"].includes(mode) ? 0 : 1);
-    assert.equal(output.includes("Rex startup registered"), success);
+    assert.equal(output.includes("Rex startup registered"), success); assert.doesNotMatch(output + errors, /PRIVATE_ACK/);
+    if (!success && !["old_hub", "wrong_chat", "bad_history", "refused", "lost_ack"].includes(mode)) assert.match(errors, /Invalid Rex startup acknowledgement; no input sent/);
     assert.deepEqual(await new DraftStore("expected-hub", local.env.DECK_CLIENT_STATE_DIRECTORY).list(), []);
   } finally { if (child.exitCode === null && child.signalCode === null) child.kill(); await closed; await local.close(); server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); }
 });
 
-for (const mode of ["missing_block", "short_block", "missing_hub", "missing_task", "one_shot", "login"]) test(`Rex startup ${mode} refuses locally without contacting a hub`, async () => {
+for (const mode of ["missing_block", "short_block", "missing_hub", "missing_task", "one_shot", "login", "block_newline", "task_newline", "unsafe_selection"]) test(`Rex startup ${mode} refuses locally without contacting a hub`, async () => {
   const local = await clientEnv();
-  const args = ["--port", "1", "--rex-allocation", allocation, ...(mode === "missing_hub" ? [] : ["--hub-id", "hub"]), ...(mode === "missing_task" ? [] : ["--task", "2"]), ...(mode === "one_shot" ? ["--message", "MUST_NOT_SEND"] : []), ...(mode === "login" ? ["--login"] : [])];
-  const child = spawn(process.execPath, [fileURLToPath(new URL("./client.js", import.meta.url)), ...args], { env: { ...local.env, REX_BLOCK: mode === "missing_block" ? "" : mode === "short_block" ? "block:short" : block } });
+  const args = ["--port", "1", "--rex-allocation", allocation, ...(mode === "missing_hub" ? [] : ["--hub-id", "hub"]), ...(mode === "missing_task" ? [] : ["--task", mode === "task_newline" ? "2\n" : mode === "unsafe_selection" ? "9007199254740992" : "2"]), ...(mode === "one_shot" ? ["--message", "MUST_NOT_SEND"] : []), ...(mode === "login" ? ["--login"] : [])];
+  const child = spawn(process.execPath, [fileURLToPath(new URL("./client.js", import.meta.url)), ...args], { env: { ...local.env, REX_BLOCK: mode === "missing_block" ? "" : mode === "short_block" ? "block:short" : mode === "block_newline" ? `${block}\n` : block } });
   let error = ""; child.stdout.resume(); child.stderr.on("data", (chunk) => { error += String(chunk); }); child.stdin.end();
-  try { assert.equal((await once(child, "close"))[0], 1); assert.match(error, /Rex startup requires/); }
+  try { assert.equal((await once(child, "close"))[0], 1); assert.match(error, mode === "task_newline" ? /Unknown client option/ : /Rex startup requires/); }
   finally { await local.close(); }
 });

@@ -1,4 +1,5 @@
 // Bounded, text-free public projection. No Pi/worker runtime is loaded by the client.
+import { validSafePiId } from "./mutation-contracts.js";
 import type { InstructionSource } from "./instruction-import.js";
 import type { JsonValue } from "@earendil-works/chord";
 import type { TaskRecord } from "@earendil-works/pi-durable";
@@ -6,7 +7,7 @@ const states = ["pending", "running", "waiting", "sleeping", "completing", "term
 const outcomes = ["completed", "failed", "aborted", "orphaned"];
 const reasons = ["offline", "unavailable", "read_failed", "effect_uncertain", "invalid", "too_large", "settings_changed", "busy"];
 function object(value: unknown): Record<string, unknown> | undefined { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined; }
-export function validInstructionId(value: unknown): value is string { return typeof value === "string" && /^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value)); }
+export const validInstructionId = validSafePiId;
 type SourceView = InstructionSource & { labelsClipped?: true };
 function sourceView(value: unknown): SourceView | undefined {
   const source = object(value);

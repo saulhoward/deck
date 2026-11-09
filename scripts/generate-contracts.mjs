@@ -68,7 +68,7 @@ export function compileSchema(schema) {
   const visit = (node) => {
     insist(!walking.has(node), "recursive references unsupported");
     if (seen.has(node)) return seen.get(node);
-    keys(node, ["description", "$ref", "type", "const", "enum", "anyOf", "oneOf", "properties", "required", "additionalProperties", "minLength", "maxLength", "pattern", "minimum", "maximum"]);
+    keys(node, ["description", "$ref", "type", "const", "enum", "anyOf", "oneOf", "properties", "required", "additionalProperties", "minLength", "maxLength", "pattern", "minimum", "maximum", "items", "minItems", "maxItems"]);
     if (node.description !== undefined) insist(typeof node.description === "string", "invalid description");
     const shapeKeys = Object.keys(node).filter((key) => key !== "description");
     const id = nodes.length; nodes.push(node); seen.set(node, id); walking.add(node);
@@ -89,7 +89,7 @@ export function compileSchema(schema) {
       });
       insist(discriminant !== undefined, "oneOf requires a common required property with distinct scalar constants");
     } else if (node.enum !== undefined) {
-      insist(shapeKeys.length === 1 && Array.isArray(node.enum) && node.enum.length > 0 && new Set(node.enum).size === node.enum.length && node.enum.every((value) => typeof value === "string" && /^[a-z][a-z0-9_]*$/.test(value)), "only distinct identifier string enums supported");
+      insist(shapeKeys.length === 1 && Array.isArray(node.enum) && node.enum.length > 0 && new Set(node.enum).size === node.enum.length && node.enum.every((value) => typeof value === "string" && /^[a-z][A-Za-z0-9_]*$/.test(value)), "only distinct identifier string enums supported");
     } else if (Object.hasOwn(node, "const")) {
       insist(shapeKeys.length === 1 && (typeof node.const === "string" || typeof node.const === "boolean" || Number.isSafeInteger(node.const)), "unsupported constant");
       if (typeof node.const === "string") insist(node.const.isWellFormed(), "invalid Unicode constant");
@@ -98,6 +98,12 @@ export function compileSchema(schema) {
       insist(node.properties && Array.isArray(node.required) && typeof node.additionalProperties === "boolean", "explicit object policy required");
       insist(new Set(node.required).size === node.required.length && node.required.every((key) => Object.hasOwn(node.properties, key)), "invalid required list");
       for (const [key, child] of Object.entries(node.properties)) { insist(identifier.test(key), "invalid property name"); visit(child); }
+    } else if (node.type === "array") {
+      insist(shapeKeys.every((key) => ["type", "items", "minItems", "maxItems"].includes(key)), "unsupported array constraint");
+      insist(node.items && typeof node.items === "object" && !Array.isArray(node.items), "homogeneous array items required");
+      insist(Number.isSafeInteger(node.maxItems) && node.maxItems >= 0 && node.maxItems <= 4096, "explicit bounded array maximum required");
+      insist(node.minItems === undefined || (Number.isSafeInteger(node.minItems) && node.minItems >= 0 && node.minItems <= node.maxItems), "invalid array minimum");
+      visit(node.items);
     } else if (node.type === "string") {
       insist(shapeKeys.every((key) => ["type", "minLength", "maxLength", "pattern"].includes(key)), "unsupported string constraint");
       for (const key of ["minLength", "maxLength"]) if (node[key] !== undefined) insist(Number.isSafeInteger(node[key]) && node[key] >= 0, "invalid string bound");
@@ -120,6 +126,7 @@ export function compileSchema(schema) {
     if (node.anyOf) return `${tsType(node.anyOf[0])} | null`;
     if (node.enum) return node.enum.map(quote).join(" | ");
     if (node.oneOf) return node.oneOf.map(tsType).join(" | ");
+    if (node.type === "array") return `(${tsType(node.items)})[]`;
     if (Object.hasOwn(node, "const")) return quote(node.const);
     if (node.type === "object") return `{ ${[...Object.entries(node.properties).map(([key, child]) => `${key}${node.required.includes(key) ? "" : "?"}: ${tsType(child)}`), ...(node.additionalProperties ? ["[key: string]: unknown"] : [])].join("; ")} }`;
     return node.type === "integer" ? "number" : node.type ?? "unknown";
@@ -127,6 +134,7 @@ export function compileSchema(schema) {
   const zigType = (node) => {
     if (node.$ref) return target(node.$ref);
     if (node.anyOf) return `?${zigType(node.anyOf[0])}`;
+    if (node.type === "array") return `[]const ${zigType(node.items)}`;
     if (node.enum) return `enum { ${node.enum.map((value) => `@${zigQuote(value)}`).join(", ")} }`;
     if (node.oneOf) return `union(enum) {
 ${node.oneOf.map((child, index) => `    case${index}: ${zigType(child)},`).join("\n")}
@@ -149,7 +157,20 @@ ${node.oneOf.map((_child, index) => `            .case${index} => |value| try wr
     if (node.type === "object") return `struct {\n${Object.entries(node.properties).map(([key, child]) => {
       const type = zigType(child); const optional = !node.required.includes(key);
       return `    @${zigQuote(key)}: ${optional && !nullable(child) ? "?" : ""}${type}${optional ? " = null" : ""},`;
-    }).join("\n")}\n}`;
+    }).join("\n")}${Object.entries(node.properties).some(([key, child]) => !node.required.includes(key) && !nullable(child)) ? `
+    // Omit absent nonnullable fields. Encoding them as null would violate the
+    // schema. Nullable optional fields retain their legacy null normalization.
+    pub fn jsonStringify(self: @This(), writer: anytype) !void {
+        try writer.beginObject();
+${Object.entries(node.properties).map(([key, child]) => {
+      const field = `self.@${zigQuote(key)}`;
+      return !node.required.includes(key) && !nullable(child)
+        ? `        if (${field}) |value| {\n            try writer.objectField(${zigQuote(key)});\n            try writer.write(value);\n        }`
+        : `        try writer.objectField(${zigQuote(key)});\n        try writer.write(${field});`;
+    }).join("\n")}
+        try writer.endObject();
+    }
+` : "\n"}}`;
     return ({ string: "[]const u8", integer: "i64", boolean: "bool", null: "@TypeOf(null)" })[node.type] ?? "std.json.Value";
   };
   const tsChecks = (node) => {
@@ -158,6 +179,7 @@ ${node.oneOf.map((_child, index) => `            .case${index} => |value| try wr
     if (node.enum) return node.enum.map((value) => `x === ${quote(value)}`).join(" || ");
     if (Object.hasOwn(node, "const")) return `x === ${quote(node.const)}`;
     if (node.type === "string") return [`string(x, ${node.minLength ?? 0}, ${node.maxLength ?? "Infinity"})`, ...(node.pattern === undefined ? [] : [`(new RegExp(${quote(node.pattern)}).exec(x)?.[0] === x)`])].join(" && ");
+    if (node.type === "array") return `array(x, ${node.minItems ?? 0}, ${node.maxItems}, ${fn(node.items)})`;
     if (node.type === "integer") return `typeof x === "number" && Number.isSafeInteger(x) && x >= ${node.minimum} && x <= ${node.maximum}`;
     if (node.type === "null") return "x === null";
     if (node.type === "boolean") return 'typeof x === "boolean"';
@@ -170,6 +192,7 @@ ${node.oneOf.map((_child, index) => `            .case${index} => |value| try wr
     if (node.enum) return `return x == .string and (${node.enum.map((value) => `std.mem.eql(u8, x.string, ${zigQuote(value)})`).join(" or ")});`;
     if (Object.hasOwn(node, "const")) return typeof node.const === "string" ? `return x == .string and std.mem.eql(u8, x.string, ${zigQuote(node.const)});` : typeof node.const === "boolean" ? `return x == .bool and x.bool == ${node.const};` : `return integer(x, ${node.const}, ${node.const});`;
     if (node.type === "string") return `if (x != .string) return false;\n    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;\n    ${node.minLength === undefined && node.maxLength === undefined ? "_ = length;" : `if (${[...(node.minLength === undefined ? [] : [`length < ${node.minLength}`]), ...(node.maxLength === undefined ? [] : [`length > ${node.maxLength}`])].join(" or ")}) return false;`}\n    return ${node.pattern === undefined ? "true" : `pattern(x.string, &.{ ${patternTokens(node.pattern).map((token) => `.{ .chars = ${zigQuote(token.chars)}, .min = ${token.min}, .max = ${token.max} }`).join(", ")} })`};`;
+    if (node.type === "array") return `if (x != .array or x.array.items.len < ${node.minItems ?? 0} or x.array.items.len > ${node.maxItems}) return false;\n    for (x.array.items) |value| { if (!${fn(node.items)}(value)) return false; }\n    return true;`;
     if (node.type === "integer") return `return integer(x, ${node.minimum}, ${node.maximum});`;
     if (node.type === "null") return "return x == .null;";
     if (node.type === "boolean") return "return x == .bool;";
@@ -177,7 +200,7 @@ ${node.oneOf.map((_child, index) => `            .case${index} => |value| try wr
     return "_ = x;\n    return true;";
   };
   const header = "// Generated by scripts/generate-contracts.mjs from contracts/wire.schema.json. DO NOT EDIT.\n";
-  const ts = header + `function object(x: unknown): x is Record<string, unknown> { return x !== null && typeof x === "object" && !Array.isArray(x); }\nfunction string(x: unknown, min: number, max: number): x is string {\n  if (typeof x !== "string" || !x.isWellFormed()) return false;\n  if (min === 0 && max === Infinity) return true;\n  let length = 0;\n  for (const _ of x) { if (++length > max) return false; }\n  return length >= min;\n}\n` + Object.entries(definitions).map(([name, node]) => `export type ${name} = ${tsType(node)};\nexport const valid${name} = (x: unknown): x is ${name} => ${fn(node)}(x);\n`).join("") + nodes.map((node) => `function ${fn(node)}(x: unknown): boolean { return ${tsChecks(node)}; }\n`).join("");
+  const ts = header + `function object(x: unknown): x is Record<string, unknown> { return x !== null && typeof x === "object" && !Array.isArray(x); }\nfunction string(x: unknown, min: number, max: number): x is string {\n  if (typeof x !== "string" || !x.isWellFormed()) return false;\n  if (min === 0 && max === Infinity) return true;\n  let length = 0;\n  for (const _ of x) { if (++length > max) return false; }\n  return length >= min;\n}\nfunction array(x: unknown, min: number, max: number, item: (x: unknown) => boolean): boolean {\n  if (!Array.isArray(x) || x.length < min || x.length > max) return false;\n  for (let i = 0; i < x.length; i++) if (!Object.hasOwn(x, i) || !item(x[i])) return false;\n  return true;\n}\n` + Object.entries(definitions).map(([name, node]) => `export type ${name} = ${tsType(node)};\nexport const valid${name} = (x: unknown): x is ${name} => ${fn(node)}(x);\n`).join("") + nodes.map((node) => `function ${fn(node)}(x: unknown): boolean { return ${tsChecks(node)}; }\n`).join("");
   // Validate the entire tree before typed decode. The decoder must ignore
   // extensions globally: a closed root may contain an extensible nested object.
   // The generated guards, not this decoding option, enforce unknown-field policy.

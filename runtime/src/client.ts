@@ -7,6 +7,9 @@ import { InstructionsDisplay, validInstructionId } from "./instructions-view.js"
 import { ProgressDisplay } from "./progress.js";
 import { loginClient } from "./login-client.js";
 import { HubError, responseResult } from "./responses.js";
+import { validMutationArgs } from "./mutation-contracts.js";
+import { validRexUuid } from "./generated/contracts.js";
+import { validDiscoveryArgs, validDiscoveryPage } from "./discovery-contracts.js";
 
 type ObjectValue = Record<string, unknown>;
 function object(value: unknown): ObjectValue {
@@ -66,16 +69,18 @@ async function main() {
     else if (arg === "--task" && /^[1-9]\d*$/.test(value)) selected = value;
     else if (arg === "--message") message = value;
     else if (arg === "--hub-id" && value.length <= 200) expectedHubId = value;
-    else if (arg === "--rex-allocation" && /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(value)) rexAllocationId = value;
+    else if (arg === "--rex-allocation" && validRexUuid(value)) rexAllocationId = value;
     else throw new Error("Unknown client option");
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid port");
   const requireHubGuard = expectedHubId !== undefined;
   const rexBlockId = process.env.REX_BLOCK;
-  if (rexAllocationId && (!expectedHubId || !selected || login || message !== undefined || !rexBlockId || !/^block:[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(rexBlockId))) throw new Error("Rex startup requires an explicit hub/task and native full REX_BLOCK; no input sent");
+  if (rexAllocationId && (!expectedHubId || !selected || login || message !== undefined || !validMutationArgs("rex_startup", { chatId: selected, allocationId: rexAllocationId, blockId: rexBlockId }))) throw new Error("Rex startup requires an explicit hub/task and native full REX_BLOCK; no input sent");
   const transport = new AbortController();
   let detached = false;
   const command = async (name: string, args: ObjectValue = {}) => {
+    if (name === "list_chats" && !validDiscoveryArgs(args)) throw new Error("Invalid chat discovery arguments; no request sent");
+    if (!validMutationArgs(name, args)) throw new Error("Invalid mutation arguments; no request sent");
     const id = randomUUID();
     const response = await fetch(`http://127.0.0.1:${port}/v1/command`, {
       method: "POST", headers: { "content-type": "application/json" },
@@ -83,7 +88,7 @@ async function main() {
       signal: AbortSignal.any([transport.signal, AbortSignal.timeout(10_000)]),
     });
     if (!response.ok) throw new Error(`Hub HTTP ${response.status}`);
-    return object(responseResult(await response.json(), id));
+    return object(responseResult(await response.json(), id, { command: name, args, hubId: expectedHubId }));
   };
   const historyPage = async (args: ObjectValue, limit: number) => {
     for (;;) {
@@ -114,8 +119,8 @@ async function main() {
     await drafts.save(draft); // Never send until the complete private record is published.
     const { kind, chatId, ...args } = draft;
     const ack = await command(kind === "input" ? "admit" : kind === "task" ? "create_task" : "import_instructions", kind === "task" ? args : { chatId, ...args });
-    const id = ack[kind === "input" ? "submissionId" : kind === "task" ? "chatId" : "taskId"];
-    if (!validInstructionId(id) || (kind === "instructions" && (ack.chatId !== chatId || ack.requestId !== draft.requestId || ack.admitted !== true || ack.completion !== "not_waited"))) throw new Error("Invalid acknowledgement; draft retained");
+    // command() checked the generated command-specific ACK and its semantic
+    // identity/range guards; transport success alone never permits removal.
     await drafts.remove(draft.requestId);
     return ack;
   };
@@ -183,8 +188,9 @@ async function main() {
   // Input stays paused until startup checks and the allocation-bound observation
   // ACK complete. No one-shot submission, automatic retry, or new draft identity.
   if (rexAllocationId) {
-    const ack = await command("rex_startup", { chatId: selected, allocationId: rexAllocationId, blockId: rexBlockId });
-    if (ack.registered !== true || ack.version !== 1 || ack.chatId !== selected || ack.allocationId !== rexAllocationId || ack.blockId !== rexBlockId || !validInstructionId(ack.taskId) || !["unbound", "matched"].includes(String(ack.observation)) || ack.historical !== true || ack.live !== "not_checked") throw new Error("Invalid Rex startup acknowledgement; no input sent");
+    // command() validates generated ACK shape and exact saved identities. This
+    // creates no draft/replay queue and still proves no current client health.
+    await command("rex_startup", { chatId: selected, allocationId: rexAllocationId, blockId: rexBlockId });
     stdout.write("Rex startup registered (historical observation, not current health).\n");
   }
   const editor = createInterface({ input: stdin, output: stdout, terminal: false });
@@ -280,13 +286,14 @@ async function main() {
         }
         if (text === "/tasks" || text === "/tasks more") {
           if (text === "/tasks more" && !chatCursor) { stdout.write("No more chats; /tasks refreshes the list.\n"); continue; }
-          const page = await command("list_chats", { limit: 25, ...(text === "/tasks more" ? { after: chatCursor } : {}) });
-          if (!Array.isArray(page.items)) throw new Error("Invalid chat list");
-          for (const raw of page.items) {
-            const item = object(raw);
+          const args = { limit: 25, ...(text === "/tasks more" ? { after: chatCursor } : {}) };
+          const page = await command("list_chats", args);
+          // Validate/narrow the entire page before rendering or cursor advancement.
+          if (!validDiscoveryPage(page, args)) throw new Error("Invalid chat discovery response; cursor unchanged");
+          for (const item of page.items) {
             stdout.write(`${item.chatId === selected ? "*" : " "} ${plain(JSON.stringify(item))}\n`);
           }
-          chatCursor = typeof page.next === "string" ? page.next : undefined;
+          chatCursor = page.next;
           stdout.write(chatCursor ? "More chats: /tasks more\n" : "End of chat list.\n"); continue;
         }
         if (text === "/main" || text.startsWith("/select ")) {
