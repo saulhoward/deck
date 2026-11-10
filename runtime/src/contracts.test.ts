@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import * as contracts from "./generated/contracts.js";
 
-type Fixture = { name: string; schema: string; valid: boolean; value?: unknown; set?: Record<string, unknown>; remove?: string[]; repeat?: { field: string; text: string; count: number }; repeatItems?: number };
+type Fixture = { name: string; schema: string; valid: boolean; value?: unknown; set?: Record<string, unknown>; remove?: string[]; repeat?: { field: string; text: string; count: number }; repeatItems?: number; repeatField?: string };
 test("schema-derived TypeScript validators consume the shared positive and negative corpus", async () => {
   const fixtures = JSON.parse(await readFile(new URL("../../src/contracts.test.json", import.meta.url), "utf8")) as { bases: Record<string, unknown>; cases: Fixture[] };
   for (const fixture of fixtures.cases) {
@@ -12,7 +12,7 @@ test("schema-derived TypeScript validators consume the shared positive and negat
     if (fixture.set) Object.assign(record, fixture.set);
     for (const field of fixture.remove ?? []) delete record[field];
     if (fixture.repeat) record[fixture.repeat.field] = fixture.repeat.text.repeat(fixture.repeat.count);
-    if (fixture.repeatItems !== undefined) record.items = Array.from({ length: fixture.repeatItems }, () => structuredClone((record.items as unknown[])[0]));
+    if (fixture.repeatItems !== undefined) { const field = fixture.repeatField ?? "items"; record[field] = Array.from({ length: fixture.repeatItems }, () => structuredClone((record[field] as unknown[])[0])); }
     const valid = contracts[`valid${fixture.schema}` as keyof typeof contracts];
     assert.equal(typeof valid, "function");
     assert.equal(valid(value), fixture.valid, fixture.name);

@@ -1,10 +1,13 @@
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { Readable, Writable } from "node:stream";
 import { ChatDoc, DeckError, type DeckRuntime } from "./deck.js";
+import { validOpenArgs, validRexReadArgs } from "./rex-open-contracts.js";
 import type { Login } from "./login.js";
-import { encodeFrame, FrameDecoder, PROTOCOL_VERSION } from "./protocol.js";
+import { encodeFrame, FrameDecoder, FrameSizeError, PROTOCOL_VERSION } from "./protocol.js";
 import { responseFrame } from "./responses.js";
 import { validDiscoveryArgs } from "./discovery-contracts.js";
+import { validHistoryArgs } from "./history-contracts.js";
+import { validLiveArgs, validInstructionArgs } from "./view-contracts.js";
 import { validMutationArgs, type ReplyContext } from "./mutation-contracts.js";
 import { validRequestEnvelope, type ResponseEnvelope } from "./generated/contracts.js";
 
@@ -36,15 +39,28 @@ async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, 
     }
     case "status": {
       const chat = args.chatId === undefined ? runtime.main : await runtime.chat(text(args.chatId, "chatId"));
-      return { implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, rexStartup: 1, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding: await runtime.harness.snapshot(ChatDoc, chat.id, context), activity: await runtime.harness.inspect(context), provider: (await chat.agent(context)).model?.provider, model: (await chat.agent(context)).model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
+      return { implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, rexStartup: 1, rexOpen: runtime.rexClient && runtime.localFiles ? 1 : 0, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding: await runtime.harness.snapshot(ChatDoc, chat.id, context), activity: await runtime.harness.inspect(context), provider: (await chat.agent(context)).model?.provider, model: (await chat.agent(context)).model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
+    }
+    case "rex_open": {
+      if (request.hubId !== runtime.hubId || !validOpenArgs(args)) throw new DeckError("invalid", "Rex open requires valid arguments and explicit hub identity");
+      return runtime.openTerminal(args);
+    }
+    case "rex_status":
+    case "rex_inspect": {
+      if (request.hubId !== runtime.hubId || !validRexReadArgs(args)) throw new DeckError("invalid", "Rex reads require a selected chat and explicit hub identity");
+      return request.command === "rex_status" ? runtime.terminalStatus(args.chatId) : runtime.inspectTerminal(args.chatId);
     }
     case "rex_startup": {
       if (request.hubId !== runtime.hubId) throw new DeckError("invalid", "Rex startup requires an explicit expected hub identity");
       if (!validMutationArgs("rex_startup", args)) throw new DeckError("invalid", "Invalid Rex startup arguments");
       return runtime.registerTerminalStartup(args.chatId, args.allocationId, args.blockId);
     }
-    case "activity": return runtime.activity(args.chatId === undefined ? String(runtime.main.id) : text(args.chatId, "chatId"));
-    case "progress": return runtime.progress(args.chatId === undefined ? String(runtime.main.id) : text(args.chatId, "chatId"));
+    case "activity":
+    case "progress": {
+      if (!validLiveArgs(args)) throw new DeckError("invalid", "Invalid live view arguments");
+      const id = args.chatId ?? String(runtime.main.id);
+      return request.command === "activity" ? runtime.activity(id) : runtime.progress(id);
+    }
     case "list_chats": {
       if (!validDiscoveryArgs(args)) throw new DeckError("invalid", "Invalid chat discovery arguments");
       return runtime.listChats({ ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.after === undefined ? {} : { after: args.after }) });
@@ -61,8 +77,8 @@ async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, 
       return { chatId, requestId, taskId: String(taskId), admitted: true, completion: "not_waited" };
     }
     case "instruction_status": {
-      if (Object.keys(args).some((key) => !["chatId", "taskId"].includes(key))) throw new DeckError("invalid", "Invalid instruction status arguments");
-      return runtime.instructionsStatus(args.chatId === undefined ? String(runtime.main.id) : text(args.chatId, "chatId"), args.taskId === undefined ? undefined : text(args.taskId, "taskId"));
+      if (!validInstructionArgs(args)) throw new DeckError("invalid", "Invalid instruction status arguments");
+      return runtime.instructionsStatus(args.chatId ?? String(runtime.main.id), args.taskId);
     }
     case "admit": {
       if (!validMutationArgs("admit", args)) throw new DeckError("invalid", "Invalid admission arguments");
@@ -70,19 +86,19 @@ async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, 
       return { submissionId: String(submission.id) };
     }
     case "history": {
-      if (args.limit !== undefined && typeof args.limit !== "number") throw new DeckError("invalid", "Invalid limit");
-      if (args.includeActivity !== undefined && typeof args.includeActivity !== "boolean") throw new DeckError("invalid", "Invalid includeActivity");
-      if (args.includeProgress !== undefined && typeof args.includeProgress !== "boolean") throw new DeckError("invalid", "Invalid includeProgress");
-      if (args.includeInstructions !== undefined && typeof args.includeInstructions !== "boolean") throw new DeckError("invalid", "Invalid includeInstructions");
-      const id = text(args.chatId, "chatId");
-      const page = await runtime.history(id, { ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.before === undefined ? {} : { before: text(args.before, "before") }), ...(args.after === undefined ? {} : { after: text(args.after, "after") }) });
+      if (!validHistoryArgs(args)) throw new DeckError("invalid", "Invalid history arguments");
+      const id = args.chatId;
+      const page = await runtime.history(id, { ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.before === undefined ? {} : { before: args.before }), ...(args.after === undefined ? {} : { after: args.after }) });
       const canonical = { ...page, ...(args.includeActivity ? { activity: await runtime.activity(id) } : {}) };
       if (!args.includeProgress && !args.includeInstructions) return canonical;
       const combined = { ...canonical, ...(args.includeProgress ? { progress: await runtime.progress(id) } : {}), ...(args.includeInstructions ? { instructions: await runtime.instructionsStatus(id) } : {}) };
       // Optional previews/instruction samples never make fitting canonical history fail.
       // Canonical oversize pages still get the usual too_large/adaptive retry path.
       try { encodeFrame({ version: PROTOCOL_VERSION, id: request.id, ok: true, result: combined }); }
-      catch { return canonical; }
+      catch (error) {
+        if (error instanceof FrameSizeError) return canonical;
+        throw new DeckError("invalid_response", "Runtime response invalid; observation unchanged");
+      }
       return combined;
     }
     case "stop": {

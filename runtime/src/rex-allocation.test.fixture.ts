@@ -44,7 +44,7 @@ try {
   const settled = await runtime.harness.waitForTask(task, context);
   assert.equal(settled.state.outcome.status, "completed"); if (settled.state.outcome.status !== "completed") throw new Error("No result");
   const result: RexResult = settled.state.outcome.result;
-  const expected = mode === "cancel" ? "aborted" : ["offline", "wrong_server", "bad_client"].includes(mode ?? "") ? "not_allocated" : mode ? "uncertain" : "allocated";
+  const expected = mode === "cancel" ? "aborted" : ["offline", "api_mismatch", "wrong_server", "bad_client"].includes(mode ?? "") ? "not_allocated" : mode && mode !== "api10" ? "uncertain" : "allocated";
   assert.equal(result.status, expected); assert.doesNotMatch(JSON.stringify(result), /PRIVATE_/);
   if (result.status === "allocated") { assert.equal(result.binding.readiness, "not_checked"); assert.deepEqual(await runtime.terminalBinding(id), result.binding); }
   else assert.equal(await runtime.terminalBinding(id), undefined);

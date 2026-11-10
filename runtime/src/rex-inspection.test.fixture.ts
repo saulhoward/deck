@@ -17,7 +17,7 @@ try {
   const saved = await runtime.terminalBinding(id); assert.ok(saved);
   const receipts = await readdir(join(root, "worker/operations")); const receipt = await readFile(join(root, "worker/operations", `${taskId}.json`), "utf8");
   const states: Record<string, string> = {};
-  const modes = ["running", "pending", "pending-omitted", "exited", "missing-session", "missing-terminal", "detached", "detached-omitted", "duplicate", "host-conflict", "wrong-window", "partial", "inconsistent", "mixed-404", "process-malformed", "api-mismatch", "identity", "identity-after", "revision", "malformed", "flood", "spoof-stdout", "forbidden", "timeout", "cancel"];
+  const modes = ["running", "api10", "pending", "pending-omitted", "exited", "missing-session", "missing-terminal", "detached", "detached-omitted", "duplicate", "host-conflict", "wrong-window", "partial", "inconsistent", "mixed-404", "process-malformed", "api-mismatch", "identity", "identity-after", "revision", "malformed", "flood", "spoof-stdout", "forbidden", "timeout", "cancel"];
   for (const mode of modes) {
     await writeFile(join(root, "mode"), `inspect-${mode}`); await writeFile(join(root, "views"), "0");
     await rm(join(root, "inspected"), { force: true }); await rm(join(root, "read-started"), { force: true });

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
+import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -81,7 +82,7 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
       const status = await json<{ endpoint: string; session_count: number; tailscale: { state: string }; you: { transport: string }; api_revision: number; rex_version: string }>("server", "status", "--json");
       assert.equal(status.endpoint, endpoint); assert.equal(status.session_count, 0); assert.equal(status.tailscale.state, "disabled"); assert.equal(status.you.transport, "unix");
       assert.equal((await stat(join(root, "rex.sock"))).mode & 0o077, 0);
-      assert.equal(status.api_revision, 8);
+      assert.ok([8, 10].includes(status.api_revision), `Unvalidated Rex API ${status.api_revision}`);
       await assert.rejects(rex("api", "call", "session.view", JSON.stringify({ session_id: "session:00000000-0000-4000-8000-000000000001" })), /status=404 code=session_not_found/);
       t.diagnostic(`Rex ${status.rex_version}; API revision ${status.api_revision}; isolated Unix server`);
       const schema = await json<{ input_schema: { properties: Record<string, unknown>; additionalProperties: boolean } }>("api", "describe", "session.create", "--json");
@@ -90,6 +91,23 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
       const window = await json<{ input_schema: { properties: Record<string, unknown>; additionalProperties: boolean } }>("api", "describe", "session.new_window", "--json");
       assert.deepEqual(Object.keys(window.input_schema.properties).sort(), ["focus", "layout", "session_id", "window_label"]);
       assert.equal(window.input_schema.additionalProperties, false); // No expected revision/process guard or idempotency key.
+      const close = await json<{ input_schema: { properties: Record<string, unknown>; additionalProperties: boolean } }>("api", "describe", "block.close", "--json");
+      assert.deepEqual(Object.keys(close.input_schema.properties).sort(), ["block_id", "keep_last", "session_id", "window_id"]);
+      assert.equal(close.input_schema.additionalProperties, false);
+      // API 10 advertises additionalProperties:false but ignores invented guard
+      // fields on this call! Repeated identical "idempotency" arguments still
+      // create distinct sessions. Metadata is not runtime guard enforcement.
+      if (status.api_revision === 10) {
+        const request = JSON.stringify({ label: "unsupported-guard", expected_revision: -1, idempotency_key: "scratch-only" });
+        const first = await json<{ session_id: string }>("api", "call", "session.create", request);
+        sessionIds.push(first.session_id);
+        const second = await json<{ session_id: string }>("api", "call", "session.create", request);
+        sessionIds.push(second.session_id);
+        assert.notEqual(first.session_id, second.session_id);
+        assert.equal((await json<Sessions>("session", "ls", "--json", "--short=false")).sessions.length, 2);
+        await rex("session", "kill", first.session_id); await rex("session", "kill", second.session_id);
+      }
+      assert.equal((await json<Sessions>("session", "ls", "--json", "--short=false")).sessions.length, 0);
     });
     await t.test("direct argv preserves metacharacters/cwd; terminals outlive creation CLI connections", async () => {
       const literal = ["space argument", "$(touch INJECTED)", "; touch INJECTED", "--server=not-an-option", "quotes'\"", "line\nbreak", "🌍"];
@@ -143,8 +161,9 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
     const probe = createServer(); probe.listen(0, "127.0.0.1"); await once(probe, "listening");
     const address = probe.address(); assert.ok(address && typeof address !== "string"); const port = address.port;
     await new Promise<void>((accept) => probe.close(() => accept()));
+    let expectedHubId: string | undefined;
     const command = async <N extends string>(name: N, args = {}): Promise<HubReply<N>> => {
-      const response = await fetch(`http://127.0.0.1:${port}/v1/command`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ version: 1, id: "rex-contract", command: name, args }), signal: AbortSignal.timeout(1000) });
+      const response = await fetch(`http://127.0.0.1:${port}/v1/command`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ version: 1, id: "rex-contract", command: name, args, hubId: expectedHubId }), signal: AbortSignal.timeout(1000) });
       const result = await response.json() as { ok: boolean; result: HubReply<N> }; assert.equal(result.ok, true); return result.result;
     };
     const startHub = async () => {
@@ -153,7 +172,7 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
       // Do not mistake another process winning the ephemeral-port race for ours.
       return until(() => command("status").catch(() => undefined), (value) => value?.binding.machineId === config.machine_id && value.binding.cwd === work);
     };
-    const status = (await startHub())!;
+    const status = (await startHub())!; expectedHubId = status.hubId;
     const task = await command("create_task", { requestId: "rex-task", title: "Rex scratch task", ...status.binding });
     const clientArgv = [deckBinary!, "agent", "--no-tui", "--port", String(port), "--task", String(task.chatId)];
     let clientAllocation!: Allocation; let clientBlock = ""; let clientPid = 0;
@@ -266,6 +285,36 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
       assert.equal((await sample()).observation?.state, "missing_session");
       assert.deepEqual(await readdir(join(state, "worker/operations")), receipts);
       assert.deepEqual((await command("history", { chatId: chat.chatId })).items, []);
+    });
+    await t.test("public best-effort open/reopen reuses running clients and replaces exited/missing objects without model input", async () => {
+      const info = await json<{ host_id: string; instance_id: string }>("server", "status", "--json");
+      const before = await command("history", { chatId: task.chatId });
+      const publicStatus = () => command("rex_status", { chatId: task.chatId });
+      const opened = await command("rex_open", { chatId: task.chatId, requestId: randomUUID(), port, target: { executable: rexBinary, server: endpoint, hostId: info.host_id, instanceId: info.instance_id } });
+      assert.equal(opened.status, "admitted");
+      const allocated = async () => {
+        const value = await until(publicStatus, (s) => s.status !== "pending"); assert.equal(value.status, "allocated");
+        const binding = value.binding as RexBinding;
+        await until(() => rex("capture", "--session", binding.sessionId, "--block", binding.blockId, "--trim", "--unwrap"), (text) => text.includes("Rex startup registered"));
+        return binding;
+      };
+      const first = await allocated(); sessionIds.push(first.sessionId);
+      const cli = spawnSync(deckBinary!, ["rex", "open", "--task", task.chatId, "--port", String(port)], { env, encoding: "utf8", timeout: 5000 });
+      assert.equal(cli.status, 0, cli.stderr); assert.match(cli.stdout, /reused/);
+      assert.deepEqual((await publicStatus()).binding, first);
+      await rex("send", "--session", first.sessionId, "--block", first.blockId, "/exit\n"); await exit(first.sessionId, first.blockId);
+      await command("rex_open", { chatId: task.chatId, requestId: randomUUID(), port });
+      const second = await allocated(); assert.equal(second.sessionId, first.sessionId); assert.notEqual(second.blockId, first.blockId);
+      assert.deepEqual((await publicStatus()).previousBinding, first);
+      await rex("block", "close", second.blockId, "--session", second.sessionId);
+      assert.equal(((await command("rex_inspect", { chatId: task.chatId })).observation as { state: string }).state, "missing_terminal");
+      await command("rex_open", { chatId: task.chatId, requestId: randomUUID(), port });
+      const third = await allocated(); assert.equal(third.sessionId, first.sessionId); assert.notEqual(third.blockId, second.blockId);
+      await rex("session", "kill", third.sessionId);
+      await command("rex_open", { chatId: task.chatId, requestId: randomUUID(), port });
+      const fourth = await allocated(); sessionIds.push(fourth.sessionId); assert.notEqual(fourth.sessionId, first.sessionId);
+      assert.deepEqual(await command("history", { chatId: task.chatId }), before);
+      assert.equal((await command("list_chats")).items.length, 3);
     });
   } finally {
     // Release any test-only model gate even when an assertion failed.

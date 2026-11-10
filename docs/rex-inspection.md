@@ -1,6 +1,6 @@
 # Fresh read-only Rex inspection (internal)
 
-`DeckRuntime.inspectTerminal(chatId, signal?)` now samples the **saved native worker and exact bound Rex objects**. It is a trusted internal operator API, not a public hub command, model tool, client command or automatic reconnect/reopen action. No new allocation, adoption, replacement, input or inference follows from a sample.
+`DeckRuntime.inspectTerminal(chatId, signal?)` now samples the **saved native worker and exact bound Rex objects**. It is also exposed by the validated read-only `rex_inspect` command and `deck rex inspect` / `/rex inspect`; see [the public workflow](rex-open.md). It is not a model tool or automatic reconnect action. No new allocation, adoption, replacement, input or inference follows from a sample.
 
 Keep three independent facts separate:
 
@@ -34,7 +34,7 @@ The raw environment uses the existing credential-restricted allowlist; no progre
 
 ## Read sequence and native evidence
 
-The supported installed evidence is Rex API **8**, version `0.0.1793377904-ge6592f` on aarch64-darwin. The adapter:
+The supported installed evidence is Rex API **8**, version `0.0.1793377904-ge6592f`, and API **10**, version `0.0.1793645657-gd018d2`, on aarch64-darwin. The [API 10 revalidation](rex-replacement.md) exercises the existing production allocation/reconciliation/inspection sequence; the adapter accepts only these two revisions and still refuses unknown/intermediate revisions. The adapter:
 
 1. Runs `server status --json`, checking endpoint, host, instance and API revision.
 2. Calls `api call session.view '{"session_id":"FULL_ID"}'`, verifying the exact session, revision, complete window/layer/block structure, full IDs and duplicate absence.
@@ -66,7 +66,7 @@ Outer `status`:
 - `conflict`: original Pi authority/provenance/binding checks fail, with no CLI call;
 - `stale` or `cancelled`: no observation is returned or applied.
 
-Native `state` distinguishes `unavailable`, `identity_changed`, `missing_session`, `missing_terminal`, `pending`, `running`, `exited`, `conflict`, `inconclusive` and `cancelled`. Offline/busy native responses are unavailable; a generic rejected/lost read remains inconclusive. None authorizes a replacement in this implementation.
+Native `state` distinguishes `unavailable`, `identity_changed`, `missing_session`, `missing_terminal`, `pending`, `running`, `exited`, `conflict`, `inconclusive` and `cancelled`. Offline/busy native responses are unavailable; a generic rejected/lost read remains inconclusive. Read-only inspection never mutates. An explicit public open may reuse a running client or create for observed exited/missing objects, under the separate best-effort policy.
 
 ## Evidence and limits
 
@@ -74,4 +74,4 @@ Automated Pi/faux and fake-native tests cover read-only record/receipt behavior,
 
 The explicit opt-in [installed Rex test](rex-contract.md) additionally runs the **production worker inspector** against a scratch allocated Deck client: running → exited → exact terminal removed while the session remains → native session-not-found. Historical startup and full saved binding remain unchanged, no read receipts appear, and canonical history stays empty. The fixture's private filesystem control is test-only, not a public API or another writer.
 
-No user sessions, live provider, live-hub refresh, GUI/server restoration, remote worker or cross-platform support is claimed. The narrow [retained-creation reconciliation](rex-reconciliation.md) now repairs provenance without Rex calls; broader reconciliation and explicit replacement remain next, then one public save-before-send allocation/open/reopen workflow. A read-only sample is not a conditional mutation guard; the replacement race contract still needs implementation.
+No user sessions, live provider, live-hub refresh, GUI/server restoration, remote worker or cross-platform support is claimed. The narrow [retained-creation reconciliation](rex-reconciliation.md) now repairs provenance without Rex calls. The public [best-effort local allocation/open/reopen workflow](rex-open.md) now uses this inspection path; broader reconciliation, native conditional guards and race/lost-reply recovery guarantees are not prerequisites. A read-only sample is not a lock; concurrent opens or explicit new attempts after unknown outcomes may leave duplicate terminals for manual cleanup. The inspector itself remains read-only.

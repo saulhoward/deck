@@ -10,6 +10,9 @@ import { HubError, responseResult } from "./responses.js";
 import { validMutationArgs } from "./mutation-contracts.js";
 import { validRexUuid } from "./generated/contracts.js";
 import { validDiscoveryArgs, validDiscoveryPage } from "./discovery-contracts.js";
+import { validHistoryArgs, validHistoryPage } from "./history-contracts.js";
+import { validRexArgs, validOpenArgs } from "./rex-open-contracts.js";
+import { validViewArgs } from "./view-contracts.js";
 
 type ObjectValue = Record<string, unknown>;
 function object(value: unknown): ObjectValue {
@@ -57,6 +60,8 @@ function renderHistory(items: unknown[], descending = true) {
 
 async function main() {
   let login = false;
+  let rexCommand: string | undefined;
+  const rexTarget: Record<string, string> = {};
   let port = 52800; let selected: string | undefined; let message: string | undefined; let expectedHubId: string | undefined; let rexAllocationId: string | undefined;
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
@@ -70,9 +75,17 @@ async function main() {
     else if (arg === "--message") message = value;
     else if (arg === "--hub-id" && value.length <= 200) expectedHubId = value;
     else if (arg === "--rex-allocation" && validRexUuid(value)) rexAllocationId = value;
+    else if (arg === "--rex-command" && ["open", "reopen", "status", "inspect"].includes(value)) rexCommand = value;
+    else if (arg === "--rex") rexTarget.executable = value;
+    else if (arg === "--server") rexTarget.server = value;
+    else if (arg === "--host-id") rexTarget.hostId = value;
+    else if (arg === "--instance-id") rexTarget.instanceId = value;
     else throw new Error("Unknown client option");
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid port");
+  const target = Object.keys(rexTarget).length ? rexTarget : undefined;
+  if (target && !validOpenArgs({ chatId: selected ?? "1", requestId: randomUUID(), port, target })) throw new Error("Rex target requires absolute --rex, unix --server, --host-id and --instance-id");
+  if ((rexCommand && (!selected || login || message !== undefined || rexAllocationId)) || (target && (login || rexAllocationId))) throw new Error("Rex commands require --task and cannot combine login, input or startup");
   const requireHubGuard = expectedHubId !== undefined;
   const rexBlockId = process.env.REX_BLOCK;
   if (rexAllocationId && (!expectedHubId || !selected || login || message !== undefined || !validMutationArgs("rex_startup", { chatId: selected, allocationId: rexAllocationId, blockId: rexBlockId }))) throw new Error("Rex startup requires an explicit hub/task and native full REX_BLOCK; no input sent");
@@ -80,6 +93,9 @@ async function main() {
   let detached = false;
   const command = async (name: string, args: ObjectValue = {}) => {
     if (name === "list_chats" && !validDiscoveryArgs(args)) throw new Error("Invalid chat discovery arguments; no request sent");
+    if (name === "history" && !validHistoryArgs(args)) throw new Error("Invalid history arguments; no request sent");
+    if (!validRexArgs(name, args)) throw new Error("Invalid Rex arguments; no request sent");
+    if (!validViewArgs(name, args)) throw new Error("Invalid live view arguments; no request sent");
     if (!validMutationArgs(name, args)) throw new Error("Invalid mutation arguments; no request sent");
     const id = randomUUID();
     const response = await fetch(`http://127.0.0.1:${port}/v1/command`, {
@@ -92,7 +108,12 @@ async function main() {
   };
   const historyPage = async (args: ObjectValue, limit: number) => {
     for (;;) {
-      try { return { page: await command("history", { ...args, limit }), limit }; }
+      try {
+        const request = { ...args, limit };
+        const page = await command("history", request);
+        if (!validHistoryPage(page, request)) throw new Error("Invalid history response; cursor unchanged");
+        return { page, limit };
+      }
       catch (error) {
         if (!(error instanceof HubError) || error.code !== "too_large" || limit === 1) throw error;
         limit = Math.max(1, Math.floor(limit / 2));
@@ -106,6 +127,22 @@ async function main() {
   if (expectedHubId && (status.hubId !== expectedHubId || (requireHubGuard && status.hubGuard !== 1))) throw new Error("Expected hub identity/guard unavailable; no input sent");
   if (rexAllocationId && (status.rexStartup !== 1 || status.chatId !== selected)) throw new Error("Rex startup capability/selected chat unavailable; no input sent");
   expectedHubId = status.hubId;
+  const runRex = async (action: string) => {
+    if (status.hubGuard !== 1 || status.rexOpen !== 1) throw new Error("Hub lacks public Rex capability; no terminal requested");
+    if (!["open", "reopen", "status", "inspect"].includes(action)) throw new Error("Use /rex open, /rex reopen, /rex status or /rex inspect");
+    const opening = action === "open" || action === "reopen";
+    if (opening) stdout.write("Rex open is best-effort: a lost reply or concurrent open may leave duplicates. No automatic retry; inspect Rex before repeating.\n");
+    let result: ObjectValue;
+    try { result = await command(opening ? "rex_open" : `rex_${action}`, { chatId: selected, ...(opening ? { requestId: randomUUID(), port, ...(target ? { target } : {}) } : {}) }); }
+    catch (error) {
+      if (opening && !detached) process.stderr.write("Rex open not acknowledged; an attempt may still have been admitted or created a terminal. Explicitly opening again may duplicate it. Existing chat drafts are unchanged.\n");
+      throw error;
+    }
+    if (detached) return;
+    stdout.write(`${plain(JSON.stringify(result))}\n`);
+    if (opening) stdout.write(result.status === "reused" ? "Saved client observed running; no new terminal requested. This does not focus a GUI or prove client responsiveness.\n" : `Rex attempt admitted, not yet allocated/ready. Use /rex status or deck rex status --task ${selected} --port ${port}.\n`);
+  };
+  if (rexCommand) return runRex(rexCommand);
   const drafts = new DraftStore(status.hubId);
   let active: Draft | undefined;
   const restore = async () => {
@@ -150,13 +187,8 @@ async function main() {
       const result = await historyPage({ chatId, includeActivity: true, includeProgress: true, includeInstructions: true, ...(ascending ? { after: newerAfter } : {}) }, recentLimit);
       if (revision !== selection || detached) return;
       const { page } = result; recentLimit = result.limit;
-      if (!Array.isArray(page.items)) throw new Error("Invalid history");
-      const ids = page.items.map((raw: unknown) => Number(object(raw).id));
-      let previous = ascending ? Number(newerAfter) : Infinity;
-      for (const id of ids) {
-        if (!Number.isSafeInteger(id) || id < 1 || (ascending ? id <= previous : id >= previous)) throw new Error("Invalid history order; hub must support forward catch-up");
-        previous = id;
-      }
+      // The whole page (including rendered payloads) was checked before output.
+      const ids = page.items.map((entry) => entry.id);
       renderHistory(page.items, !ascending);
       if (ids.length) newerAfter = String(ascending ? ids.at(-1)! : ids[0]!);
       if (!historyLoaded) {
@@ -257,7 +289,7 @@ async function main() {
       if (!text) continue;
       try {
         if (text === "/exit") break;
-        if (text === "/help") { stdout.write("/status /activity /stop /older /tasks [more] /select CHAT_ID /main /task TITLE /instructions [load|TASK_ID] /draft /drafts /recover REQUEST_ID /retry /discard [REQUEST_ID] /exit\nEnter submits or steers. /instructions load replaces stored explicit instructions with saved-worker AGENTS.md, only while idle; admission is not application. /instructions reads source/task status without loading. Switching detaches without stopping other chats. Ctrl+C detaches. Answer previews are sampled/provisional; retained history is authoritative. This is plain line mode, not TUI.\n"); continue; }
+        if (text === "/help") { stdout.write("/status /activity /stop /older /tasks [more] /select CHAT_ID /main /task TITLE /instructions [load|TASK_ID] /rex [open|reopen|status|inspect] /draft /drafts /recover REQUEST_ID /retry /discard [REQUEST_ID] /exit\nEnter submits or steers. /instructions load replaces stored explicit instructions with saved-worker AGENTS.md, only while idle; admission is not application. /instructions reads source/task status without loading. Switching detaches without stopping other chats. Ctrl+C detaches. Answer previews are sampled/provisional; retained history is authoritative. This is plain line mode, not TUI.\n"); continue; }
         if (text === "/draft") {
           if (!active) throw new Error("No active unacknowledged draft");
           const preview = plain(JSON.stringify(active));
@@ -278,7 +310,6 @@ async function main() {
           const result = await historyPage({ chatId: selected, before: olderBefore }, olderLimit);
           if (revision !== selection || detached) continue;
           const { page } = result; olderLimit = result.limit;
-          if (!Array.isArray(page.items)) throw new Error("Invalid history");
           stdout.write(`Older history for chat ${plain(selected)} (oldest first within this page):\n`);
           renderHistory(page.items);
           olderBefore = typeof page.next === "string" ? page.next : undefined;
@@ -302,6 +333,7 @@ async function main() {
           const next = await command("status", { chatId: id });
           await select(String(next.chatId)); await loadSelectedHistory(); continue;
         }
+        if (text === "/rex" || text.startsWith("/rex ")) { await runRex(text === "/rex" ? "status" : text.slice(5).trim()); continue; }
         if (text === "/activity") { stdout.write(`activity: ${plain(JSON.stringify(await command("activity", { chatId: selected })))}\n`); continue; }
         if (text === "/status") { stdout.write(`${plain(JSON.stringify(await command("status", { chatId: selected })))}\n`); continue; }
         if (text === "/stop") { await command("stop", { chatId: selected }); stdout.write("Stop requested for selected work; /status shows whether effects are still draining.\n"); continue; }

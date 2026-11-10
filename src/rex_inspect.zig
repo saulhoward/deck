@@ -52,7 +52,7 @@ fn identity(allocator: std.mem.Allocator, cwd: []const u8, query: Query, cancell
     const instance = field(value, "instance_id") catch return .inconclusive;
     if (!wire.validRexUuid(host) or !wire.validRexUuid(instance)) return .inconclusive;
     const revision = integer(field(value, "api_revision") catch return .inconclusive, 0, 9007199254740991) catch return .inconclusive;
-    if (revision != 8) return .inconclusive;
+    if (!@import("rex.zig").supportedApi(revision)) return .inconclusive;
     return if (std.mem.eql(u8, endpoint, query.scope.server) and std.mem.eql(u8, host.string, query.scope.hostId) and std.mem.eql(u8, instance.string, query.scope.instanceId)) .same else .changed;
 }
 fn add(seen: *std.StringHashMap(void), id: []const u8) !void {

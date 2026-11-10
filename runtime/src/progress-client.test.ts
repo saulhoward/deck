@@ -5,8 +5,9 @@ import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { clientEnv } from "./client.test.env.js";
+import { tailUnits } from "./view-text.js";
 function preview(chatId: string, text: string, attempt = 1) {
-  return { version: 1, chatId, provisional: true, runTaskId: "42", generation: { text, attempt, phase: "generating", arguments: "PRIVATE_ARGUMENTS", reasoning: "HIDDEN_REASONING" }, tools: [{ taskId: "43", name: "bash", text: text.startsWith("STALE_") ? "STALE_SELECTION_BASH" : chatId === "2" ? "BASH_SECOND" : "BASH_ACTIVE\x1b[31m", arguments: "PRIVATE_BASH_ARGUMENTS" }], private: "PRIVATE_METADATA" };
+  return { version: 1, chatId, provisional: true, runTaskId: "42", generation: { text: tailUnits(text, 2048), attempt, phase: "generating", ...(text.length > 2048 ? { textClipped: true } : {}) }, tools: [{ taskId: "43", name: "bash", text: text.startsWith("STALE_") ? "STALE_SELECTION_BASH" : chatId === "2" ? "BASH_SECOND" : "BASH_ACTIVE\x1b[31m" }] };
 }
 async function waitFor(condition: () => boolean) {
   for (let index = 0; index < 600; index++) { if (condition()) return; await new Promise((resolve) => setTimeout(resolve, 10)); }

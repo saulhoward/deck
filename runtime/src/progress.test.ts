@@ -49,15 +49,16 @@ test("progress projection bounds text/blocks and omits reasoning, call arguments
 
 test("preview display prints self-contained snapshots, deduplicates, resets and whitelists bounded fields", () => {
   const display = new ProgressDisplay((text) => text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""));
-  const snapshot = { version: 1, chatId: "1", provisional: true, runTaskId: "2", generation: { attempt: 1, phase: "generating", text: "Hello\n\x1b[31mworld", arguments: "PRIVATE_ARGUMENTS" }, raw: "HIDDEN_REASONING" };
+  const snapshot = { version: 1, chatId: "1", provisional: true, runTaskId: "2", generation: { attempt: 1, phase: "generating", text: "Hello\n\x1b[31mworld" } };
   const first = display.render(snapshot, "1")!;
   assert.match(first, /provisional snapshot/); assert.match(first, /Hello\\nworld/); assert.equal(first.split("\n").length, 2);
   assert.doesNotMatch(first, /PRIVATE_|HIDDEN_|\x1b/); assert.equal(display.render(snapshot, "1"), undefined);
-  for (const bad of [{ ...snapshot, chatId: "2" }, { ...snapshot, version: 2 }, { ...snapshot, provisional: false }, { ...snapshot, generation: { ...snapshot.generation, phase: ["generating"] } }, { ...snapshot, runTaskId: "bad" }]) assert.equal(display.render(bad, "1"), undefined);
+  for (const bad of [{ ...snapshot, private: "PRIVATE" }, { ...snapshot, generation: { ...snapshot.generation, arguments: "PRIVATE" } }, { ...snapshot, chatId: "2" }, { ...snapshot, version: 2 }, { ...snapshot, provisional: false }, { ...snapshot, generation: { ...snapshot.generation, phase: ["generating"] } }, { ...snapshot, runTaskId: "bad" }]) assert.equal(display.render(bad, "1"), undefined);
   const replacement = { ...snapshot, generation: { ...snapshot.generation, text: "Replacement" } };
   assert.match(display.render(replacement, "1")!, /Replacement/);
   assert.match(display.render({ ...replacement, generation: { ...replacement.generation, attempt: 2 } }, "1")!, /"attempt":2/);
-  const tail = display.render({ ...snapshot, generation: { ...snapshot.generation, text: "HEAD_MUST_CLIP" + "x".repeat(5000) + "TAIL" } }, "1")!;
+  assert.equal(display.render({ ...snapshot, generation: { ...snapshot.generation, text: "x".repeat(5000) } }, "1"), undefined);
+  const tail = display.render(projectProgress("1", live(fauxAssistantMessage("HEAD_MUST_CLIP" + "x".repeat(5000) + "TAIL"))), "1")!;
   assert.match(tail, /"textClipped":true/); assert.doesNotMatch(tail, /HEAD_MUST_CLIP/); assert.ok(tail.length < 16 * 1024);
   assert.match(display.render({ version: 1, chatId: "1", provisional: true }, "1")!, /preview cleared/);
   assert.equal(display.render({ version: 1, chatId: "1", provisional: true }, "1"), undefined);

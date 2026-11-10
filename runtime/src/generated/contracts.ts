@@ -56,52 +56,132 @@ export type ChatListItems = (ChatListItem)[];
 export const validChatListItems = (x: unknown): x is ChatListItems => v66(x);
 export type ChatListPage = { items: ChatListItems; next?: PiId };
 export const validChatListPage = (x: unknown): x is ChatListPage => v68(x);
+export type LiveViewArgs = { chatId?: PiId; [key: string]: unknown };
+export const validLiveViewArgs = (x: unknown): x is LiveViewArgs => v71(x);
+export type InstructionStatusArgs = { chatId?: PiId; taskId?: PiId };
+export const validInstructionStatusArgs = (x: unknown): x is InstructionStatusArgs => v73(x);
+export type ViewCount = number;
+export const validViewCount = (x: unknown): x is ViewCount => v76(x);
+export type GenerationPhase = "generating" | "retrying" | "deferred";
+export const validGenerationPhase = (x: unknown): x is GenerationPhase => v77(x);
+export type GenerationAttempt = number;
+export const validGenerationAttempt = (x: unknown): x is GenerationAttempt => v78(x);
+export type ActivityGeneration = { attempt: GenerationAttempt; phase: GenerationPhase };
+export const validActivityGeneration = (x: unknown): x is ActivityGeneration => v79(x);
+export type ActivityToolStatus = "pending" | "running" | "done";
+export const validActivityToolStatus = (x: unknown): x is ActivityToolStatus => v82(x);
+export type ActivityTool = { callId: string; name: string; status: ActivityToolStatus; taskId?: PiId; nested: boolean };
+export const validActivityTool = (x: unknown): x is ActivityTool => v83(x);
+export type ActivitySnapshot = { chatId: PiId; busy: boolean; queued: ViewCount; runTaskId?: PiId; generation?: ActivityGeneration; tools: (ActivityTool)[]; omittedTools: ViewCount; compactions: ViewCount; compactionFailed: boolean };
+export const validActivitySnapshot = (x: unknown): x is ActivitySnapshot => v89(x);
+export type ProgressGeneration = { attempt: GenerationAttempt; phase: GenerationPhase; text: string; textClipped?: true; blocksOmitted?: GenerationAttempt; nonTextOmitted?: true };
+export const validProgressGeneration = (x: unknown): x is ProgressGeneration => v100(x);
+export type ProgressTool = { taskId: PiId; name: "bash"; text: string; textClipped?: true; lossyUtf8?: true };
+export const validProgressTool = (x: unknown): x is ProgressTool => v107(x);
+export type ProgressSnapshot = { version: 1; chatId: PiId; provisional: true; runTaskId?: PiId; generation?: ProgressGeneration; tools?: (ProgressTool)[]; toolSlotsOmitted?: true };
+export const validProgressSnapshot = (x: unknown): x is ProgressSnapshot => v113(x);
+export type InstructionSourceView = { machineId: string; cwd: string; path: "AGENTS.md"; sha256: Sha256; bytes: number; taskId: PiId; labelsClipped?: true };
+export const validInstructionSourceView = (x: unknown): x is InstructionSourceView => v122(x);
+export type InstructionTaskState = "pending" | "running" | "waiting" | "sleeping" | "completing" | "terminal";
+export const validInstructionTaskState = (x: unknown): x is InstructionTaskState => v131(x);
+export type InstructionOutcome = "completed" | "failed" | "aborted" | "orphaned";
+export const validInstructionOutcome = (x: unknown): x is InstructionOutcome => v132(x);
+export type InstructionRejection = "offline" | "unavailable" | "read_failed" | "effect_uncertain" | "invalid" | "too_large" | "settings_changed" | "busy";
+export const validInstructionRejection = (x: unknown): x is InstructionRejection => v133(x);
+export type InstructionAppliedView = { status: "applied"; source: InstructionSourceView };
+export const validInstructionAppliedView = (x: unknown): x is InstructionAppliedView => v134(x);
+export type InstructionRejectedView = { status: "rejected"; reason: InstructionRejection };
+export const validInstructionRejectedView = (x: unknown): x is InstructionRejectedView => v137(x);
+export type InstructionAbortedView = { status: "aborted" };
+export const validInstructionAbortedView = (x: unknown): x is InstructionAbortedView => v140(x);
+export type InstructionResultView = InstructionAppliedView | InstructionRejectedView | InstructionAbortedView;
+export const validInstructionResultView = (x: unknown): x is InstructionResultView => v142(x);
+export type InstructionTaskView = { taskId: PiId; state: InstructionTaskState; abortRequested?: true; outcome?: InstructionOutcome; result?: InstructionResultView; resultOmitted?: true };
+export const validInstructionTaskView = (x: unknown): x is InstructionTaskView => v146(x);
+export type InstructionSnapshot = { version: 1; chatId: PiId; source: InstructionSourceView | null; import: InstructionTaskView | null; sourceOmitted?: true };
+export const validInstructionSnapshot = (x: unknown): x is InstructionSnapshot => v153(x);
+export type HistoryAfter = string;
+export const validHistoryAfter = (x: unknown): x is HistoryAfter => v163(x);
+export type HistoryArgs = { chatId: PiId; limit?: number; before?: PiId; after?: HistoryAfter; includeActivity?: boolean; includeProgress?: boolean; includeInstructions?: boolean; [key: string]: unknown };
+export const validHistoryArgs = (x: unknown): x is HistoryArgs => v164(x);
+export type HistoryText = string;
+export const validHistoryText = (x: unknown): x is HistoryText => v172(x);
+export type HistoryInputData = { text: HistoryText; origin?: unknown; [key: string]: unknown };
+export const validHistoryInputData = (x: unknown): x is HistoryInputData => v173(x);
+export type HistoryAgentOrigin = { kind: "task-tool"; chatId: PiId; taskId: PiId; [key: string]: unknown };
+export const validHistoryAgentOrigin = (x: unknown): x is HistoryAgentOrigin => v176(x);
+export type HistoryContentPart = { type: string; text?: HistoryText; name?: HistoryText; [key: string]: unknown };
+export const validHistoryContentPart = (x: unknown): x is HistoryContentPart => v180(x);
+export type HistoryMessage = { content?: (HistoryContentPart)[]; stopReason?: HistoryText; errorMessage?: HistoryText; toolName?: HistoryText; isError?: boolean; details?: unknown; [key: string]: unknown };
+export const validHistoryMessage = (x: unknown): x is HistoryMessage => v184(x);
+export type HistoryMessages = (HistoryMessage)[];
+export const validHistoryMessages = (x: unknown): x is HistoryMessages => v192(x);
+export type HistoryEntry = { id: number; kind: string; data?: unknown; model?: unknown; [key: string]: unknown };
+export const validHistoryEntry = (x: unknown): x is HistoryEntry => v194(x);
+export type HistoryPage = { items: (HistoryEntry)[]; next?: PiId; activity?: ActivitySnapshot; progress?: ProgressSnapshot; instructions?: InstructionSnapshot };
+export const validHistoryPage = (x: unknown): x is HistoryPage => v199(x);
 export type StopArgs = { chatId: PiId; [key: string]: unknown };
-export const validStopArgs = (x: unknown): x is StopArgs => v71(x);
+export const validStopArgs = (x: unknown): x is StopArgs => v206(x);
 export type StopAck = { requested: true };
-export const validStopAck = (x: unknown): x is StopAck => v73(x);
+export const validStopAck = (x: unknown): x is StopAck => v208(x);
 export type RexStartupArgs = { chatId: PiId; allocationId: RexUuid; blockId: RexBlockId };
-export const validRexStartupArgs = (x: unknown): x is RexStartupArgs => v75(x);
+export const validRexStartupArgs = (x: unknown): x is RexStartupArgs => v210(x);
 export type RexRegistrationObservation = "unbound" | "matched";
-export const validRexRegistrationObservation = (x: unknown): x is RexRegistrationObservation => v81(x);
+export const validRexRegistrationObservation = (x: unknown): x is RexRegistrationObservation => v216(x);
 export type RexStartupAck = { version: 1; chatId: PiId; taskId: PiId; allocationId: RexUuid; blockId: RexBlockId; registered: true; observation: RexRegistrationObservation; historical: true; live: "not_checked" };
-export const validRexStartupAck = (x: unknown): x is RexStartupAck => v82(x);
+export const validRexStartupAck = (x: unknown): x is RexStartupAck => v217(x);
 export type RexUuid = string;
-export const validRexUuid = (x: unknown): x is RexUuid => v78(x);
+export const validRexUuid = (x: unknown): x is RexUuid => v213(x);
 export type RexSessionId = string;
-export const validRexSessionId = (x: unknown): x is RexSessionId => v92(x);
+export const validRexSessionId = (x: unknown): x is RexSessionId => v227(x);
 export type RexWindowId = string;
-export const validRexWindowId = (x: unknown): x is RexWindowId => v93(x);
+export const validRexWindowId = (x: unknown): x is RexWindowId => v228(x);
 export type RexBlockId = string;
-export const validRexBlockId = (x: unknown): x is RexBlockId => v80(x);
+export const validRexBlockId = (x: unknown): x is RexBlockId => v215(x);
 export type ChatId = string;
 export const validChatId = (x: unknown): x is ChatId => v24(x);
 export type NullableRexUuid = RexUuid | null;
-export const validNullableRexUuid = (x: unknown): x is NullableRexUuid => v94(x);
-export type RexAllocationPlan = { executable: string; server: string; hostId: RexUuid; instanceId: RexUuid; client: string; port: number; hubId: RexUuid; chatId: ChatId; label: string; allocationId?: NullableRexUuid };
-export const validRexAllocationPlan = (x: unknown): x is RexAllocationPlan => v97(x);
+export const validNullableRexUuid = (x: unknown): x is NullableRexUuid => v229(x);
+export type RexOpenTarget = { executable: string; server: string; hostId: RexUuid; instanceId: RexUuid };
+export const validRexOpenTarget = (x: unknown): x is RexOpenTarget => v232(x);
+export type RexOpenArgs = { chatId: PiId; requestId: RexUuid; port: number; target?: RexOpenTarget };
+export const validRexOpenArgs = (x: unknown): x is RexOpenArgs => v237(x);
+export type RexReadArgs = { chatId: PiId };
+export const validRexReadArgs = (x: unknown): x is RexReadArgs => v242(x);
+export type RexOpenDisposition = "admitted" | "reused";
+export const validRexOpenDisposition = (x: unknown): x is RexOpenDisposition => v244(x);
+export type RexOpenAck = { version: 1; chatId: PiId; requestId: RexUuid; taskId: PiId; status: RexOpenDisposition; completion: "not_waited"; bestEffort: true };
+export const validRexOpenAck = (x: unknown): x is RexOpenAck => v245(x);
+export type RexPublicBinding = { machineId: string; cwd: string; server: string; hostId: RexUuid; instanceId: RexUuid; sessionId: RexSessionId; windowId: RexWindowId; blockId: RexBlockId; hubId: RexUuid; chatId: PiId; taskId: PiId; readiness: "not_checked" };
+export const validRexPublicBinding = (x: unknown): x is RexPublicBinding => v253(x);
+export type RexAttemptState = "unallocated" | "pending" | "allocated" | "not_allocated" | "uncertain" | "aborted";
+export const validRexAttemptState = (x: unknown): x is RexAttemptState => v266(x);
+export type RexStatusSnapshot = { version: 1; hubId: RexUuid; chatId: PiId; taskId: PiId | null; status: RexAttemptState; binding: RexPublicBinding | null; previousBinding: RexPublicBinding | null; bestEffort: true };
+export const validRexStatusSnapshot = (x: unknown): x is RexStatusSnapshot => v267(x);
+export type RexAllocationPlan = { executable: string; server: string; hostId: RexUuid; instanceId: RexUuid; client: string; port: number; hubId: RexUuid; chatId: ChatId; label: string; allocationId?: NullableRexUuid; sessionId?: RexSessionId };
+export const validRexAllocationPlan = (x: unknown): x is RexAllocationPlan => v282(x);
 export type RexCreation = { version: 1; server: string; hostId: RexUuid; instanceId: RexUuid; sessionId: RexSessionId; windowId: RexWindowId; blockId: RexBlockId; chatId: ChatId; hubId: RexUuid; allocationId?: NullableRexUuid; readiness: "not_checked"; [key: string]: unknown };
-export const validRexCreation = (x: unknown): x is RexCreation => v108(x);
+export const validRexCreation = (x: unknown): x is RexCreation => v294(x);
 export type RexInspectionScope = { server: string; hostId: RexUuid; instanceId: RexUuid; sessionId: RexSessionId; windowId: RexWindowId; blockId: RexBlockId };
-export const validRexInspectionScope = (x: unknown): x is RexInspectionScope => v120(x);
+export const validRexInspectionScope = (x: unknown): x is RexInspectionScope => v306(x);
 export type RexInspectionQuery = { executable: string; scope: RexInspectionScope };
-export const validRexInspectionQuery = (x: unknown): x is RexInspectionQuery => v127(x);
+export const validRexInspectionQuery = (x: unknown): x is RexInspectionQuery => v313(x);
 export type RexPresenceState = "unavailable" | "identity_changed" | "missing_session" | "missing_terminal" | "pending" | "running" | "exited" | "conflict" | "inconclusive" | "cancelled";
-export const validRexPresenceState = (x: unknown): x is RexPresenceState => v130(x);
+export const validRexPresenceState = (x: unknown): x is RexPresenceState => v316(x);
 export type RexInspectionObservation = { version: 1; scope: RexInspectionScope; state: RexPresenceState; exitCode: number | null; revision: number | null };
-export const validRexInspectionObservation = (x: unknown): x is RexInspectionObservation => v131(x);
+export const validRexInspectionObservation = (x: unknown): x is RexInspectionObservation => v317(x);
 export type RexInspectionStatus = "sampled" | "unbound" | "unavailable" | "conflict" | "stale" | "cancelled";
-export const validRexInspectionStatus = (x: unknown): x is RexInspectionStatus => v141(x);
+export const validRexInspectionStatus = (x: unknown): x is RexInspectionStatus => v327(x);
 export type RexInspectionSnapshot = { version: 1; hubId: RexUuid; chatId: ChatId; requestId: RexUuid; taskId: ChatId | null; startedAtMs: number; finishedAtMs: number; status: RexInspectionStatus; observation: RexInspectionObservation | null };
-export const validRexInspectionSnapshot = (x: unknown): x is RexInspectionSnapshot => v142(x);
+export const validRexInspectionSnapshot = (x: unknown): x is RexInspectionSnapshot => v328(x);
 export type Sha256 = string;
-export const validSha256 = (x: unknown): x is Sha256 => v156(x);
+export const validSha256 = (x: unknown): x is Sha256 => v127(x);
 export type RexAllocationReceiptQuery = { operationId: ChatId; request: string };
-export const validRexAllocationReceiptQuery = (x: unknown): x is RexAllocationReceiptQuery => v157(x);
+export const validRexAllocationReceiptQuery = (x: unknown): x is RexAllocationReceiptQuery => v342(x);
 export type RexAllocationReceiptState = "missing" | "accepted" | "allocated" | "not_allocated" | "conflict" | "inconclusive";
-export const validRexAllocationReceiptState = (x: unknown): x is RexAllocationReceiptState => v160(x);
+export const validRexAllocationReceiptState = (x: unknown): x is RexAllocationReceiptState => v345(x);
 export type RexAllocationReceipt = { version: 1; operationId: ChatId; requestHash: Sha256; state: RexAllocationReceiptState; creation: RexCreation | null };
-export const validRexAllocationReceipt = (x: unknown): x is RexAllocationReceipt => v161(x);
+export const validRexAllocationReceipt = (x: unknown): x is RexAllocationReceipt => v346(x);
 function v0(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "version") && v1(x.version)) && (Object.hasOwn(x, "id") && v2(x.id)) && (Object.hasOwn(x, "command") && v4(x.command)) && (!Object.hasOwn(x, "args") || v5(x.args)) && (!Object.hasOwn(x, "hubId") || v6(x.hubId)); }
 function v1(x: unknown): boolean { return x === 1; }
 function v2(x: unknown): boolean { return v3(x); }
@@ -173,101 +253,286 @@ function v67(x: unknown): boolean { return v58(x); }
 function v68(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "items") && v69(x.items)) && (!Object.hasOwn(x, "next") || v70(x.next)) && Object.keys(x).every((key) => ["items","next"].includes(key)); }
 function v69(x: unknown): boolean { return v66(x); }
 function v70(x: unknown): boolean { return v23(x); }
-function v71(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "chatId") && v72(x.chatId)); }
+function v71(x: unknown): boolean { return object(x) && (!Object.hasOwn(x, "chatId") || v72(x.chatId)); }
 function v72(x: unknown): boolean { return v23(x); }
-function v73(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "requested") && v74(x.requested)) && Object.keys(x).every((key) => ["requested"].includes(key)); }
-function v74(x: unknown): boolean { return x === true; }
-function v75(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "chatId") && v76(x.chatId)) && (Object.hasOwn(x, "allocationId") && v77(x.allocationId)) && (Object.hasOwn(x, "blockId") && v79(x.blockId)) && Object.keys(x).every((key) => ["chatId","allocationId","blockId"].includes(key)); }
-function v76(x: unknown): boolean { return v23(x); }
-function v77(x: unknown): boolean { return v78(x); }
-function v78(x: unknown): boolean { return string(x, 0, Infinity) && (new RegExp("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])").exec(x)?.[0] === x); }
-function v79(x: unknown): boolean { return v80(x); }
-function v80(x: unknown): boolean { return string(x, 0, Infinity) && (new RegExp("^block:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])").exec(x)?.[0] === x); }
-function v81(x: unknown): boolean { return x === "unbound" || x === "matched"; }
-function v82(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "version") && v83(x.version)) && (Object.hasOwn(x, "chatId") && v84(x.chatId)) && (Object.hasOwn(x, "taskId") && v85(x.taskId)) && (Object.hasOwn(x, "allocationId") && v86(x.allocationId)) && (Object.hasOwn(x, "blockId") && v87(x.blockId)) && (Object.hasOwn(x, "registered") && v88(x.registered)) && (Object.hasOwn(x, "observation") && v89(x.observation)) && (Object.hasOwn(x, "historical") && v90(x.historical)) && (Object.hasOwn(x, "live") && v91(x.live)) && Object.keys(x).every((key) => ["version","chatId","taskId","allocationId","blockId","registered","observation","historical","live"].includes(key)); }
-function v83(x: unknown): boolean { return x === 1; }
-function v84(x: unknown): boolean { return v23(x); }
-function v85(x: unknown): boolean { return v23(x); }
-function v86(x: unknown): boolean { return v78(x); }
-function v87(x: unknown): boolean { return v80(x); }
-function v88(x: unknown): boolean { return x === true; }
-function v89(x: unknown): boolean { return v81(x); }
-function v90(x: unknown): boolean { return x === true; }
-function v91(x: unknown): boolean { return x === "not_checked"; }
-function v92(x: unknown): boolean { return string(x, 0, Infinity) && (new RegExp("^session:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])").exec(x)?.[0] === x); }
-function v93(x: unknown): boolean { return string(x, 0, Infinity) && (new RegExp("^window:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])").exec(x)?.[0] === x); }
-function v94(x: unknown): boolean { return v95(x) || v96(x); }
-function v95(x: unknown): boolean { return v78(x); }
-function v96(x: unknown): boolean { return x === null; }
-function v97(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "executable") && v98(x.executable)) && (Object.hasOwn(x, "server") && v99(x.server)) && (Object.hasOwn(x, "hostId") && v100(x.hostId)) && (Object.hasOwn(x, "instanceId") && v101(x.instanceId)) && (Object.hasOwn(x, "client") && v102(x.client)) && (Object.hasOwn(x, "port") && v103(x.port)) && (Object.hasOwn(x, "hubId") && v104(x.hubId)) && (Object.hasOwn(x, "chatId") && v105(x.chatId)) && (Object.hasOwn(x, "label") && v106(x.label)) && (!Object.hasOwn(x, "allocationId") || v107(x.allocationId)) && Object.keys(x).every((key) => ["executable","server","hostId","instanceId","client","port","hubId","chatId","label","allocationId"].includes(key)); }
-function v98(x: unknown): boolean { return string(x, 1, 4096); }
-function v99(x: unknown): boolean { return string(x, 1, 107); }
-function v100(x: unknown): boolean { return v78(x); }
+function v73(x: unknown): boolean { return object(x) && (!Object.hasOwn(x, "chatId") || v74(x.chatId)) && (!Object.hasOwn(x, "taskId") || v75(x.taskId)) && Object.keys(x).every((key) => ["chatId","taskId"].includes(key)); }
+function v74(x: unknown): boolean { return v23(x); }
+function v75(x: unknown): boolean { return v23(x); }
+function v76(x: unknown): boolean { return typeof x === "number" && Number.isSafeInteger(x) && x >= 0 && x <= 9007199254740991; }
+function v77(x: unknown): boolean { return x === "generating" || x === "retrying" || x === "deferred"; }
+function v78(x: unknown): boolean { return typeof x === "number" && Number.isSafeInteger(x) && x >= 1 && x <= 9007199254740991; }
+function v79(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "attempt") && v80(x.attempt)) && (Object.hasOwn(x, "phase") && v81(x.phase)) && Object.keys(x).every((key) => ["attempt","phase"].includes(key)); }
+function v80(x: unknown): boolean { return v78(x); }
+function v81(x: unknown): boolean { return v77(x); }
+function v82(x: unknown): boolean { return x === "pending" || x === "running" || x === "done"; }
+function v83(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "callId") && v84(x.callId)) && (Object.hasOwn(x, "name") && v85(x.name)) && (Object.hasOwn(x, "status") && v86(x.status)) && (!Object.hasOwn(x, "taskId") || v87(x.taskId)) && (Object.hasOwn(x, "nested") && v88(x.nested)) && Object.keys(x).every((key) => ["callId","name","status","taskId","nested"].includes(key)); }
+function v84(x: unknown): boolean { return string(x, 0, 128); }
+function v85(x: unknown): boolean { return string(x, 0, 80); }
+function v86(x: unknown): boolean { return v82(x); }
+function v87(x: unknown): boolean { return v23(x); }
+function v88(x: unknown): boolean { return typeof x === "boolean"; }
+function v89(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "chatId") && v90(x.chatId)) && (Object.hasOwn(x, "busy") && v91(x.busy)) && (Object.hasOwn(x, "queued") && v92(x.queued)) && (!Object.hasOwn(x, "runTaskId") || v93(x.runTaskId)) && (!Object.hasOwn(x, "generation") || v94(x.generation)) && (Object.hasOwn(x, "tools") && v95(x.tools)) && (Object.hasOwn(x, "omittedTools") && v97(x.omittedTools)) && (Object.hasOwn(x, "compactions") && v98(x.compactions)) && (Object.hasOwn(x, "compactionFailed") && v99(x.compactionFailed)) && Object.keys(x).every((key) => ["chatId","busy","queued","runTaskId","generation","tools","omittedTools","compactions","compactionFailed"].includes(key)); }
+function v90(x: unknown): boolean { return v23(x); }
+function v91(x: unknown): boolean { return typeof x === "boolean"; }
+function v92(x: unknown): boolean { return v76(x); }
+function v93(x: unknown): boolean { return v23(x); }
+function v94(x: unknown): boolean { return v79(x); }
+function v95(x: unknown): boolean { return array(x, 0, 32, v96); }
+function v96(x: unknown): boolean { return v83(x); }
+function v97(x: unknown): boolean { return v76(x); }
+function v98(x: unknown): boolean { return v76(x); }
+function v99(x: unknown): boolean { return typeof x === "boolean"; }
+function v100(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "attempt") && v101(x.attempt)) && (Object.hasOwn(x, "phase") && v102(x.phase)) && (Object.hasOwn(x, "text") && v103(x.text)) && (!Object.hasOwn(x, "textClipped") || v104(x.textClipped)) && (!Object.hasOwn(x, "blocksOmitted") || v105(x.blocksOmitted)) && (!Object.hasOwn(x, "nonTextOmitted") || v106(x.nonTextOmitted)) && Object.keys(x).every((key) => ["attempt","phase","text","textClipped","blocksOmitted","nonTextOmitted"].includes(key)); }
 function v101(x: unknown): boolean { return v78(x); }
-function v102(x: unknown): boolean { return string(x, 1, 4096); }
-function v103(x: unknown): boolean { return typeof x === "number" && Number.isSafeInteger(x) && x >= 1 && x <= 65535; }
-function v104(x: unknown): boolean { return v78(x); }
-function v105(x: unknown): boolean { return v24(x); }
-function v106(x: unknown): boolean { return string(x, 0, Infinity) && (new RegExp("^[ -~]{1,120}$(?![\\s\\S])").exec(x)?.[0] === x); }
-function v107(x: unknown): boolean { return v94(x); }
-function v108(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "version") && v109(x.version)) && (Object.hasOwn(x, "server") && v110(x.server)) && (Object.hasOwn(x, "hostId") && v111(x.hostId)) && (Object.hasOwn(x, "instanceId") && v112(x.instanceId)) && (Object.hasOwn(x, "sessionId") && v113(x.sessionId)) && (Object.hasOwn(x, "windowId") && v114(x.windowId)) && (Object.hasOwn(x, "blockId") && v115(x.blockId)) && (Object.hasOwn(x, "chatId") && v116(x.chatId)) && (Object.hasOwn(x, "hubId") && v117(x.hubId)) && (!Object.hasOwn(x, "allocationId") || v118(x.allocationId)) && (Object.hasOwn(x, "readiness") && v119(x.readiness)); }
-function v109(x: unknown): boolean { return x === 1; }
-function v110(x: unknown): boolean { return string(x, 1, 107); }
-function v111(x: unknown): boolean { return v78(x); }
-function v112(x: unknown): boolean { return v78(x); }
-function v113(x: unknown): boolean { return v92(x); }
-function v114(x: unknown): boolean { return v93(x); }
-function v115(x: unknown): boolean { return v80(x); }
-function v116(x: unknown): boolean { return v24(x); }
-function v117(x: unknown): boolean { return v78(x); }
-function v118(x: unknown): boolean { return v94(x); }
-function v119(x: unknown): boolean { return x === "not_checked"; }
-function v120(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "server") && v121(x.server)) && (Object.hasOwn(x, "hostId") && v122(x.hostId)) && (Object.hasOwn(x, "instanceId") && v123(x.instanceId)) && (Object.hasOwn(x, "sessionId") && v124(x.sessionId)) && (Object.hasOwn(x, "windowId") && v125(x.windowId)) && (Object.hasOwn(x, "blockId") && v126(x.blockId)) && Object.keys(x).every((key) => ["server","hostId","instanceId","sessionId","windowId","blockId"].includes(key)); }
-function v121(x: unknown): boolean { return string(x, 1, 107); }
-function v122(x: unknown): boolean { return v78(x); }
-function v123(x: unknown): boolean { return v78(x); }
-function v124(x: unknown): boolean { return v92(x); }
-function v125(x: unknown): boolean { return v93(x); }
-function v126(x: unknown): boolean { return v80(x); }
-function v127(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "executable") && v128(x.executable)) && (Object.hasOwn(x, "scope") && v129(x.scope)) && Object.keys(x).every((key) => ["executable","scope"].includes(key)); }
-function v128(x: unknown): boolean { return string(x, 1, 4096); }
-function v129(x: unknown): boolean { return v120(x); }
-function v130(x: unknown): boolean { return x === "unavailable" || x === "identity_changed" || x === "missing_session" || x === "missing_terminal" || x === "pending" || x === "running" || x === "exited" || x === "conflict" || x === "inconclusive" || x === "cancelled"; }
-function v131(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "version") && v132(x.version)) && (Object.hasOwn(x, "scope") && v133(x.scope)) && (Object.hasOwn(x, "state") && v134(x.state)) && (Object.hasOwn(x, "exitCode") && v135(x.exitCode)) && (Object.hasOwn(x, "revision") && v138(x.revision)) && Object.keys(x).every((key) => ["version","scope","state","exitCode","revision"].includes(key)); }
-function v132(x: unknown): boolean { return x === 1; }
-function v133(x: unknown): boolean { return v120(x); }
-function v134(x: unknown): boolean { return v130(x); }
-function v135(x: unknown): boolean { return v136(x) || v137(x); }
-function v136(x: unknown): boolean { return typeof x === "number" && Number.isSafeInteger(x) && x >= -2147483648 && x <= 2147483647; }
-function v137(x: unknown): boolean { return x === null; }
-function v138(x: unknown): boolean { return v139(x) || v140(x); }
-function v139(x: unknown): boolean { return typeof x === "number" && Number.isSafeInteger(x) && x >= 0 && x <= 9007199254740991; }
-function v140(x: unknown): boolean { return x === null; }
-function v141(x: unknown): boolean { return x === "sampled" || x === "unbound" || x === "unavailable" || x === "conflict" || x === "stale" || x === "cancelled"; }
-function v142(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "version") && v143(x.version)) && (Object.hasOwn(x, "hubId") && v144(x.hubId)) && (Object.hasOwn(x, "chatId") && v145(x.chatId)) && (Object.hasOwn(x, "requestId") && v146(x.requestId)) && (Object.hasOwn(x, "taskId") && v147(x.taskId)) && (Object.hasOwn(x, "startedAtMs") && v150(x.startedAtMs)) && (Object.hasOwn(x, "finishedAtMs") && v151(x.finishedAtMs)) && (Object.hasOwn(x, "status") && v152(x.status)) && (Object.hasOwn(x, "observation") && v153(x.observation)) && Object.keys(x).every((key) => ["version","hubId","chatId","requestId","taskId","startedAtMs","finishedAtMs","status","observation"].includes(key)); }
-function v143(x: unknown): boolean { return x === 1; }
-function v144(x: unknown): boolean { return v78(x); }
-function v145(x: unknown): boolean { return v24(x); }
-function v146(x: unknown): boolean { return v78(x); }
-function v147(x: unknown): boolean { return v148(x) || v149(x); }
-function v148(x: unknown): boolean { return v24(x); }
-function v149(x: unknown): boolean { return x === null; }
-function v150(x: unknown): boolean { return typeof x === "number" && Number.isSafeInteger(x) && x >= 0 && x <= 9007199254740991; }
-function v151(x: unknown): boolean { return typeof x === "number" && Number.isSafeInteger(x) && x >= 0 && x <= 9007199254740991; }
-function v152(x: unknown): boolean { return v141(x); }
-function v153(x: unknown): boolean { return v154(x) || v155(x); }
-function v154(x: unknown): boolean { return v131(x); }
-function v155(x: unknown): boolean { return x === null; }
-function v156(x: unknown): boolean { return string(x, 0, Infinity) && (new RegExp("^[0-9a-f]{64}$(?![\\s\\S])").exec(x)?.[0] === x); }
-function v157(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "operationId") && v158(x.operationId)) && (Object.hasOwn(x, "request") && v159(x.request)) && Object.keys(x).every((key) => ["operationId","request"].includes(key)); }
-function v158(x: unknown): boolean { return v24(x); }
-function v159(x: unknown): boolean { return string(x, 1, 131072); }
-function v160(x: unknown): boolean { return x === "missing" || x === "accepted" || x === "allocated" || x === "not_allocated" || x === "conflict" || x === "inconclusive"; }
-function v161(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "version") && v162(x.version)) && (Object.hasOwn(x, "operationId") && v163(x.operationId)) && (Object.hasOwn(x, "requestHash") && v164(x.requestHash)) && (Object.hasOwn(x, "state") && v165(x.state)) && (Object.hasOwn(x, "creation") && v166(x.creation)) && Object.keys(x).every((key) => ["version","operationId","requestHash","state","creation"].includes(key)); }
-function v162(x: unknown): boolean { return x === 1; }
-function v163(x: unknown): boolean { return v24(x); }
-function v164(x: unknown): boolean { return v156(x); }
-function v165(x: unknown): boolean { return v160(x); }
-function v166(x: unknown): boolean { return v167(x) || v168(x); }
-function v167(x: unknown): boolean { return v108(x); }
-function v168(x: unknown): boolean { return x === null; }
+function v102(x: unknown): boolean { return v77(x); }
+function v103(x: unknown): boolean { return string(x, 0, 2048); }
+function v104(x: unknown): boolean { return x === true; }
+function v105(x: unknown): boolean { return v78(x); }
+function v106(x: unknown): boolean { return x === true; }
+function v107(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "taskId") && v108(x.taskId)) && (Object.hasOwn(x, "name") && v109(x.name)) && (Object.hasOwn(x, "text") && v110(x.text)) && (!Object.hasOwn(x, "textClipped") || v111(x.textClipped)) && (!Object.hasOwn(x, "lossyUtf8") || v112(x.lossyUtf8)) && Object.keys(x).every((key) => ["taskId","name","text","textClipped","lossyUtf8"].includes(key)); }
+function v108(x: unknown): boolean { return v23(x); }
+function v109(x: unknown): boolean { return x === "bash"; }
+function v110(x: unknown): boolean { return string(x, 0, 512); }
+function v111(x: unknown): boolean { return x === true; }
+function v112(x: unknown): boolean { return x === true; }
+function v113(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "version") && v114(x.version)) && (Object.hasOwn(x, "chatId") && v115(x.chatId)) && (Object.hasOwn(x, "provisional") && v116(x.provisional)) && (!Object.hasOwn(x, "runTaskId") || v117(x.runTaskId)) && (!Object.hasOwn(x, "generation") || v118(x.generation)) && (!Object.hasOwn(x, "tools") || v119(x.tools)) && (!Object.hasOwn(x, "toolSlotsOmitted") || v121(x.toolSlotsOmitted)) && Object.keys(x).every((key) => ["version","chatId","provisional","runTaskId","generation","tools","toolSlotsOmitted"].includes(key)); }
+function v114(x: unknown): boolean { return x === 1; }
+function v115(x: unknown): boolean { return v23(x); }
+function v116(x: unknown): boolean { return x === true; }
+function v117(x: unknown): boolean { return v23(x); }
+function v118(x: unknown): boolean { return v100(x); }
+function v119(x: unknown): boolean { return array(x, 0, 4, v120); }
+function v120(x: unknown): boolean { return v107(x); }
+function v121(x: unknown): boolean { return x === true; }
+function v122(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "machineId") && v123(x.machineId)) && (Object.hasOwn(x, "cwd") && v124(x.cwd)) && (Object.hasOwn(x, "path") && v125(x.path)) && (Object.hasOwn(x, "sha256") && v126(x.sha256)) && (Object.hasOwn(x, "bytes") && v128(x.bytes)) && (Object.hasOwn(x, "taskId") && v129(x.taskId)) && (!Object.hasOwn(x, "labelsClipped") || v130(x.labelsClipped)) && Object.keys(x).every((key) => ["machineId","cwd","path","sha256","bytes","taskId","labelsClipped"].includes(key)); }
+function v123(x: unknown): boolean { return string(x, 1, 80); }
+function v124(x: unknown): boolean { return string(x, 1, 256); }
+function v125(x: unknown): boolean { return x === "AGENTS.md"; }
+function v126(x: unknown): boolean { return v127(x); }
+function v127(x: unknown): boolean { return string(x, 0, Infinity) && (new RegExp("^[0-9a-f]{64}$(?![\\s\\S])").exec(x)?.[0] === x); }
+function v128(x: unknown): boolean { return typeof x === "number" && Number.isSafeInteger(x) && x >= 0 && x <= 32768; }
+function v129(x: unknown): boolean { return v23(x); }
+function v130(x: unknown): boolean { return x === true; }
+function v131(x: unknown): boolean { return x === "pending" || x === "running" || x === "waiting" || x === "sleeping" || x === "completing" || x === "terminal"; }
+function v132(x: unknown): boolean { return x === "completed" || x === "failed" || x === "aborted" || x === "orphaned"; }
+function v133(x: unknown): boolean { return x === "offline" || x === "unavailable" || x === "read_failed" || x === "effect_uncertain" || x === "invalid" || x === "too_large" || x === "settings_changed" || x === "busy"; }
+function v134(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "status") && v135(x.status)) && (Object.hasOwn(x, "source") && v136(x.source)) && Object.keys(x).every((key) => ["status","source"].includes(key)); }
+function v135(x: unknown): boolean { return x === "applied"; }
+function v136(x: unknown): boolean { return v122(x); }
+function v137(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "status") && v138(x.status)) && (Object.hasOwn(x, "reason") && v139(x.reason)) && Object.keys(x).every((key) => ["status","reason"].includes(key)); }
+function v138(x: unknown): boolean { return x === "rejected"; }
+function v139(x: unknown): boolean { return v133(x); }
+function v140(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "status") && v141(x.status)) && Object.keys(x).every((key) => ["status"].includes(key)); }
+function v141(x: unknown): boolean { return x === "aborted"; }
+function v142(x: unknown): boolean { return v143(x) || v144(x) || v145(x); }
+function v143(x: unknown): boolean { return v134(x); }
+function v144(x: unknown): boolean { return v137(x); }
+function v145(x: unknown): boolean { return v140(x); }
+function v146(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "taskId") && v147(x.taskId)) && (Object.hasOwn(x, "state") && v148(x.state)) && (!Object.hasOwn(x, "abortRequested") || v149(x.abortRequested)) && (!Object.hasOwn(x, "outcome") || v150(x.outcome)) && (!Object.hasOwn(x, "result") || v151(x.result)) && (!Object.hasOwn(x, "resultOmitted") || v152(x.resultOmitted)) && Object.keys(x).every((key) => ["taskId","state","abortRequested","outcome","result","resultOmitted"].includes(key)); }
+function v147(x: unknown): boolean { return v23(x); }
+function v148(x: unknown): boolean { return v131(x); }
+function v149(x: unknown): boolean { return x === true; }
+function v150(x: unknown): boolean { return v132(x); }
+function v151(x: unknown): boolean { return v142(x); }
+function v152(x: unknown): boolean { return x === true; }
+function v153(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "version") && v154(x.version)) && (Object.hasOwn(x, "chatId") && v155(x.chatId)) && (Object.hasOwn(x, "source") && v156(x.source)) && (Object.hasOwn(x, "import") && v159(x.import)) && (!Object.hasOwn(x, "sourceOmitted") || v162(x.sourceOmitted)) && Object.keys(x).every((key) => ["version","chatId","source","import","sourceOmitted"].includes(key)); }
+function v154(x: unknown): boolean { return x === 1; }
+function v155(x: unknown): boolean { return v23(x); }
+function v156(x: unknown): boolean { return v157(x) || v158(x); }
+function v157(x: unknown): boolean { return v122(x); }
+function v158(x: unknown): boolean { return x === null; }
+function v159(x: unknown): boolean { return v160(x) || v161(x); }
+function v160(x: unknown): boolean { return v146(x); }
+function v161(x: unknown): boolean { return x === null; }
+function v162(x: unknown): boolean { return x === true; }
+function v163(x: unknown): boolean { return string(x, 0, Infinity) && (new RegExp("^[0-9]{1,16}$(?![\\s\\S])").exec(x)?.[0] === x); }
+function v164(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "chatId") && v165(x.chatId)) && (!Object.hasOwn(x, "limit") || v166(x.limit)) && (!Object.hasOwn(x, "before") || v167(x.before)) && (!Object.hasOwn(x, "after") || v168(x.after)) && (!Object.hasOwn(x, "includeActivity") || v169(x.includeActivity)) && (!Object.hasOwn(x, "includeProgress") || v170(x.includeProgress)) && (!Object.hasOwn(x, "includeInstructions") || v171(x.includeInstructions)); }
+function v165(x: unknown): boolean { return v23(x); }
+function v166(x: unknown): boolean { return typeof x === "number" && Number.isSafeInteger(x) && x >= 1 && x <= 100; }
+function v167(x: unknown): boolean { return v23(x); }
+function v168(x: unknown): boolean { return v163(x); }
+function v169(x: unknown): boolean { return typeof x === "boolean"; }
+function v170(x: unknown): boolean { return typeof x === "boolean"; }
+function v171(x: unknown): boolean { return typeof x === "boolean"; }
+function v172(x: unknown): boolean { return string(x, 0, 1048576); }
+function v173(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "text") && v174(x.text)) && (!Object.hasOwn(x, "origin") || v175(x.origin)); }
+function v174(x: unknown): boolean { return v172(x); }
+function v175(x: unknown): boolean { return true; }
+function v176(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "kind") && v177(x.kind)) && (Object.hasOwn(x, "chatId") && v178(x.chatId)) && (Object.hasOwn(x, "taskId") && v179(x.taskId)); }
+function v177(x: unknown): boolean { return x === "task-tool"; }
+function v178(x: unknown): boolean { return v23(x); }
+function v179(x: unknown): boolean { return v23(x); }
+function v180(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "type") && v181(x.type)) && (!Object.hasOwn(x, "text") || v182(x.text)) && (!Object.hasOwn(x, "name") || v183(x.name)); }
+function v181(x: unknown): boolean { return string(x, 1, 1048576); }
+function v182(x: unknown): boolean { return v172(x); }
+function v183(x: unknown): boolean { return v172(x); }
+function v184(x: unknown): boolean { return object(x) && (!Object.hasOwn(x, "content") || v185(x.content)) && (!Object.hasOwn(x, "stopReason") || v187(x.stopReason)) && (!Object.hasOwn(x, "errorMessage") || v188(x.errorMessage)) && (!Object.hasOwn(x, "toolName") || v189(x.toolName)) && (!Object.hasOwn(x, "isError") || v190(x.isError)) && (!Object.hasOwn(x, "details") || v191(x.details)); }
+function v185(x: unknown): boolean { return array(x, 0, 4096, v186); }
+function v186(x: unknown): boolean { return v180(x); }
+function v187(x: unknown): boolean { return v172(x); }
+function v188(x: unknown): boolean { return v172(x); }
+function v189(x: unknown): boolean { return v172(x); }
+function v190(x: unknown): boolean { return typeof x === "boolean"; }
+function v191(x: unknown): boolean { return true; }
+function v192(x: unknown): boolean { return array(x, 0, 4096, v193); }
+function v193(x: unknown): boolean { return v184(x); }
+function v194(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "id") && v195(x.id)) && (Object.hasOwn(x, "kind") && v196(x.kind)) && (!Object.hasOwn(x, "data") || v197(x.data)) && (!Object.hasOwn(x, "model") || v198(x.model)); }
+function v195(x: unknown): boolean { return typeof x === "number" && Number.isSafeInteger(x) && x >= 1 && x <= 9007199254740991; }
+function v196(x: unknown): boolean { return string(x, 1, 1048576); }
+function v197(x: unknown): boolean { return true; }
+function v198(x: unknown): boolean { return true; }
+function v199(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "items") && v200(x.items)) && (!Object.hasOwn(x, "next") || v202(x.next)) && (!Object.hasOwn(x, "activity") || v203(x.activity)) && (!Object.hasOwn(x, "progress") || v204(x.progress)) && (!Object.hasOwn(x, "instructions") || v205(x.instructions)) && Object.keys(x).every((key) => ["items","next","activity","progress","instructions"].includes(key)); }
+function v200(x: unknown): boolean { return array(x, 0, 100, v201); }
+function v201(x: unknown): boolean { return v194(x); }
+function v202(x: unknown): boolean { return v23(x); }
+function v203(x: unknown): boolean { return v89(x); }
+function v204(x: unknown): boolean { return v113(x); }
+function v205(x: unknown): boolean { return v153(x); }
+function v206(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "chatId") && v207(x.chatId)); }
+function v207(x: unknown): boolean { return v23(x); }
+function v208(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "requested") && v209(x.requested)) && Object.keys(x).every((key) => ["requested"].includes(key)); }
+function v209(x: unknown): boolean { return x === true; }
+function v210(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "chatId") && v211(x.chatId)) && (Object.hasOwn(x, "allocationId") && v212(x.allocationId)) && (Object.hasOwn(x, "blockId") && v214(x.blockId)) && Object.keys(x).every((key) => ["chatId","allocationId","blockId"].includes(key)); }
+function v211(x: unknown): boolean { return v23(x); }
+function v212(x: unknown): boolean { return v213(x); }
+function v213(x: unknown): boolean { return string(x, 0, Infinity) && (new RegExp("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])").exec(x)?.[0] === x); }
+function v214(x: unknown): boolean { return v215(x); }
+function v215(x: unknown): boolean { return string(x, 0, Infinity) && (new RegExp("^block:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])").exec(x)?.[0] === x); }
+function v216(x: unknown): boolean { return x === "unbound" || x === "matched"; }
+function v217(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "version") && v218(x.version)) && (Object.hasOwn(x, "chatId") && v219(x.chatId)) && (Object.hasOwn(x, "taskId") && v220(x.taskId)) && (Object.hasOwn(x, "allocationId") && v221(x.allocationId)) && (Object.hasOwn(x, "blockId") && v222(x.blockId)) && (Object.hasOwn(x, "registered") && v223(x.registered)) && (Object.hasOwn(x, "observation") && v224(x.observation)) && (Object.hasOwn(x, "historical") && v225(x.historical)) && (Object.hasOwn(x, "live") && v226(x.live)) && Object.keys(x).every((key) => ["version","chatId","taskId","allocationId","blockId","registered","observation","historical","live"].includes(key)); }
+function v218(x: unknown): boolean { return x === 1; }
+function v219(x: unknown): boolean { return v23(x); }
+function v220(x: unknown): boolean { return v23(x); }
+function v221(x: unknown): boolean { return v213(x); }
+function v222(x: unknown): boolean { return v215(x); }
+function v223(x: unknown): boolean { return x === true; }
+function v224(x: unknown): boolean { return v216(x); }
+function v225(x: unknown): boolean { return x === true; }
+function v226(x: unknown): boolean { return x === "not_checked"; }
+function v227(x: unknown): boolean { return string(x, 0, Infinity) && (new RegExp("^session:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])").exec(x)?.[0] === x); }
+function v228(x: unknown): boolean { return string(x, 0, Infinity) && (new RegExp("^window:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])").exec(x)?.[0] === x); }
+function v229(x: unknown): boolean { return v230(x) || v231(x); }
+function v230(x: unknown): boolean { return v213(x); }
+function v231(x: unknown): boolean { return x === null; }
+function v232(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "executable") && v233(x.executable)) && (Object.hasOwn(x, "server") && v234(x.server)) && (Object.hasOwn(x, "hostId") && v235(x.hostId)) && (Object.hasOwn(x, "instanceId") && v236(x.instanceId)) && Object.keys(x).every((key) => ["executable","server","hostId","instanceId"].includes(key)); }
+function v233(x: unknown): boolean { return string(x, 1, 4096); }
+function v234(x: unknown): boolean { return string(x, 1, 107); }
+function v235(x: unknown): boolean { return v213(x); }
+function v236(x: unknown): boolean { return v213(x); }
+function v237(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "chatId") && v238(x.chatId)) && (Object.hasOwn(x, "requestId") && v239(x.requestId)) && (Object.hasOwn(x, "port") && v240(x.port)) && (!Object.hasOwn(x, "target") || v241(x.target)) && Object.keys(x).every((key) => ["chatId","requestId","port","target"].includes(key)); }
+function v238(x: unknown): boolean { return v23(x); }
+function v239(x: unknown): boolean { return v213(x); }
+function v240(x: unknown): boolean { return typeof x === "number" && Number.isSafeInteger(x) && x >= 1 && x <= 65535; }
+function v241(x: unknown): boolean { return v232(x); }
+function v242(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "chatId") && v243(x.chatId)) && Object.keys(x).every((key) => ["chatId"].includes(key)); }
+function v243(x: unknown): boolean { return v23(x); }
+function v244(x: unknown): boolean { return x === "admitted" || x === "reused"; }
+function v245(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "version") && v246(x.version)) && (Object.hasOwn(x, "chatId") && v247(x.chatId)) && (Object.hasOwn(x, "requestId") && v248(x.requestId)) && (Object.hasOwn(x, "taskId") && v249(x.taskId)) && (Object.hasOwn(x, "status") && v250(x.status)) && (Object.hasOwn(x, "completion") && v251(x.completion)) && (Object.hasOwn(x, "bestEffort") && v252(x.bestEffort)) && Object.keys(x).every((key) => ["version","chatId","requestId","taskId","status","completion","bestEffort"].includes(key)); }
+function v246(x: unknown): boolean { return x === 1; }
+function v247(x: unknown): boolean { return v23(x); }
+function v248(x: unknown): boolean { return v213(x); }
+function v249(x: unknown): boolean { return v23(x); }
+function v250(x: unknown): boolean { return v244(x); }
+function v251(x: unknown): boolean { return x === "not_waited"; }
+function v252(x: unknown): boolean { return x === true; }
+function v253(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "machineId") && v254(x.machineId)) && (Object.hasOwn(x, "cwd") && v255(x.cwd)) && (Object.hasOwn(x, "server") && v256(x.server)) && (Object.hasOwn(x, "hostId") && v257(x.hostId)) && (Object.hasOwn(x, "instanceId") && v258(x.instanceId)) && (Object.hasOwn(x, "sessionId") && v259(x.sessionId)) && (Object.hasOwn(x, "windowId") && v260(x.windowId)) && (Object.hasOwn(x, "blockId") && v261(x.blockId)) && (Object.hasOwn(x, "hubId") && v262(x.hubId)) && (Object.hasOwn(x, "chatId") && v263(x.chatId)) && (Object.hasOwn(x, "taskId") && v264(x.taskId)) && (Object.hasOwn(x, "readiness") && v265(x.readiness)) && Object.keys(x).every((key) => ["machineId","cwd","server","hostId","instanceId","sessionId","windowId","blockId","hubId","chatId","taskId","readiness"].includes(key)); }
+function v254(x: unknown): boolean { return string(x, 1, 200000); }
+function v255(x: unknown): boolean { return string(x, 1, 4096); }
+function v256(x: unknown): boolean { return string(x, 1, 107); }
+function v257(x: unknown): boolean { return v213(x); }
+function v258(x: unknown): boolean { return v213(x); }
+function v259(x: unknown): boolean { return v227(x); }
+function v260(x: unknown): boolean { return v228(x); }
+function v261(x: unknown): boolean { return v215(x); }
+function v262(x: unknown): boolean { return v213(x); }
+function v263(x: unknown): boolean { return v23(x); }
+function v264(x: unknown): boolean { return v23(x); }
+function v265(x: unknown): boolean { return x === "not_checked"; }
+function v266(x: unknown): boolean { return x === "unallocated" || x === "pending" || x === "allocated" || x === "not_allocated" || x === "uncertain" || x === "aborted"; }
+function v267(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "version") && v268(x.version)) && (Object.hasOwn(x, "hubId") && v269(x.hubId)) && (Object.hasOwn(x, "chatId") && v270(x.chatId)) && (Object.hasOwn(x, "taskId") && v271(x.taskId)) && (Object.hasOwn(x, "status") && v274(x.status)) && (Object.hasOwn(x, "binding") && v275(x.binding)) && (Object.hasOwn(x, "previousBinding") && v278(x.previousBinding)) && (Object.hasOwn(x, "bestEffort") && v281(x.bestEffort)) && Object.keys(x).every((key) => ["version","hubId","chatId","taskId","status","binding","previousBinding","bestEffort"].includes(key)); }
+function v268(x: unknown): boolean { return x === 1; }
+function v269(x: unknown): boolean { return v213(x); }
+function v270(x: unknown): boolean { return v23(x); }
+function v271(x: unknown): boolean { return v272(x) || v273(x); }
+function v272(x: unknown): boolean { return v23(x); }
+function v273(x: unknown): boolean { return x === null; }
+function v274(x: unknown): boolean { return v266(x); }
+function v275(x: unknown): boolean { return v276(x) || v277(x); }
+function v276(x: unknown): boolean { return v253(x); }
+function v277(x: unknown): boolean { return x === null; }
+function v278(x: unknown): boolean { return v279(x) || v280(x); }
+function v279(x: unknown): boolean { return v253(x); }
+function v280(x: unknown): boolean { return x === null; }
+function v281(x: unknown): boolean { return x === true; }
+function v282(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "executable") && v283(x.executable)) && (Object.hasOwn(x, "server") && v284(x.server)) && (Object.hasOwn(x, "hostId") && v285(x.hostId)) && (Object.hasOwn(x, "instanceId") && v286(x.instanceId)) && (Object.hasOwn(x, "client") && v287(x.client)) && (Object.hasOwn(x, "port") && v288(x.port)) && (Object.hasOwn(x, "hubId") && v289(x.hubId)) && (Object.hasOwn(x, "chatId") && v290(x.chatId)) && (Object.hasOwn(x, "label") && v291(x.label)) && (!Object.hasOwn(x, "allocationId") || v292(x.allocationId)) && (!Object.hasOwn(x, "sessionId") || v293(x.sessionId)) && Object.keys(x).every((key) => ["executable","server","hostId","instanceId","client","port","hubId","chatId","label","allocationId","sessionId"].includes(key)); }
+function v283(x: unknown): boolean { return string(x, 1, 4096); }
+function v284(x: unknown): boolean { return string(x, 1, 107); }
+function v285(x: unknown): boolean { return v213(x); }
+function v286(x: unknown): boolean { return v213(x); }
+function v287(x: unknown): boolean { return string(x, 1, 4096); }
+function v288(x: unknown): boolean { return typeof x === "number" && Number.isSafeInteger(x) && x >= 1 && x <= 65535; }
+function v289(x: unknown): boolean { return v213(x); }
+function v290(x: unknown): boolean { return v24(x); }
+function v291(x: unknown): boolean { return string(x, 0, Infinity) && (new RegExp("^[ -~]{1,120}$(?![\\s\\S])").exec(x)?.[0] === x); }
+function v292(x: unknown): boolean { return v229(x); }
+function v293(x: unknown): boolean { return v227(x); }
+function v294(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "version") && v295(x.version)) && (Object.hasOwn(x, "server") && v296(x.server)) && (Object.hasOwn(x, "hostId") && v297(x.hostId)) && (Object.hasOwn(x, "instanceId") && v298(x.instanceId)) && (Object.hasOwn(x, "sessionId") && v299(x.sessionId)) && (Object.hasOwn(x, "windowId") && v300(x.windowId)) && (Object.hasOwn(x, "blockId") && v301(x.blockId)) && (Object.hasOwn(x, "chatId") && v302(x.chatId)) && (Object.hasOwn(x, "hubId") && v303(x.hubId)) && (!Object.hasOwn(x, "allocationId") || v304(x.allocationId)) && (Object.hasOwn(x, "readiness") && v305(x.readiness)); }
+function v295(x: unknown): boolean { return x === 1; }
+function v296(x: unknown): boolean { return string(x, 1, 107); }
+function v297(x: unknown): boolean { return v213(x); }
+function v298(x: unknown): boolean { return v213(x); }
+function v299(x: unknown): boolean { return v227(x); }
+function v300(x: unknown): boolean { return v228(x); }
+function v301(x: unknown): boolean { return v215(x); }
+function v302(x: unknown): boolean { return v24(x); }
+function v303(x: unknown): boolean { return v213(x); }
+function v304(x: unknown): boolean { return v229(x); }
+function v305(x: unknown): boolean { return x === "not_checked"; }
+function v306(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "server") && v307(x.server)) && (Object.hasOwn(x, "hostId") && v308(x.hostId)) && (Object.hasOwn(x, "instanceId") && v309(x.instanceId)) && (Object.hasOwn(x, "sessionId") && v310(x.sessionId)) && (Object.hasOwn(x, "windowId") && v311(x.windowId)) && (Object.hasOwn(x, "blockId") && v312(x.blockId)) && Object.keys(x).every((key) => ["server","hostId","instanceId","sessionId","windowId","blockId"].includes(key)); }
+function v307(x: unknown): boolean { return string(x, 1, 107); }
+function v308(x: unknown): boolean { return v213(x); }
+function v309(x: unknown): boolean { return v213(x); }
+function v310(x: unknown): boolean { return v227(x); }
+function v311(x: unknown): boolean { return v228(x); }
+function v312(x: unknown): boolean { return v215(x); }
+function v313(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "executable") && v314(x.executable)) && (Object.hasOwn(x, "scope") && v315(x.scope)) && Object.keys(x).every((key) => ["executable","scope"].includes(key)); }
+function v314(x: unknown): boolean { return string(x, 1, 4096); }
+function v315(x: unknown): boolean { return v306(x); }
+function v316(x: unknown): boolean { return x === "unavailable" || x === "identity_changed" || x === "missing_session" || x === "missing_terminal" || x === "pending" || x === "running" || x === "exited" || x === "conflict" || x === "inconclusive" || x === "cancelled"; }
+function v317(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "version") && v318(x.version)) && (Object.hasOwn(x, "scope") && v319(x.scope)) && (Object.hasOwn(x, "state") && v320(x.state)) && (Object.hasOwn(x, "exitCode") && v321(x.exitCode)) && (Object.hasOwn(x, "revision") && v324(x.revision)) && Object.keys(x).every((key) => ["version","scope","state","exitCode","revision"].includes(key)); }
+function v318(x: unknown): boolean { return x === 1; }
+function v319(x: unknown): boolean { return v306(x); }
+function v320(x: unknown): boolean { return v316(x); }
+function v321(x: unknown): boolean { return v322(x) || v323(x); }
+function v322(x: unknown): boolean { return typeof x === "number" && Number.isSafeInteger(x) && x >= -2147483648 && x <= 2147483647; }
+function v323(x: unknown): boolean { return x === null; }
+function v324(x: unknown): boolean { return v325(x) || v326(x); }
+function v325(x: unknown): boolean { return typeof x === "number" && Number.isSafeInteger(x) && x >= 0 && x <= 9007199254740991; }
+function v326(x: unknown): boolean { return x === null; }
+function v327(x: unknown): boolean { return x === "sampled" || x === "unbound" || x === "unavailable" || x === "conflict" || x === "stale" || x === "cancelled"; }
+function v328(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "version") && v329(x.version)) && (Object.hasOwn(x, "hubId") && v330(x.hubId)) && (Object.hasOwn(x, "chatId") && v331(x.chatId)) && (Object.hasOwn(x, "requestId") && v332(x.requestId)) && (Object.hasOwn(x, "taskId") && v333(x.taskId)) && (Object.hasOwn(x, "startedAtMs") && v336(x.startedAtMs)) && (Object.hasOwn(x, "finishedAtMs") && v337(x.finishedAtMs)) && (Object.hasOwn(x, "status") && v338(x.status)) && (Object.hasOwn(x, "observation") && v339(x.observation)) && Object.keys(x).every((key) => ["version","hubId","chatId","requestId","taskId","startedAtMs","finishedAtMs","status","observation"].includes(key)); }
+function v329(x: unknown): boolean { return x === 1; }
+function v330(x: unknown): boolean { return v213(x); }
+function v331(x: unknown): boolean { return v24(x); }
+function v332(x: unknown): boolean { return v213(x); }
+function v333(x: unknown): boolean { return v334(x) || v335(x); }
+function v334(x: unknown): boolean { return v24(x); }
+function v335(x: unknown): boolean { return x === null; }
+function v336(x: unknown): boolean { return typeof x === "number" && Number.isSafeInteger(x) && x >= 0 && x <= 9007199254740991; }
+function v337(x: unknown): boolean { return typeof x === "number" && Number.isSafeInteger(x) && x >= 0 && x <= 9007199254740991; }
+function v338(x: unknown): boolean { return v327(x); }
+function v339(x: unknown): boolean { return v340(x) || v341(x); }
+function v340(x: unknown): boolean { return v317(x); }
+function v341(x: unknown): boolean { return x === null; }
+function v342(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "operationId") && v343(x.operationId)) && (Object.hasOwn(x, "request") && v344(x.request)) && Object.keys(x).every((key) => ["operationId","request"].includes(key)); }
+function v343(x: unknown): boolean { return v24(x); }
+function v344(x: unknown): boolean { return string(x, 1, 131072); }
+function v345(x: unknown): boolean { return x === "missing" || x === "accepted" || x === "allocated" || x === "not_allocated" || x === "conflict" || x === "inconclusive"; }
+function v346(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "version") && v347(x.version)) && (Object.hasOwn(x, "operationId") && v348(x.operationId)) && (Object.hasOwn(x, "requestHash") && v349(x.requestHash)) && (Object.hasOwn(x, "state") && v350(x.state)) && (Object.hasOwn(x, "creation") && v351(x.creation)) && Object.keys(x).every((key) => ["version","operationId","requestHash","state","creation"].includes(key)); }
+function v347(x: unknown): boolean { return x === 1; }
+function v348(x: unknown): boolean { return v24(x); }
+function v349(x: unknown): boolean { return v127(x); }
+function v350(x: unknown): boolean { return v345(x); }
+function v351(x: unknown): boolean { return v352(x) || v353(x); }
+function v352(x: unknown): boolean { return v294(x); }
+function v353(x: unknown): boolean { return x === null; }

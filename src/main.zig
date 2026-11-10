@@ -13,6 +13,8 @@ const help =
     \\  deck restore --from BACKUP_DIRECTORY --directory NEW_STATE
     \\  deck serve [--mock | --api-key] [--model ID] [--port 52800] [--directory PATH]
     \\  deck login [--port 52800]
+    \\  deck rex open|reopen|status|inspect --task CHAT_ID [--port 52800]
+    \\    [--rex /path/to/rex --server unix:///path/to/socket --host-id UUID --instance-id UUID]
     \\  deck serve --stdio --mock [--directory PATH] [--runtime PATH]
     \\  deck agent --no-tui [--port 52800] [--task CHAT_ID] [--message TEXT]
     \\  deck --help | --version
@@ -42,7 +44,11 @@ const help =
     \\Restore preserves identity/bindings and refuses existing destinations.
     \\Restoring old state can repeat later external effects; reconcile before serving.
     \\Backups exclude credentials unless explicitly requested; treat all as sensitive.
-    \\Public Rex allocation/reopen, remote workers and TUI are not yet available.
+    \\Rex first open needs the full explicit target above; later opens reuse it.
+    \\Rex open/reopen is best-effort, ownerless-task-only, with no automatic retry.
+    \\Duplicates after races/lost replies need manual cleanup. No GUI focus/attach.
+    \\Plain /rex open|reopen|status|inspect uses the selected task and saved target.
+    \\Remote workers and TUI are not yet available.
     \\
 ;
 
@@ -257,7 +263,11 @@ fn launchClient(allocator: std.mem.Allocator, args: []const []const u8) !std.pro
     defer argv.deinit(allocator);
     try argv.appendSlice(allocator, &.{ node_path, path });
     if (std.mem.eql(u8, args[1], "login")) try argv.append(allocator, "--login");
-    try argv.appendSlice(allocator, args[2..]);
+    if (std.mem.eql(u8, args[1], "rex")) {
+        if (args.len < 3) return error.InvalidArguments;
+        try argv.appendSlice(allocator, &.{ "--rex-command", args[2] });
+        try argv.appendSlice(allocator, args[3..]);
+    } else try argv.appendSlice(allocator, args[2..]);
     var client = std.process.Child.init(argv.items, allocator);
     return client.spawnAndWait();
 }
@@ -266,7 +276,7 @@ pub fn main() void {
     const allocator = std.heap.page_allocator;
     const args = std.process.argsAlloc(allocator) catch std.process.exit(1);
     defer std.process.argsFree(allocator, args);
-    if (args.len > 1 and (std.mem.eql(u8, args[1], "agent") or std.mem.eql(u8, args[1], "login"))) {
+    if (args.len > 1 and (std.mem.eql(u8, args[1], "agent") or std.mem.eql(u8, args[1], "login") or std.mem.eql(u8, args[1], "rex"))) {
         const term = launchClient(allocator, args) catch {
             std.fs.File.stderr().writeAll("deck: client runtime unavailable; rebuild or check the installation\n") catch {};
             std.process.exit(1);

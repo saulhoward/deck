@@ -1,6 +1,6 @@
 // Private child entry point. Only Zig opens/owns the inherited writer lock.
 import { fstatSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { CompatibilityError, fingerprintImplementation } from "./compatibility.js";
 import { providers } from "./providers.js";
 import { DeckError, DeckRuntime } from "./deck.js";
@@ -33,6 +33,7 @@ async function main() {
     runtime = await DeckRuntime.open(path, {
       models: provider.models, model: provider.model, admissionGuard: provider.guard, validateSavedModels: true,
       implementation: await fingerprintImplementation({ native: nativeExecutable, entry: process.argv[1]!, mode }),
+      rexClient: basename(nativeExecutable) === ".deck-wrapped" ? join(dirname(nativeExecutable), "deck") : nativeExecutable,
       binding: { machineId, cwd }, environment: () => undefined, ...(files ? { hostFiles: files } : {}),
     });
     // A failed Harness closes itself. Do not leave a live command process/listener

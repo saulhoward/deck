@@ -11,7 +11,7 @@ const binary = process.env.DECK_TEST_BINARY;
 const fixture = fileURLToPath(new URL("./rex-allocation.test.fixture.js", import.meta.url));
 const args = (directory: string) => ["serve", "--stdio", "--mock", "--directory", directory, "--workspace", directory, "--runtime", fixture];
 const env = (mode?: string) => ({ ...process.env, OPENAI_API_KEY: "must-not-reach-rex", BASH_ENV: "/must-not-execute", REX_SERVER: "wrong-ambient-target", ...(mode ? { DECK_REX_MODE: mode } : {}) });
-for (const mode of [undefined, "offline", "wrong_server", "bad_client", "uncertain", "failed", "malformed", "wrong_block", "changed_server", "flood", "cancel"]) test(`native Rex allocation ${mode ?? "success"}: stable receipt, explicit scopes, no fallback/replacement`, { skip: !binary, timeout: 25_000 }, async () => {
+for (const mode of [undefined, "api10", "api_mismatch", "offline", "wrong_server", "bad_client", "uncertain", "failed", "malformed", "wrong_block", "changed_server", "flood", "cancel"]) test(`native Rex allocation ${mode ?? "success"}: stable receipt, explicit scopes, no fallback/replacement`, { skip: !binary, timeout: 25_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "deck-rex-native-"));
   try {
     assert.equal(spawnSync(binary!, ["init", "--directory", directory]).status, 0); await fakeRex(directory, mode);
@@ -19,7 +19,7 @@ for (const mode of [undefined, "offline", "wrong_server", "bad_client", "uncerta
     assert.equal(child.status, 0, child.stderr);
     const result = JSON.parse(child.stdout.trim()) as { taskId: string; result: { status: string } };
     const created = await readFile(join(directory, "created"), "utf8").catch(() => "");
-    assert.equal(created, ["offline", "wrong_server", "bad_client", "uncertain"].includes(mode ?? "") ? "" : "create\n");
+    assert.equal(created, ["offline", "api_mismatch", "wrong_server", "bad_client", "uncertain"].includes(mode ?? "") ? "" : "create\n");
     if (mode === "cancel") {
       const receipt = JSON.parse(await readFile(join(directory, "worker", "operations", `${result.taskId}.json`), "utf8")) as { result: { code: string } };
       assert.equal(receipt.result.code, "effect_uncertain"); assert.equal(await readFile(join(directory, "fair.txt"), "utf8"), "file I/O proceeds");

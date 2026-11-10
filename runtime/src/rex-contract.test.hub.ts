@@ -2,7 +2,7 @@
 // hub-local effects. No provider credentials/network calls or model tool calls.
 import { fstatSync } from "node:fs";
 import { access, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { RexTarget } from "./rex-allocation.js";
 import { createModels } from "@earendil-works/pi-ai/models";
@@ -27,17 +27,19 @@ faux.setResponses([respond]);
 const files = new PipeFiles(Number(args[6]), Number(args[7]), Number(args[8]));
 const runtime = await DeckRuntime.open(args[0]!, { models, model: { provider: faux.getModel().provider, modelId: faux.getModel().id },
   implementation: await fingerprintImplementation({ native: args[9]!, entry: process.argv[1]!, mode: "--mock" }),
+  rexClient: basename(args[9]!) === ".deck-wrapped" ? join(dirname(args[9]!), "deck") : args[9]!,
   binding: { machineId: args[1]!, cwd: args[2]! }, hostFiles: { call: async (...request) => {
     const result = await files.call(...request);
     if (request[2] === "rex_allocate" && result.ok && process.env.DECK_REX_ALLOC_REQUEST) {
       // Test gate: force registration to beat native-result apply. Production
       // allocation does not wait for client startup or change its effect result.
       const plan = JSON.parse(String(request[3].plan)) as { chatId: string };
+      const control = JSON.parse(await readFile(process.env.DECK_REX_ALLOC_REQUEST, "utf8")) as { chatId: string; loseReply?: boolean };
+      if (control.chatId !== plan.chatId) return result;
       const deadline = performance.now() + 5000; let startup;
       do { startup = await runtime.terminalStartup(plan.chatId); if (startup.observation !== "not_observed") break; await new Promise((resolve) => setTimeout(resolve, 25)); } while (performance.now() < deadline);
       if (startup.observation !== "unbound") throw new Error("Early startup not observed");
       await writeFile(`${process.env.DECK_REX_ALLOC_REQUEST}.early`, JSON.stringify(startup));
-      const control = JSON.parse(await readFile(process.env.DECK_REX_ALLOC_REQUEST, "utf8")) as { loseReply?: boolean };
       if (control.loseReply) return { ok: false, code: "effect_uncertain", output: "Test-only lost creation reply" };
     }
     return result;

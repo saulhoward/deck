@@ -3,6 +3,15 @@ const process = @import("shell.zig");
 const Result = process.Result;
 const contracts = @import("generated/contracts.zig");
 pub const Plan = contracts.RexAllocationPlan;
+// Only revisions exercised by isolated installed-CLI contract tests. This is
+// not a minimum-version check; future/intermediate revisions remain refused.
+pub fn supportedApi(revision: i64) bool {
+    return revision == 8 or revision == 10;
+}
+test "Rex API support is an explicit tested set, not a version range" {
+    try std.testing.expect(supportedApi(8) and supportedApi(10));
+    for ([_]i64{ -1, 0, 7, 9, 11, 9007199254740991 }) |revision| try std.testing.expect(!supportedApi(revision));
+}
 fn refuse(code: []const u8) Result {
     // Never expose CLI stderr, session contents or authentication diagnostics.
     return .{ .ok = false, .output = code, .code = code };
@@ -27,7 +36,7 @@ fn sameServer(allocator: std.mem.Allocator, cwd: []const u8, plan: Plan, cancell
     if (!result.ok) return false;
     const Status = struct { endpoint: []const u8, host_id: []const u8, instance_id: []const u8, api_revision: u32 };
     const parsed = std.json.parseFromSlice(Status, allocator, result.output, .{ .ignore_unknown_fields = true }) catch return false;
-    return parsed.value.api_revision == 8 and std.mem.eql(u8, parsed.value.endpoint, plan.server) and std.mem.eql(u8, parsed.value.host_id, plan.hostId) and std.mem.eql(u8, parsed.value.instance_id, plan.instanceId);
+    return supportedApi(parsed.value.api_revision) and std.mem.eql(u8, parsed.value.endpoint, plan.server) and std.mem.eql(u8, parsed.value.host_id, plan.hostId) and std.mem.eql(u8, parsed.value.instance_id, plan.instanceId);
 }
 
 pub fn allocate(allocator: std.mem.Allocator, cwd: []const u8, encoded: []const u8, cancelled: *std.atomic.Value(bool)) !Result {
@@ -49,13 +58,26 @@ pub fn allocate(allocator: std.mem.Allocator, cwd: []const u8, encoded: []const 
     // From this point any failure is uncertain. Killing this CLI cannot undo
     // an allocation that Rex already accepted on its independent connection.
     var launch: std.array_list.Managed([]const u8) = .init(allocator);
-    try launch.appendSlice(&.{ "new", plan.label, "--json", "--cwd", cwd, "--shell=none", "--keep-open", "--", client, "agent", "--no-tui", "--port", port, "--task", plan.chatId, "--hub-id", plan.hubId });
+    if (plan.sessionId) |session_id| {
+        try launch.appendSlice(&.{ "run", "--session", session_id, "--label", plan.label, "--focus=false" });
+    } else {
+        try launch.appendSlice(&.{ "new", plan.label });
+    }
+    try launch.appendSlice(&.{ "--json", "--cwd", cwd, "--shell=none", "--keep-open", "--", client, "agent", "--no-tui", "--port", port, "--task", plan.chatId, "--hub-id", plan.hubId });
     if (plan.allocationId) |allocation| try launch.appendSlice(&.{ "--rex-allocation", allocation });
     const created = cli(allocator, cwd, plan, launch.items, cancelled) catch return refuse("effect_uncertain");
     if (!created.ok or cancelled.load(.acquire)) return refuse("effect_uncertain");
-    const Created = struct { session_id: []const u8, initial_windows: []struct { window_id: []const u8, block_ids: [][]const u8 } };
-    const value = std.json.parseFromSlice(Created, allocator, created.output, .{ .ignore_unknown_fields = true }) catch return refuse("effect_uncertain");
-    const session = value.value;
+    const Window = struct { window_id: []const u8, block_ids: [][]const u8 };
+    const Created = struct { session_id: []const u8, initial_windows: []Window };
+    const session: Created = if (plan.sessionId) |session_id| blk: {
+        const value = std.json.parseFromSlice(Window, allocator, created.output, .{ .ignore_unknown_fields = true }) catch return refuse("effect_uncertain");
+        const windows = try allocator.alloc(Window, 1);
+        windows[0] = value.value;
+        break :blk .{ .session_id = session_id, .initial_windows = windows };
+    } else blk: {
+        const value = std.json.parseFromSlice(Created, allocator, created.output, .{ .ignore_unknown_fields = true }) catch return refuse("effect_uncertain");
+        break :blk value.value;
+    };
     if (!contracts.validRexSessionId(.{ .string = session.session_id }) or session.initial_windows.len != 1) return refuse("effect_uncertain");
     const window = session.initial_windows[0];
     if (!contracts.validRexWindowId(.{ .string = window.window_id }) or window.block_ids.len != 1 or !contracts.validRexBlockId(.{ .string = window.block_ids[0] })) return refuse("effect_uncertain");

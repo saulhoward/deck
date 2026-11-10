@@ -1,5 +1,7 @@
 const std = @import("std");
 const contracts = @import("generated/contracts.zig");
+const views = @import("views.zig");
+const rex_open = @import("rex_open.zig");
 const max_frame = 1024 * 1024;
 
 // This thread is the sole child waiter until serve returns. Cache a reaped status
@@ -90,6 +92,78 @@ fn validDiscoveryReply(args: std.json.Value, result: std.json.Value) bool {
     }
     return true;
 }
+// Generated guards establish numeric type/range before this conversion. JSON
+// integral float/exponent spellings retain the same semantics as TypeScript.
+fn historyNumber(value: std.json.Value) u64 {
+    return switch (value) {
+        .integer => |n| @intCast(n),
+        .float => |n| @intFromFloat(n),
+        else => unreachable,
+    };
+}
+fn validHistoryReply(args: std.json.Value, result: std.json.Value) bool {
+    if (!contracts.validHistoryArgs(args) or !contracts.validHistoryPage(result) or !views.validAttachments(args, result)) return false;
+    if (!safePiId(args.object.get("chatId").?)) return false;
+    const before = args.object.get("before");
+    const after = args.object.get("after");
+    if (before != null and after != null) return false;
+    if (before) |value| if (!safePiId(value)) return false;
+    if (after) |value| if (!std.mem.eql(u8, value.string, "0") and !safePiId(value)) return false;
+    const items = result.object.get("items").?.array.items;
+    const limit = if (args.object.get("limit")) |value| historyNumber(value) else 100;
+    if (items.len > limit) return false;
+    var previous: u64 = if (after orelse before) |value| std.fmt.parseInt(u64, value.string, 10) catch return false else std.math.maxInt(u64);
+    for (items) |entry| {
+        const current = historyNumber(entry.object.get("id").?);
+        if (if (after != null) current <= previous else current >= previous) return false;
+        previous = current;
+        const kind = entry.object.get("kind").?.string;
+        if (std.mem.eql(u8, kind, "deck.input")) {
+            const data = entry.object.get("data") orelse return false;
+            if (!contracts.validHistoryInputData(data)) return false;
+            if (data.object.get("origin")) |origin| {
+                if (origin == .object) {
+                    if (origin.object.get("kind")) |tag| {
+                        if (tag == .string and std.mem.eql(u8, tag.string, "task-tool")) {
+                            if (!contracts.validHistoryAgentOrigin(origin) or !safePiId(origin.object.get("chatId").?) or !safePiId(origin.object.get("taskId").?)) return false;
+                        }
+                    }
+                }
+            }
+        } else if (std.mem.eql(u8, kind, "pi.assistant") or std.mem.eql(u8, kind, "pi.tool-result")) {
+            const model = entry.object.get("model") orelse return false;
+            if (!contracts.validHistoryMessages(model)) return false;
+            for (model.array.items) |message| {
+                if (std.mem.eql(u8, kind, "pi.tool-result") and (!message.object.contains("toolName") or !message.object.contains("isError"))) return false;
+                if (message.object.get("content")) |content| {
+                    for (content.array.items) |part| {
+                        const tag = part.object.get("type").?.string;
+                        if (std.mem.eql(u8, tag, "text") and !part.object.contains("text")) return false;
+                        if (std.mem.eql(u8, tag, "toolCall") and !part.object.contains("name")) return false;
+                    }
+                }
+            }
+        }
+    }
+    if (result.object.get("next")) |value| {
+        if (!safePiId(value) or items.len == 0) return false;
+        const next = std.fmt.parseInt(u64, value.string, 10) catch return false;
+        if (next != previous) return false;
+    }
+    return true;
+}
+test "history semantic fixtures agree with TypeScript without rewriting Pi records" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const fixtures = try std.json.parseFromSlice(std.json.Value, arena.allocator(), @embedFile("history.test.json"), .{});
+    for (fixtures.value.array.items) |fixture| {
+        const actual = validHistoryReply(fixture.object.get("args").?, fixture.object.get("page").?);
+        if (actual != fixture.object.get("valid").?.bool) {
+            std.debug.print("history fixture failed: {s}\n", .{fixture.object.get("name").?.string});
+            return error.InvalidHistoryContract;
+        }
+    }
+}
 // Called only after generated envelope validation. Unknown commands still use
 // their existing runtime/client checks; this is not permission to dispatch them.
 fn validCommandReply(request: std.json.Value, reply: std.json.Value) bool {
@@ -97,7 +171,9 @@ fn validCommandReply(request: std.json.Value, reply: std.json.Value) bool {
     const command = request.object.get("command").?.string;
     const args = request.object.get("args") orelse .null;
     const result = reply.object.get("result").?;
+    if (!views.validReply(command, args, result) or !rex_open.validReply(command, args, request.object.get("hubId") orelse .null, result)) return false;
     if (std.mem.eql(u8, command, "list_chats")) return validDiscoveryReply(args, result);
+    if (std.mem.eql(u8, command, "history")) return validHistoryReply(args, result);
     if (std.mem.eql(u8, command, "admit")) return contracts.validAdmitArgs(args) and safePiId(args.object.get("chatId").?) and contracts.validAdmitAck(result) and safePiId(result.object.get("submissionId").?);
     if (std.mem.eql(u8, command, "create_task")) return contracts.validCreateTaskArgs(args) and contracts.validCreateTaskAck(result) and safePiId(result.object.get("chatId").?);
     if (std.mem.eql(u8, command, "import_instructions")) return contracts.validInstructionImportArgs(args) and safePiId(args.object.get("chatId").?) and contracts.validInstructionImportAck(result) and safePiId(result.object.get("chatId").?) and safePiId(result.object.get("taskId").?) and std.mem.eql(u8, args.object.get("chatId").?.string, result.object.get("chatId").?.string) and std.mem.eql(u8, args.object.get("requestId").?.string, result.object.get("requestId").?.string);

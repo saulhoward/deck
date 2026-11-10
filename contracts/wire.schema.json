@@ -106,6 +106,111 @@
       "type": "object", "properties": { "items": { "$ref": "#/$defs/ChatListItems" }, "next": { "$ref": "#/$defs/PiId" } },
       "required": ["items"], "additionalProperties": false
     },
+    "LiveViewArgs": {
+      "description": "Read-only activity/progress selection; omitted chat defaults to main. Legacy ignored extensions remain accepted.",
+      "type": "object", "properties": { "chatId": { "$ref": "#/$defs/PiId" } }, "required": [], "additionalProperties": true
+    },
+    "InstructionStatusArgs": {
+      "type": "object", "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "taskId": { "$ref": "#/$defs/PiId" } }, "required": [], "additionalProperties": false
+    },
+    "ViewCount": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "GenerationPhase": { "enum": ["generating", "retrying", "deferred"] },
+    "GenerationAttempt": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "ActivityGeneration": {
+      "type": "object", "properties": { "attempt": { "$ref": "#/$defs/GenerationAttempt" }, "phase": { "$ref": "#/$defs/GenerationPhase" } }, "required": ["attempt", "phase"], "additionalProperties": false
+    },
+    "ActivityToolStatus": { "enum": ["pending", "running", "done"] },
+    "ActivityTool": {
+      "type": "object", "properties": { "callId": { "type": "string", "maxLength": 128 }, "name": { "type": "string", "maxLength": 80 }, "status": { "$ref": "#/$defs/ActivityToolStatus" }, "taskId": { "$ref": "#/$defs/PiId" }, "nested": { "type": "boolean" } },
+      "required": ["callId", "name", "status", "nested"], "additionalProperties": false
+    },
+    "ActivitySnapshot": {
+      "description": "Bounded presentation sampled from Pi, not a lifecycle/worker-health or process-draining receipt. Existing UTF-16 label caps remain semantic guards.",
+      "type": "object", "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "busy": { "type": "boolean" }, "queued": { "$ref": "#/$defs/ViewCount" }, "runTaskId": { "$ref": "#/$defs/PiId" }, "generation": { "$ref": "#/$defs/ActivityGeneration" }, "tools": { "type": "array", "items": { "$ref": "#/$defs/ActivityTool" }, "maxItems": 32 }, "omittedTools": { "$ref": "#/$defs/ViewCount" }, "compactions": { "$ref": "#/$defs/ViewCount" }, "compactionFailed": { "type": "boolean" } },
+      "required": ["chatId", "busy", "queued", "tools", "omittedTools", "compactions", "compactionFailed"], "additionalProperties": false
+    },
+    "ProgressGeneration": {
+      "type": "object", "properties": { "attempt": { "$ref": "#/$defs/GenerationAttempt" }, "phase": { "$ref": "#/$defs/GenerationPhase" }, "text": { "type": "string", "maxLength": 2048 }, "textClipped": { "const": true }, "blocksOmitted": { "$ref": "#/$defs/GenerationAttempt" }, "nonTextOmitted": { "const": true } },
+      "required": ["attempt", "phase", "text"], "additionalProperties": false
+    },
+    "ProgressTool": {
+      "type": "object", "properties": { "taskId": { "$ref": "#/$defs/PiId" }, "name": { "const": "bash" }, "text": { "type": "string", "maxLength": 512 }, "textClipped": { "const": true }, "lossyUtf8": { "const": true } },
+      "required": ["taskId", "name", "text"], "additionalProperties": false
+    },
+    "ProgressSnapshot": {
+      "description": "Replaceable provisional sample, not an append stream or effect receipt. Generation/tools require a run ID; UTF-16 text caps remain semantic guards.",
+      "type": "object", "properties": { "version": { "const": 1 }, "chatId": { "$ref": "#/$defs/PiId" }, "provisional": { "const": true }, "runTaskId": { "$ref": "#/$defs/PiId" }, "generation": { "$ref": "#/$defs/ProgressGeneration" }, "tools": { "type": "array", "items": { "$ref": "#/$defs/ProgressTool" }, "maxItems": 4 }, "toolSlotsOmitted": { "const": true } },
+      "required": ["version", "chatId", "provisional"], "additionalProperties": false
+    },
+    "InstructionSourceView": {
+      "description": "Bounded labels/provenance, never instruction text. Absolute cwd, safe task ID and UTF-16 caps remain semantic checks.",
+      "type": "object", "properties": { "machineId": { "type": "string", "minLength": 1, "maxLength": 80 }, "cwd": { "type": "string", "minLength": 1, "maxLength": 256 }, "path": { "const": "AGENTS.md" }, "sha256": { "$ref": "#/$defs/Sha256" }, "bytes": { "type": "integer", "minimum": 0, "maximum": 32768 }, "taskId": { "$ref": "#/$defs/PiId" }, "labelsClipped": { "const": true } },
+      "required": ["machineId", "cwd", "path", "sha256", "bytes", "taskId"], "additionalProperties": false
+    },
+    "InstructionTaskState": { "enum": ["pending", "running", "waiting", "sleeping", "completing", "terminal"] },
+    "InstructionOutcome": { "enum": ["completed", "failed", "aborted", "orphaned"] },
+    "InstructionRejection": { "enum": ["offline", "unavailable", "read_failed", "effect_uncertain", "invalid", "too_large", "settings_changed", "busy"] },
+    "InstructionAppliedView": {
+      "type": "object", "properties": { "status": { "const": "applied" }, "source": { "$ref": "#/$defs/InstructionSourceView" } }, "required": ["status", "source"], "additionalProperties": false
+    },
+    "InstructionRejectedView": {
+      "type": "object", "properties": { "status": { "const": "rejected" }, "reason": { "$ref": "#/$defs/InstructionRejection" } }, "required": ["status", "reason"], "additionalProperties": false
+    },
+    "InstructionAbortedView": {
+      "type": "object", "properties": { "status": { "const": "aborted" } }, "required": ["status"], "additionalProperties": false
+    },
+    "InstructionResultView": { "oneOf": [{ "$ref": "#/$defs/InstructionAppliedView" }, { "$ref": "#/$defs/InstructionRejectedView" }, { "$ref": "#/$defs/InstructionAbortedView" }] },
+    "InstructionTaskView": {
+      "description": "Outcome/result consistency and applied-source identity are semantic checks, not live state authority.",
+      "type": "object", "properties": { "taskId": { "$ref": "#/$defs/PiId" }, "state": { "$ref": "#/$defs/InstructionTaskState" }, "abortRequested": { "const": true }, "outcome": { "$ref": "#/$defs/InstructionOutcome" }, "result": { "$ref": "#/$defs/InstructionResultView" }, "resultOmitted": { "const": true } },
+      "required": ["taskId", "state"], "additionalProperties": false
+    },
+    "InstructionSnapshot": {
+      "description": "Current source and historical import task are separate samples; an applied task does not prove its source is still current.",
+      "type": "object", "properties": { "version": { "const": 1 }, "chatId": { "$ref": "#/$defs/PiId" }, "source": { "anyOf": [{ "$ref": "#/$defs/InstructionSourceView" }, { "type": "null" }] }, "import": { "anyOf": [{ "$ref": "#/$defs/InstructionTaskView" }, { "type": "null" }] }, "sourceOmitted": { "const": true } },
+      "required": ["version", "chatId", "source", "import"], "additionalProperties": false
+    },
+    "HistoryAfter": {
+      "description": "Exclusive entry cursor; only the literal zero or a canonical positive safe Pi ID is accepted semantically.",
+      "type": "string", "pattern": "^[0-9]{1,16}$(?![\\s\\S])"
+    },
+    "HistoryArgs": {
+      "description": "Legacy ignored extensions remain accepted. before/after are mutually exclusive; after zero bootstraps an empty chat. Limit defaults to 100.",
+      "type": "object",
+      "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "limit": { "type": "integer", "minimum": 1, "maximum": 100 }, "before": { "$ref": "#/$defs/PiId" }, "after": { "$ref": "#/$defs/HistoryAfter" }, "includeActivity": { "type": "boolean" }, "includeProgress": { "type": "boolean" }, "includeInstructions": { "type": "boolean" } },
+      "required": ["chatId"], "additionalProperties": true
+    },
+    "HistoryText": { "type": "string", "maxLength": 1048576 },
+    "HistoryInputData": {
+      "description": "Fields consumed by the plain renderer, not the whole Pi/input archive schema. Original capture and extension bytes are not rewritten.",
+      "type": "object", "properties": { "text": { "$ref": "#/$defs/HistoryText" }, "origin": {} },
+      "required": ["text"], "additionalProperties": true
+    },
+    "HistoryAgentOrigin": {
+      "type": "object", "properties": { "kind": { "const": "task-tool" }, "chatId": { "$ref": "#/$defs/PiId" }, "taskId": { "$ref": "#/$defs/PiId" } },
+      "required": ["kind", "chatId", "taskId"], "additionalProperties": true
+    },
+    "HistoryContentPart": {
+      "description": "Unknown content types remain opaque and unrendered. Text/toolCall required-field checks are semantic, selected by type.",
+      "type": "object", "properties": { "type": { "type": "string", "minLength": 1, "maxLength": 1048576 }, "text": { "$ref": "#/$defs/HistoryText" }, "name": { "$ref": "#/$defs/HistoryText" } },
+      "required": ["type"], "additionalProperties": true
+    },
+    "HistoryMessage": {
+      "description": "Compatible view of rendered message fields; provider metadata, reasoning and tool arguments remain opaque and are not rendered.",
+      "type": "object", "properties": { "content": { "type": "array", "items": { "$ref": "#/$defs/HistoryContentPart" }, "maxItems": 4096 }, "stopReason": { "$ref": "#/$defs/HistoryText" }, "errorMessage": { "$ref": "#/$defs/HistoryText" }, "toolName": { "$ref": "#/$defs/HistoryText" }, "isError": { "type": "boolean" }, "details": {} },
+      "required": [], "additionalProperties": true
+    },
+    "HistoryMessages": { "type": "array", "items": { "$ref": "#/$defs/HistoryMessage" }, "maxItems": 4096 },
+    "HistoryEntry": {
+      "description": "Existing v1 numeric entry IDs are preserved, unlike string cursors. Pi-owned record extensions and unknown kinds remain untouched; known rendered kinds receive additional generated payload checks.",
+      "type": "object", "properties": { "id": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "kind": { "type": "string", "minLength": 1, "maxLength": 1048576 }, "data": {}, "model": {} },
+      "required": ["id", "kind"], "additionalProperties": true
+    },
+    "HistoryPage": {
+      "description": "Closed bounded page. Next must equal the final entry ID in scan order, never an empty-page cursor. Attached live views use generated closed contracts and request-scoped semantic validation; they remain separately sampled observations.",
+      "type": "object", "properties": { "items": { "type": "array", "items": { "$ref": "#/$defs/HistoryEntry" }, "maxItems": 100 }, "next": { "$ref": "#/$defs/PiId" }, "activity": { "$ref": "#/$defs/ActivitySnapshot" }, "progress": { "$ref": "#/$defs/ProgressSnapshot" }, "instructions": { "$ref": "#/$defs/InstructionSnapshot" } },
+      "required": ["items"], "additionalProperties": false
+    },
     "StopArgs": {
       "description": "Selected-chat stop request. Legacy ignored extensions remain accepted; no durable request or cancellation-completion receipt is created.",
       "type": "object", "properties": { "chatId": { "$ref": "#/$defs/PiId" } }, "required": ["chatId"], "additionalProperties": true
@@ -133,6 +238,42 @@
     "RexBlockId": { "type": "string", "pattern": "^block:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])" },
     "ChatId": { "type": "string", "pattern": "^[1-9][0-9]{0,15}$(?![\\s\\S])" },
     "NullableRexUuid": { "anyOf": [{ "$ref": "#/$defs/RexUuid" }, { "type": "null" }] },
+    "RexOpenTarget": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "executable": { "type": "string", "minLength": 1, "maxLength": 4096 }, "server": { "type": "string", "minLength": 1, "maxLength": 107 }, "hostId": { "$ref": "#/$defs/RexUuid" }, "instanceId": { "$ref": "#/$defs/RexUuid" } },
+      "required": ["executable", "server", "hostId", "instanceId"]
+    },
+    "RexOpenArgs": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "requestId": { "$ref": "#/$defs/RexUuid" }, "port": { "type": "integer", "minimum": 1, "maximum": 65535 }, "target": { "$ref": "#/$defs/RexOpenTarget" } },
+      "required": ["chatId", "requestId", "port"]
+    },
+    "RexReadArgs": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "chatId": { "$ref": "#/$defs/PiId" } }, "required": ["chatId"]
+    },
+    "RexOpenDisposition": { "enum": ["admitted", "reused"] },
+    "RexOpenAck": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "version": { "const": 1 }, "chatId": { "$ref": "#/$defs/PiId" }, "requestId": { "$ref": "#/$defs/RexUuid" }, "taskId": { "$ref": "#/$defs/PiId" }, "status": { "$ref": "#/$defs/RexOpenDisposition" }, "completion": { "const": "not_waited" }, "bestEffort": { "const": true } },
+      "required": ["version", "chatId", "requestId", "taskId", "status", "completion", "bestEffort"]
+    },
+    "RexPublicBinding": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "machineId": { "type": "string", "minLength": 1, "maxLength": 200000 }, "cwd": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "server": { "type": "string", "minLength": 1, "maxLength": 107 }, "hostId": { "$ref": "#/$defs/RexUuid" }, "instanceId": { "$ref": "#/$defs/RexUuid" },
+        "sessionId": { "$ref": "#/$defs/RexSessionId" }, "windowId": { "$ref": "#/$defs/RexWindowId" }, "blockId": { "$ref": "#/$defs/RexBlockId" },
+        "hubId": { "$ref": "#/$defs/RexUuid" }, "chatId": { "$ref": "#/$defs/PiId" }, "taskId": { "$ref": "#/$defs/PiId" }, "readiness": { "const": "not_checked" }
+      },
+      "required": ["machineId", "cwd", "server", "hostId", "instanceId", "sessionId", "windowId", "blockId", "hubId", "chatId", "taskId", "readiness"]
+    },
+    "RexAttemptState": { "enum": ["unallocated", "pending", "allocated", "not_allocated", "uncertain", "aborted"] },
+    "RexStatusSnapshot": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "version": { "const": 1 }, "hubId": { "$ref": "#/$defs/RexUuid" }, "chatId": { "$ref": "#/$defs/PiId" }, "taskId": { "anyOf": [{ "$ref": "#/$defs/PiId" }, { "type": "null" }] }, "status": { "$ref": "#/$defs/RexAttemptState" }, "binding": { "anyOf": [{ "$ref": "#/$defs/RexPublicBinding" }, { "type": "null" }] }, "previousBinding": { "anyOf": [{ "$ref": "#/$defs/RexPublicBinding" }, { "type": "null" }] }, "bestEffort": { "const": true } },
+      "required": ["version", "hubId", "chatId", "taskId", "status", "binding", "previousBinding", "bestEffort"]
+    },
     "RexAllocationPlan": {
       "description": "Native allocation input. Absolute paths, UTF-8 byte limits, socket syntax, assigned-worker authority and executable identity are additional semantic checks.",
       "type": "object",
@@ -146,7 +287,8 @@
         "hubId": { "$ref": "#/$defs/RexUuid" },
         "chatId": { "$ref": "#/$defs/ChatId" },
         "label": { "type": "string", "pattern": "^[ -~]{1,120}$(?![\\s\\S])" },
-        "allocationId": { "$ref": "#/$defs/NullableRexUuid" }
+        "allocationId": { "$ref": "#/$defs/NullableRexUuid" },
+        "sessionId": { "$ref": "#/$defs/RexSessionId" }
       },
       "required": ["executable", "server", "hostId", "instanceId", "client", "port", "hubId", "chatId", "label"],
       "additionalProperties": false

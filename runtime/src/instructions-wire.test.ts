@@ -7,7 +7,7 @@ import test from "node:test";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { ChatDoc, DeckRuntime } from "./deck.js";
 import { InstructionSourceDoc } from "./instruction-import.js";
-import { InstructionsDisplay } from "./instructions-view.js";
+import { InstructionsDisplay, instructionSnapshot, projectInstructionTask } from "./instructions-view.js";
 import { serveIpc } from "./ipc.js";
 import { encodeFrame, FrameDecoder } from "./protocol.js";
 import { gate, IMPLEMENTATION, model, ORIGINAL, provider, within } from "./instructions.test.support.js";
@@ -71,17 +71,21 @@ test("optional instruction samples cannot overflow fitting history or advance it
   });
 });
 
-test("instruction display validates scope, bounds/sanitizes labels and result fields, deduplicates and keeps historical receipt distinct from current source", () => {
-  const source = { machineId: "\x1b[2J" + "x".repeat(400), cwd: "/" + "\0".repeat(400), path: "AGENTS.md", sha256: "a".repeat(64), bytes: 32000, taskId: "2", secret: "PRIVATE" };
-  const value = { version: 1, chatId: "1", source, import: { taskId: "2", state: "terminal", outcome: "completed", result: { status: "applied", source, secret: "PRIVATE" }, error: "PRIVATE" } };
+test("instruction domain projection omits private fields; wire display refuses invalid samples without normalizing or changing observations", () => {
+  const source = { machineId: "\x1b[2J\x9b2J" + "x".repeat(400), cwd: "/" + "\0".repeat(400), path: "AGENTS.md", sha256: "a".repeat(64), bytes: 32000, taskId: "2", secret: "PRIVATE" };
+  const task = (result: unknown) => projectInstructionTask({ id: 2, state: { status: "terminal", outcome: { status: "completed", result } }, error: "PRIVATE" } as unknown as Parameters<typeof projectInstructionTask>[0]);
+  const value = instructionSnapshot("1", source, task({ status: "applied", source, secret: "PRIVATE" }));
   const display = new InstructionsDisplay(); const rendered = display.render(value, "1");
-  assert.ok(Buffer.byteLength(rendered) < 8192); assert.doesNotMatch(rendered, /PRIVATE|\x1b|\0/); assert.match(rendered, /labelsClipped/);
+  assert.ok(Buffer.byteLength(rendered) < 8192); assert.doesNotMatch(rendered, /PRIVATE|\x1b|\x9b|\0/); assert.match(rendered, /labelsClipped/); assert.ok(rendered.includes("\\u009b"));
+  const reordered = (input: unknown): unknown => Array.isArray(input) ? input.map(reordered) : input && typeof input === "object" ? Object.fromEntries(Object.entries(input).reverse().map(([key, item]) => [key, reordered(item)])) : input;
+  assert.equal(display.render(reordered(value), "1"), "");
   assert.equal(display.render(value, "1"), ""); assert.equal(display.render(value, "3"), "");
+  for (const bad of [{ ...value, private: "PRIVATE" }, { ...value, source }, { ...value, version: 2 }, { ...value, import: { ...value.import, state: "running" } }]) assert.equal(display.render(bad, "1"), "");
+  assert.equal(display.render(value, "1"), ""); // Invalid samples never clear/dedup a different observation.
   const cleared = display.render({ ...value, source: null }, "1"); assert.match(cleared, /"source":null/); assert.match(cleared, /"status":"applied"/);
-  assert.equal(display.render({ ...value, version: 2 }, "1"), "");
-  const pending = display.render({ ...value, import: { ...value.import, state: "running" } }, "1"); assert.doesNotMatch(pending, /"result"|"status":"applied"/);
-  const malformed = display.render({ ...value, import: { ...value.import, result: { status: "rejected", reason: "PRIVATE" } } }, "1"); assert.match(malformed, /resultOmitted/); assert.doesNotMatch(malformed, /PRIVATE/);
-  const mismatch = display.render({ ...value, import: { ...value.import, result: { status: "applied", source: { ...source, taskId: "99" } } } }, "1", true); assert.match(mismatch, /resultOmitted/); assert.doesNotMatch(mismatch, /"status":"applied"/);
+  const pending = display.render({ ...value, import: { taskId: "2", state: "running" } }, "1"); assert.doesNotMatch(pending, /"result"|"status":"applied"/);
+  const malformed = display.render(instructionSnapshot("1", source, task({ status: "rejected", reason: "PRIVATE" })), "1"); assert.match(malformed, /resultOmitted/); assert.doesNotMatch(malformed, /PRIVATE/);
+  const mismatch = display.render(instructionSnapshot("1", source, task({ status: "applied", source: { ...source, taskId: "99" } })), "1", true); assert.match(mismatch, /resultOmitted/); assert.doesNotMatch(mismatch, /"status":"applied"/);
   display.reset(); assert.equal(display.render({ version: 1, chatId: "1", source: null, import: null }, "1"), "");
   assert.ok(display.render({ version: 1, chatId: "1", source: null, import: null }, "1", true));
 });

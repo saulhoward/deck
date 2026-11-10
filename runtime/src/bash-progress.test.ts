@@ -29,13 +29,14 @@ test("bash progress whitelists only running native snapshots, bounds nested scan
 
 test("bash display validates, sanitizes, deduplicates and clears independently from assistant snapshots", () => {
   const display = new ProgressDisplay((text) => text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, ""));
-  const value = { version: 1, chatId: "1", provisional: true, runTaskId: "2", tools: [{ taskId: "3", name: "bash", text: "hello\n\x1b[31mworld", private: "PRIVATE_ARGUMENTS" }] };
+  const value = { version: 1, chatId: "1", provisional: true, runTaskId: "2", tools: [{ taskId: "3", name: "bash", text: "hello\n\x1b[31mworld" }] };
   const rendered = display.render(value, "1")!;
   assert.match(rendered, /bash output preview \(provisional snapshot\)/); assert.match(rendered, /hello\\nworld/); assert.equal(rendered.split("\n").length, 2); assert.doesNotMatch(rendered, /PRIVATE_|\x1b/);
   assert.equal(display.render(value, "1"), undefined);
-  for (const bad of [{ ...value, chatId: "2" }, { ...value, runTaskId: "bad" }, { ...value, tools: [{ ...value.tools[0], taskId: "bad" }] }, { ...value, tools: Array(5).fill(value.tools[0]) }]) assert.equal(display.render(bad, "1"), undefined);
+  for (const bad of [{ ...value, tools: [{ ...value.tools[0], private: "PRIVATE" }] }, { ...value, chatId: "2" }, { ...value, runTaskId: "bad" }, { ...value, tools: [{ ...value.tools[0], taskId: "bad" }] }, { ...value, tools: Array(5).fill(value.tools[0]) }]) assert.equal(display.render(bad, "1"), undefined);
   assert.equal(display.render(value, "1"), undefined);
-  assert.match(display.render({ ...value, tools: [{ taskId: "3", name: "bash", text: "HEAD" + "x".repeat(3000) + "TAIL" }] }, "1")!, /"textClipped":true/);
+  assert.equal(display.render({ ...value, tools: [{ taskId: "3", name: "bash", text: "x".repeat(3000) }] }, "1"), undefined);
+  assert.match(display.render(projectProgress("1", { run: { taskId: 2 as NonNullable<LiveState["run"]>["taskId"], inputs: [] }, tools: [slot(3, "HEAD" + "x".repeat(3000) + "TAIL")] }), "1")!, /"textClipped":true/);
   const assistant = { ...value, generation: { attempt: 1, phase: "generating", text: "Assistant" } };
   assert.match(display.render(assistant, "1")!, /assistant preview/);
   const cleared = display.render({ version: 1, chatId: "1", provisional: true }, "1")!;

@@ -12,8 +12,9 @@ assert.equal(process.env.OPENAI_API_KEY,undefined); assert.equal(process.env.BAS
 fs.appendFileSync(root+'/calls',JSON.stringify(args)+'\\n');
 const command=args.slice(5), created=fs.existsSync(root+'/created');
 if(command[0]==='server') {
- console.log(JSON.stringify({endpoint:'unix:///tmp/deck-rex-fake.sock',host_id:mode==='wrong_server'?'00000000-0000-0000-0000-000000000000':uuid,instance_id:(mode==='changed_server'&&created)||mode==='inspect-identity'||(mode==='inspect-identity-after'&&fs.existsSync(root+'/inspected'))?'00000000-0000-0000-0000-000000000000':uuid,api_revision:mode==='inspect-api-mismatch'?9:8}));
-} else if(command[0]==='new') {
+ console.log(JSON.stringify({endpoint:'unix:///tmp/deck-rex-fake.sock',host_id:mode==='wrong_server'?'00000000-0000-0000-0000-000000000000':uuid,instance_id:(mode==='changed_server'&&created)||mode==='inspect-identity'||(mode==='inspect-identity-after'&&fs.existsSync(root+'/inspected'))?'00000000-0000-0000-0000-000000000000':uuid,api_revision:mode==='inspect-api-mismatch'||mode==='api_mismatch'?9:mode==='api10'||mode==='inspect-api10'?10:8}));
+} else if(command[0]==='new'||command[0]==='run') {
+ if(command[0]==='run') {assert.equal(command[command.indexOf('--session')+1],'session:'+uuid); assert.ok(command.includes('--focus=false'));}
  fs.appendFileSync(root+'/created','create\\n');
  assert.ok(command.includes('--shell=none')); assert.ok(command.includes('--keep-open'));
  const argv=command.slice(command.indexOf('--')+1); assert.equal(argv[1],'agent'); assert.ok(argv.includes('--hub-id')); assert.ok(argv.includes('--task')); assert.match(argv[argv.indexOf('--rex-allocation')+1],/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/); assert.equal(argv.includes('--message'),false);
@@ -21,7 +22,8 @@ if(command[0]==='server') {
  if(mode==='failed') { console.error('PRIVATE_REX_ERROR'); process.exit(7); }
  if(mode==='malformed') { console.log('PRIVATE_BAD_RESULT'); process.exit(0); }
  if(mode==='flood') process.stdout.write('PRIVATE_FLOOD'.repeat(20000));
- console.log(JSON.stringify({session_id:'session:'+uuid,initial_windows:[{window_id:'window:'+uuid,block_ids:['block:'+uuid],revision:1}]}));
+ const window={window_id:'window:'+uuid,block_ids:['block:'+uuid],revision:1};
+ console.log(JSON.stringify(command[0]==='run'?window:{session_id:'session:'+uuid,initial_windows:[window]}));
 } else if(command[0]==='block') {
  assert.deepEqual(command,['block','ls','--session','session:'+uuid,'--json','--short=false']);
  console.log(JSON.stringify({blocks:[{block_id:'block:'+uuid,window_id:'window:'+uuid,host_id:uuid,flavor:mode==='wrong_block'?'other':'com.superlogical.terminal.shell'}]}));

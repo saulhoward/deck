@@ -9,7 +9,9 @@ import { projectProgress } from "./progress.js";
 import { configurationIdle, importingInstructions, instructionHash, instructionImport, IMPORT_KIND, InstructionRequest, InstructionSourceDoc, type InstructionImportResult } from "./instruction-import.js";
 import { RexInspector } from "./rex-inspection.js";
 import { rexReconciliation, RexReconcileRequest, allocationRequest, type ReconcileResult } from "./rex-reconciliation.js";
-import { validRexAllocationPlan, validRexAllocationReceiptQuery, type ChatListPage } from "./generated/contracts.js";
+import { validOpenArgs } from "./rex-open-contracts.js";
+import { validRexAllocationPlan, validRexAllocationReceiptQuery, type RexOpenArgs, type RexOpenAck, type RexStatusSnapshot, type ChatListPage, type ActivitySnapshot } from "./generated/contracts.js";
+import { prefixUnits } from "./view-text.js";
 import { REX_KIND, rexAllocation, RexDoc, RexRequest, rexCoherent, rexTarget, rexUuid, rexBlock, rexStartup, type RexInput, type RexTarget, type RexResult } from "./rex-allocation.js";
 import { bindImplementation, checkCompatibility, defaultImplementation, stampImplementation } from "./compatibility.js";
 import { nativeFiles, type HostFiles } from "./host-files.js";
@@ -37,7 +39,7 @@ const TaskRequest = defineDocFamily<{ hash: string; chatId: number }, string>({
 });
 const Identity = defineDoc<{ id: string }>({ kind: "deck.identity", version: 1, scope: "session", initial: () => ({ id: randomUUID() }), checkpointWhen: () => true });
 export class DeckError extends Error {
-  constructor(public readonly code: "conflict" | "offline" | "not_found" | "invalid" | "auth_required" | "busy" | "settings_changed", message: string) { super(message); }
+  constructor(public readonly code: "conflict" | "offline" | "not_found" | "invalid" | "auth_required" | "busy" | "settings_changed" | "invalid_response", message: string) { super(message); }
 }
 function positiveId(id: string, kind: string): number {
   const value = Number(id);
@@ -52,6 +54,8 @@ export type RuntimeOptions = {
   binding: Binding;
   environment: (binding: Binding) => ExecutionEnv | undefined;
   hostFiles?: HostFiles;
+  // Trusted launcher supplies its own Deck wrapper, never public caller argv.
+  rexClient?: string;
   admissionGuard?: () => Promise<void>;
   validateSavedModels?: boolean;
   // Trusted embedded callers identify injected code; production main fingerprints
@@ -62,7 +66,7 @@ export type RuntimeOptions = {
 export class DeckRuntime {
   private tail: Promise<unknown> = Promise.resolve();
   private readonly inspector: RexInspector;
-  private constructor(readonly harness: Harness, readonly main: Conversation, private readonly guard: () => Promise<void>, readonly localFiles: boolean, readonly hubId: string, readonly implementation: string, private readonly instructionTask: ReturnType<typeof instructionImport>["task"], private readonly rexTask: ReturnType<typeof rexAllocation>["task"], private readonly reconcileTask: ReturnType<typeof rexReconciliation>["task"], host?: HostFiles) { this.inspector = new RexInspector(this, host); }
+  private constructor(readonly harness: Harness, readonly main: Conversation, private readonly guard: () => Promise<void>, readonly localFiles: boolean, readonly hubId: string, readonly implementation: string, private readonly instructionTask: ReturnType<typeof instructionImport>["task"], private readonly rexTask: ReturnType<typeof rexAllocation>["task"], private readonly reconcileTask: ReturnType<typeof rexReconciliation>["task"], host?: HostFiles, readonly rexClient?: string) { this.inspector = new RexInspector(this, host); }
 
   static async open(path: string, options: RuntimeOptions): Promise<DeckRuntime> {
     let runtime: DeckRuntime | undefined;
@@ -115,7 +119,7 @@ export class DeckRuntime {
       }
       const hubId = await harness.commit(async (tx) => (await tx.doc(Identity)).id, context);
       // Bind Deck tool callbacks before recovered Pi tool tasks can run.
-      runtime = new DeckRuntime(harness, main, options.admissionGuard ?? (async () => {}), !!options.hostFiles, hubId, implementation, importer.task, rex.task, reconciler.task, options.hostFiles);
+      runtime = new DeckRuntime(harness, main, options.admissionGuard ?? (async () => {}), !!options.hostFiles, hubId, implementation, importer.task, rex.task, reconciler.task, options.hostFiles, options.rexClient);
       harness.resume();
       return runtime;
     } catch (error) {
@@ -264,9 +268,9 @@ export class DeckRuntime {
     });
   }
 
-  // Internal trusted operator API. No wire/model command or default Rex server.
-  // One attempt per chat, including failures/abort: no automatic replacement.
-  allocateTerminal(id: string, requestId: string, target: RexTarget, signal?: AbortSignal, expectedBinding?: Binding): Promise<TaskId<RexResult>> {
+  // Legacy internal admission retains its one-attempt rule. Only explicit public
+  // open/reopen opts into a new attempt; accepted native operations never replay.
+  allocateTerminal(id: string, requestId: string, target: RexTarget, signal?: AbortSignal, expectedBinding?: Binding, replacement?: { priorTaskId: number; sessionId?: string }): Promise<TaskId<RexResult>> {
     return this.serial(async () => {
       signal?.throwIfAborted();
       if (typeof requestId !== "string" || !requestId || requestId.length > 200) throw new DeckError("invalid", "Invalid Rex allocation request ID");
@@ -287,15 +291,68 @@ export class DeckRuntime {
         if (expectedBinding && (current.machineId !== expectedBinding.machineId || current.cwd !== expectedBinding.cwd)) throw new DeckError("settings_changed", "Saved Rex worker/cwd changed");
         if (!this.localFiles) throw new DeckError("offline", "Rex allocation requires the assigned native worker");
         const doc = await tx.doc(RexDoc, chat.id);
-        if (doc.taskId) throw new DeckError("conflict", "This chat already has a Rex allocation attempt; inspect its original Pi task. Replacement/adoption is not implemented");
-        const plan = { ...saved, chatId: id, hubId: this.hubId, label: `deck-${this.hubId.slice(0, 8)}-chat-${id}`, allocationId: randomUUID() };
+        if (doc.taskId && !replacement) throw new DeckError("conflict", "This chat already has a Rex allocation attempt; use explicit open/reopen for a new attempt");
+        if (replacement && doc.taskId !== replacement.priorTaskId) throw new DeckError("conflict", "Rex attempt changed; inspect before opening again");
+        if (doc.taskId && (await tx.task(doc.taskId as TaskId))?.state.status !== "terminal") throw new DeckError("busy", "Rex creation is still pending; inspect status before another attempt");
+        const plan = { ...saved, chatId: id, hubId: this.hubId, label: `deck-${this.hubId.slice(0, 8)}-chat-${id}`, allocationId: randomUUID(), ...(replacement?.sessionId ? { sessionId: replacement.sessionId } : {}) };
         if (Buffer.byteLength(JSON.stringify(plan)) > 16 * 1024) throw new DeckError("invalid", "Rex launch intent is too large");
         signal?.throwIfAborted();
         const taskId = await tx.createTask(this.rexTask, { binding: { machineId: current.machineId, cwd: current.cwd }, plan }, { ownership: { kind: "conversation" } });
+        if (doc.binding) doc.previousBinding = doc.binding;
+        delete doc.binding; delete doc.startup; delete doc.reconciliationTaskId;
         doc.taskId = taskId; doc.allocationId = plan.allocationId; receipt.taskId = taskId;
         return taskId;
       }, context);
     });
+  }
+
+  // Best-effort explicit terminal management, not a model tool or replay loop.
+  async openTerminal(args: RexOpenArgs): Promise<RexOpenAck> {
+    if (!validOpenArgs(args)) throw new DeckError("invalid", "Invalid Rex open arguments");
+    if (!this.rexClient || !this.localFiles) throw new DeckError("offline", "Public Rex open requires the native hub launcher");
+    const chat = await this.chat(args.chatId);
+    const doc = await this.harness.snapshot(RexDoc, chat.id, context);
+    const prior = doc?.taskId ? await this.harness.getTask(doc.taskId as TaskId, context) : undefined;
+    const original = prior?.input as RexInput | undefined;
+    const target = args.target ?? original?.plan;
+    if (!target) throw new DeckError("invalid", "First open requires explicit Rex executable, Unix server, host and instance IDs");
+    if (original && args.target && (["executable", "server", "hostId", "instanceId"] as const).some((key) => args.target![key] !== original.plan[key])) throw new DeckError("conflict", "Rex target differs from the saved attempt; server migration is not supported");
+    const saved = rexTarget({ ...target, client: this.rexClient, port: args.port });
+    const ack = (taskId: number, status: RexOpenAck["status"]): RexOpenAck => ({ version: 1, chatId: args.chatId, requestId: args.requestId, taskId: String(taskId), status, completion: "not_waited", bestEffort: true });
+    // Retrieving an admitted request does not inspect/create or rewrite its plan.
+    const receipt = await this.harness.snapshot(RexRequest, chat.id, args.requestId, context);
+    if (receipt?.taskId) return ack(await this.allocateTerminal(args.chatId, args.requestId, saved), "admitted");
+    if (prior && prior.state.status !== "terminal") throw new DeckError("busy", "Rex creation is still pending; inspect status before another attempt");
+    let sessionId: string | undefined;
+    if (doc?.binding) {
+      const sample = await this.inspectTerminal(args.chatId);
+      if (sample.status !== "sampled" || !sample.observation) throw new DeckError("conflict", "Rex inspection unavailable or changed; no new terminal requested");
+      const state = sample.observation.state;
+      if (state === "running") return ack(doc.taskId, "reused");
+      if (state === "exited" || state === "missing_terminal") sessionId = doc.binding.sessionId;
+      else if (state !== "missing_session") throw new DeckError("conflict", "Rex terminal is pending, unavailable or inconclusive; no new terminal requested");
+    }
+    const taskId = await this.allocateTerminal(args.chatId, args.requestId, saved, undefined, undefined, { priorTaskId: doc?.taskId ?? 0, ...(sessionId ? { sessionId } : {}) });
+    return ack(taskId, "admitted");
+  }
+
+  async terminalStatus(id: string): Promise<RexStatusSnapshot> {
+    const chat = await this.chat(id);
+    const doc = await this.harness.snapshot(RexDoc, chat.id, context);
+    const task = doc?.taskId ? await this.harness.getTask(doc.taskId as TaskId, context) : undefined;
+    let status: RexStatusSnapshot["status"] = "unallocated";
+    if (task) {
+      status = "pending";
+      if (task.state.status === "terminal") {
+        const outcome = task.state.outcome;
+        const result = outcome.status === "completed" ? outcome.result as RexResult : undefined;
+        status = result && ["allocated", "not_allocated", "uncertain", "aborted"].includes(result.status) ? result.status : outcome.status === "aborted" ? "aborted" : "uncertain";
+      }
+    }
+    // Like other live views these reads are samples, not an atomic health lease.
+    // A binding commit observed after our document sample needs another read.
+    if (status === "allocated" && !doc?.binding) status = "pending";
+    return { version: 1, hubId: this.hubId, chatId: id, taskId: task ? String(task.id) : null, status, binding: doc?.binding ?? null, previousBinding: doc?.previousBinding ?? null, bestEffort: true };
   }
 
   // Explicit internal provenance repair only. Never creates/replaces Rex objects.
@@ -399,7 +456,7 @@ export class DeckRuntime {
     const chat = await this.chat(id);
     return projectProgress(String(chat.id), await this.harness.snapshot(LiveDoc, chat.id, context));
   }
-  async activity(id: string) {
+  async activity(id: string): Promise<ActivitySnapshot> {
     const chat = await this.chat(id);
     const [live, inbox] = await Promise.all([
       this.harness.snapshot(LiveDoc, chat.id, context), this.harness.snapshot(InboxDoc, chat.id, context),
@@ -412,7 +469,7 @@ export class DeckRuntime {
       chatId: String(chat.id), busy: !!live?.run, queued: inbox?.items.length ?? 0,
       ...(live?.run ? { runTaskId: String(live.run.taskId) } : {}),
       ...(live?.generation ? { generation: { attempt: live.generation.attempt, phase: live.generation.retry ? "retrying" : live.generation.deferred ? "deferred" : "generating" } } : {}),
-      tools: tools.slice(0, 32).map((tool) => ({ callId: tool.callId.slice(0, 128), name: tool.name.slice(0, 80), status: tool.status, ...(tool.taskId === undefined ? {} : { taskId: String(tool.taskId) }), nested: "parentTaskId" in tool })),
+      tools: tools.slice(0, 32).map((tool) => ({ callId: prefixUnits(tool.callId, 128), name: prefixUnits(tool.name, 80), status: tool.status, ...(tool.taskId === undefined ? {} : { taskId: String(tool.taskId) }), nested: "parentTaskId" in tool })),
       omittedTools: Math.max(0, primary.length + nested.length - 32), compactions: live?.compactions?.length ?? 0, compactionFailed: !!live?.compactionFailure,
     };
   }

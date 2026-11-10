@@ -12,16 +12,16 @@ export type RexBinding = Binding & { server: string; hostId: string; instanceId:
 export type RexResult = { status: "allocated"; binding: RexBinding } | { status: "not_allocated"; reason: "invalid" | "offline" | "unavailable" | "cancelled" } | { status: "uncertain" } | { status: "aborted" };
 export type RexInput = { binding: Binding; plan: RexPlan };
 type Input = RexInput;
-export type RexMetadata = { taskId: number; binding?: RexBinding; allocationId?: string; startup?: { blockId: string }; reconciliationTaskId?: number };
+export type RexMetadata = { taskId: number; binding?: RexBinding; previousBinding?: RexBinding; allocationId?: string; startup?: { blockId: string }; reconciliationTaskId?: number };
 export type RexStartup = { version: 1; chatId: string; taskId?: string; observation: "not_observed" | "unbound" | "matched" | "conflict"; historical: true; live: "not_checked" };
 export function rexStartup(chatId: string, doc?: RexMetadata): RexStartup {
   return { version: 1, chatId, ...(doc?.taskId ? { taskId: String(doc.taskId) } : {}), observation: !doc?.startup ? "not_observed" : !doc.binding ? "unbound" : doc.binding.blockId === doc.startup.blockId ? "matched" : "conflict", historical: true, live: "not_checked" };
 }
 export const rexUuid = validRexUuid;
 export const rexBlock = validRexBlockId;
-// Binding + identity of its sole allocation attempt, NOT an execution tracker.
-// No reset/replacement/adoption API yet: even an aborted/uncertain attempt pins
-// the chat, preventing a new request ID from silently making another session.
+// Current attempt/binding, not an execution tracker. Explicit open may start a
+// new attempt. Keep the last known binding here; older evidence stays in Pi task
+// records/receipts. Never replay an accepted operation to implement replacement.
 export const RexDoc = defineDoc<RexMetadata>({ kind: "deck.rex", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ taskId: 0 }), checkpointWhen: () => true });
 export const RexRequest = defineDocFamily<{ hash: string; taskId: number }, string>({ kind: "deck.rex-request", version: 1, scope: "conversation", history: "latest", fork: "initial", family: true, initial: (hash) => ({ hash, taskId: 0 }), checkpointWhen: () => true });
 const uuid = rexUuid;
@@ -41,6 +41,7 @@ export function rexCreationBinding(output: string, input: Input, taskId: TaskId)
   try { value = JSON.parse(output); } catch { return; }
   if (!validRexCreation(value)) return;
   if (input.plan.allocationId !== undefined && value.allocationId !== input.plan.allocationId) return;
+  if (input.plan.sessionId !== undefined && value.sessionId !== input.plan.sessionId) return;
   // Structural validation is not authority: still compare every saved launch identity.
   if (value.server !== input.plan.server || value.hostId !== input.plan.hostId || value.instanceId !== input.plan.instanceId || value.chatId !== input.plan.chatId || value.hubId !== input.plan.hubId) return;
   return { ...input.binding, server: input.plan.server, hostId: input.plan.hostId, instanceId: input.plan.instanceId, chatId: input.plan.chatId, hubId: input.plan.hubId,
