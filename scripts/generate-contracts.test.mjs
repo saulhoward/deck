@@ -80,10 +80,14 @@ test("bounded homogeneous arrays require supported items/limits and reject unsup
   }
 });
 
-test("array minimum/maximum, nullable elements and absent nonnullable optional codecs execute in both languages", async () => {
+test("arrays, nullable elements and optional fields inside discriminated union codecs execute in both languages", async () => {
   const probe = {
     $schema: schema.$schema, $id: "https://deck.invalid/compiler-array-test", $ref: "#/$defs/BoundedArray",
     $defs: {
+      Variant: { oneOf: [
+        { type: "object", properties: { kind: { const: "pending" }, values: { $ref: "#/$defs/BoundedArray" } }, required: ["kind"], additionalProperties: false },
+        { type: "object", properties: { kind: { const: "done" } }, required: ["kind"], additionalProperties: false },
+      ] },
       BoundedArray: { type: "array", items: { anyOf: [{ type: "integer", minimum: -2, maximum: 2 }, { type: "null" }] }, minItems: 1, maxItems: 3 },
       Wrapper: { type: "object", properties: { values: { $ref: "#/$defs/BoundedArray" }, legacy: { anyOf: [{ type: "string" }, { type: "null" }] } }, required: [], additionalProperties: false },
     },
@@ -93,6 +97,8 @@ test("array minimum/maximum, nullable elements and absent nonnullable optional c
   const guards = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`);
   for (const value of [[1], [null, 2, -2]]) assert.equal(guards.validBoundedArray(value), true);
   for (const value of [[], [1, 2, 1, 2], [3], [1.5], ["1"], new Array(2)]) assert.equal(guards.validBoundedArray(value), false);
+  for (const value of [{ kind: "pending" }, { kind: "pending", values: [1, null] }, { kind: "done" }]) assert.equal(guards.validVariant(value), true);
+  for (const value of [{ kind: "pending", values: null }, { kind: "done", values: [1] }]) assert.equal(guards.validVariant(value), false);
   assert.equal(guards.validWrapper({}), true); assert.equal(guards.validWrapper({ values: null }), false);
   const directory = mkdtempSync(join(tmpdir(), "deck-array-compiler-"));
   try {
@@ -107,6 +113,12 @@ test("array minimum/maximum, nullable elements and absent nonnullable optional c
         }
         for ([_][]const u8{"[]", "[1,2,1,2]", "[3]", "[1.5]", "[\\\"1\\\"]"}) |encoded| {
           try std.testing.expectError(error.InvalidContract, c.parseBoundedArray(a, encoded));
+        }
+        for ([_][]const u8{"{\\\"kind\\\":\\\"pending\\\"}", "{\\\"kind\\\":\\\"pending\\\",\\\"values\\\":[1,null]}", "{\\\"kind\\\":\\\"done\\\"}"}) |encoded| {
+          const variant = try c.parseVariant(a, encoded); defer variant.deinit();
+          const rendered = try std.json.Stringify.valueAlloc(a, variant.value, .{}); defer a.free(rendered);
+          try std.testing.expectEqualStrings(encoded, rendered);
+          const roundtrip = try c.parseVariant(a, rendered); defer roundtrip.deinit();
         }
         const parsed = try c.parseWrapper(a, "{}"); defer parsed.deinit();
         const bytes = try std.json.Stringify.valueAlloc(a, parsed.value, .{}); defer a.free(bytes);

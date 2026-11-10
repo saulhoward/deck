@@ -1,26 +1,18 @@
 const std = @import("std");
+const Native = @import("native.zig");
 const contracts = @import("generated/contracts.zig");
 const views = @import("views.zig");
+const status_login = @import("status_login.zig");
 const rex_open = @import("rex_open.zig");
 const max_frame = 1024 * 1024;
 
-// This thread is the sole child waiter until serve returns. Cache a reaped status
-// so main's deferred Child.wait only cleans streams and never waits/reaps twice.
+// This thread is the sole child waiter until serve returns. Clearing the reaped
+// pid prevents main's cleanup from waiting on it twice (or on a reused pid).
 fn runtimeExited(child: *std.process.Child) !bool {
-    try child.waitForSpawn();
-    if (child.term != null) return true;
-    const result = std.posix.waitpid(child.id, std.posix.W.NOHANG);
+    const pid = child.id orelse return true;
+    const result = try Native.waitNoHang(pid);
     if (result.pid == 0) return false;
-    const status = result.status;
-    const term: std.process.Child.Term = if (std.posix.W.IFEXITED(status))
-        .{ .Exited = std.posix.W.EXITSTATUS(status) }
-    else if (std.posix.W.IFSIGNALED(status))
-        .{ .Signal = std.posix.W.TERMSIG(status) }
-    else if (std.posix.W.IFSTOPPED(status))
-        .{ .Stopped = std.posix.W.STOPSIG(status) }
-    else
-        .{ .Unknown = status };
-    child.term = term;
+    child.id = null;
     return true;
 }
 
@@ -31,18 +23,18 @@ fn readAll(child: *std.process.Child, bytes: []u8) !void {
         if (try runtimeExited(child)) return error.RuntimeFailed;
         var polls = [_]std.posix.pollfd{.{ .fd = file.handle, .events = std.posix.POLL.IN, .revents = 0 }};
         if (try std.posix.poll(&polls, 100) == 0) continue;
-        const n = try file.read(bytes[offset..]);
+        const n = try std.posix.read(file.handle, bytes[offset..]);
         if (n == 0) return error.RuntimeClosed;
         offset += n;
     }
 }
 
-fn exchange(allocator: std.mem.Allocator, child: *std.process.Child, payload: []const u8) ![]u8 {
+fn exchange(io: std.Io, allocator: std.mem.Allocator, child: *std.process.Child, payload: []const u8) ![]u8 {
     if (payload.len == 0 or payload.len > max_frame) return error.InvalidFrame;
     var header: [4]u8 = undefined;
     std.mem.writeInt(u32, &header, @intCast(payload.len), .big);
-    try child.stdin.?.writeAll(&header);
-    try child.stdin.?.writeAll(payload);
+    try child.stdin.?.writeStreamingAll(io, &header);
+    try child.stdin.?.writeStreamingAll(io, payload);
     try readAll(child, &header);
     const length = std.mem.readInt(u32, &header, .big);
     if (length == 0 or length > max_frame) return error.InvalidFrame;
@@ -56,8 +48,52 @@ fn safePiId(value: std.json.Value) bool {
     if (!contracts.validPiId(value)) return false;
     return (std.fmt.parseInt(u64, value.string, 10) catch return false) <= 9007199254740991;
 }
+fn units(value: std.json.Value, maximum: usize) bool {
+    if (value != .string) return false;
+    var iter = (std.unicode.Utf8View.init(value.string) catch return false).iterator();
+    var count: usize = 0;
+    while (iter.nextCodepoint()) |cp| {
+        count += if (cp > 0xffff) @as(usize, 2) else 1;
+        if (count > maximum) return false;
+    }
+    return true;
+}
+// Pure client-facing validation. Importing this does not start a listener or own
+// a Pi session; a Zig TUI can use the same semantics as native forwarding.
+pub fn validCommandArgs(command: []const u8, raw: std.json.Value) bool {
+    if (!contracts.validHubCommand(.{ .string = command })) return false;
+    const args: std.json.Value = if (raw == .null) .{ .object = .empty } else raw;
+    if (!status_login.validArgs(command, args) or !rex_open.validArgs(command, args) or !views.validArgs(command, args)) return false;
+    if (std.mem.eql(u8, command, "list_chats")) {
+        if (!contracts.validListChatsArgs(args)) return false;
+        return if (args.object.get("after")) |after| safePiId(after) else true;
+    }
+    if (std.mem.eql(u8, command, "history")) {
+        if (!contracts.validHistoryArgs(args) or !safePiId(args.object.get("chatId").?)) return false;
+        const before = args.object.get("before");
+        const after = args.object.get("after");
+        if (before != null and after != null) return false;
+        if (before) |value| if (!safePiId(value)) return false;
+        if (after) |value| if (!std.mem.eql(u8, value.string, "0") and !safePiId(value)) return false;
+    }
+    if (std.mem.eql(u8, command, "admit")) return contracts.validAdmitArgs(args) and safePiId(args.object.get("chatId").?) and units(args.object.get("requestId").?, 200) and units(args.object.get("text").?, 200000);
+    if (std.mem.eql(u8, command, "create_task") or std.mem.eql(u8, command, "import_instructions")) {
+        if (std.mem.eql(u8, command, "create_task")) {
+            if (!contracts.validCreateTaskArgs(args) or !units(args.object.get("title").?, 200000)) return false;
+        } else if (!contracts.validInstructionImportArgs(args) or !safePiId(args.object.get("chatId").?)) return false;
+        return units(args.object.get("requestId").?, 200) and units(args.object.get("machineId").?, 200000) and units(args.object.get("cwd").?, 200000);
+    }
+    if (std.mem.eql(u8, command, "stop")) return contracts.validStopArgs(args) and safePiId(args.object.get("chatId").?);
+    if (std.mem.eql(u8, command, "rex_startup")) return contracts.validRexStartupArgs(args) and safePiId(args.object.get("chatId").?);
+    return true;
+}
+pub fn validClientRequest(request: std.json.Value) bool {
+    if (!contracts.validRequestEnvelope(request)) return false;
+    if (request.object.get("hubId")) |hub_id| if (!contracts.validTransportId(hub_id) or !units(hub_id, 200)) return false;
+    return validCommandArgs(request.object.get("command").?.string, request.object.get("args") orelse .null);
+}
 fn validDiscoveryReply(args: std.json.Value, result: std.json.Value) bool {
-    if ((args != .null and !contracts.validListChatsArgs(args)) or !contracts.validChatListPage(result)) return false;
+    if (!validCommandArgs("list_chats", args) or !contracts.validChatListPage(result)) return false;
     var limit: u64 = 50;
     var after: u64 = 0;
     if (args != .null) {
@@ -102,7 +138,7 @@ fn historyNumber(value: std.json.Value) u64 {
     };
 }
 fn validHistoryReply(args: std.json.Value, result: std.json.Value) bool {
-    if (!contracts.validHistoryArgs(args) or !contracts.validHistoryPage(result) or !views.validAttachments(args, result)) return false;
+    if (!validCommandArgs("history", args) or !contracts.validHistoryPage(result) or !views.validAttachments(args, result)) return false;
     if (!safePiId(args.object.get("chatId").?)) return false;
     const before = args.object.get("before");
     const after = args.object.get("after");
@@ -164,13 +200,16 @@ test "history semantic fixtures agree with TypeScript without rewriting Pi recor
         }
     }
 }
-// Called only after generated envelope validation. Unknown commands still use
-// their existing runtime/client checks; this is not permission to dispatch them.
-fn validCommandReply(request: std.json.Value, reply: std.json.Value) bool {
+// Complete envelope/correlation/command guard, reusable by a client. Unknown
+// errors remain displayable; unknown successful commands are not permission.
+pub fn validReply(request: std.json.Value, reply: std.json.Value) bool {
+    if (!contracts.validRequestEnvelope(request) or !contracts.validResponseEnvelope(reply) or !std.mem.eql(u8, request.object.get("id").?.string, reply.object.get("id").?.string)) return false;
     if (!reply.object.get("ok").?.bool) return true;
     const command = request.object.get("command").?.string;
     const args = request.object.get("args") orelse .null;
+    if (!validClientRequest(request)) return false;
     const result = reply.object.get("result").?;
+    if (!status_login.validReply(command, args, request.object.get("hubId"), result)) return false;
     if (!views.validReply(command, args, result) or !rex_open.validReply(command, args, request.object.get("hubId") orelse .null, result)) return false;
     if (std.mem.eql(u8, command, "list_chats")) return validDiscoveryReply(args, result);
     if (std.mem.eql(u8, command, "history")) return validHistoryReply(args, result);
@@ -188,17 +227,17 @@ fn validCommandReply(request: std.json.Value, reply: std.json.Value) bool {
     return true;
 }
 
-fn handle(allocator: std.mem.Allocator, connection: std.net.Server.Connection, child: *std.process.Child, port: u16) !void {
-    defer connection.stream.close();
+fn handle(io: std.Io, allocator: std.mem.Allocator, connection: std.Io.net.Stream, child: *std.process.Child, port: u16) !void {
+    defer connection.close(io);
     // Bound stalled headers/bodies on the trusted local listener.
     const timeout = std.posix.timeval{ .sec = 3, .usec = 0 };
-    try std.posix.setsockopt(connection.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
-    try std.posix.setsockopt(connection.stream.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&timeout));
+    try std.posix.setsockopt(connection.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout));
+    try std.posix.setsockopt(connection.socket.handle, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&timeout));
     var read_buffer: [8192]u8 = undefined;
     var write_buffer: [8192]u8 = undefined;
-    var reader = connection.stream.reader(&read_buffer);
-    var writer = connection.stream.writer(&write_buffer);
-    var server = std.http.Server.init(reader.interface(), &writer.interface);
+    var reader = connection.reader(io, &read_buffer);
+    var writer = connection.writer(io, &write_buffer);
+    var server = std.http.Server.init(&reader.interface, &writer.interface);
     var request = try server.receiveHead();
     const expected_host = try std.fmt.allocPrint(allocator, "127.0.0.1:{d}", .{port});
     defer allocator.free(expected_host);
@@ -243,7 +282,7 @@ fn handle(allocator: std.mem.Allocator, connection: std.net.Server.Connection, c
         try request.respond("Invalid command envelope", .{ .status = .bad_request, .keep_alive = false });
         return;
     }
-    const response = try exchange(allocator, child, body);
+    const response = try exchange(io, allocator, child, body);
     defer allocator.free(response);
     // A bad/mis-correlated private reply cannot be forwarded as a mutation ACK.
     // Stop this transport rather than leaving an out-of-sync writer available.
@@ -251,23 +290,24 @@ fn handle(allocator: std.mem.Allocator, connection: std.net.Server.Connection, c
     if (!std.unicode.utf8ValidateSlice(response)) return error.InvalidFrame;
     const reply = std.json.parseFromSlice(std.json.Value, allocator, response, .{}) catch return error.InvalidFrame;
     defer reply.deinit();
-    if (!contracts.validResponseEnvelope(reply.value) or !std.mem.eql(u8, reply.value.object.get("id").?.string, parsed.value.object.get("id").?.string) or !validCommandReply(parsed.value, reply.value)) return error.InvalidFrame;
+    if (!validReply(parsed.value, reply.value)) return error.InvalidFrame;
     try request.respond(response, .{ .keep_alive = false, .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }} });
 }
 
-pub fn serve(allocator: std.mem.Allocator, child: *std.process.Child, port: u16) !void {
-    var listener = try std.net.Address.listen(try std.net.Address.parseIp4("127.0.0.1", port), .{ .reuse_address = true });
-    defer listener.deinit();
-    try std.fs.File.stderr().writeAll("deck: hub listening on loopback (native file and bash tools enabled)\n");
+pub fn serve(io: std.Io, allocator: std.mem.Allocator, child: *std.process.Child, port: u16) !void {
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
+    var listener = try address.listen(io, .{ .reuse_address = true });
+    defer listener.deinit(io);
+    try std.Io.File.stderr().writeStreamingAll(io, "deck: hub listening on loopback (native file and bash tools enabled)\n");
     while (true) {
         // Poll rather than blocking forever in accept: a dead writer must not leave
         // an apparently healthy listener behind when no client is connected.
         if (try runtimeExited(child)) return error.RuntimeFailed;
-        var polls = [_]std.posix.pollfd{.{ .fd = listener.stream.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+        var polls = [_]std.posix.pollfd{.{ .fd = listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
         if (try std.posix.poll(&polls, 100) == 0) continue;
         if (polls[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL) != 0) return error.ListenerFailed;
-        const connection = try listener.accept();
-        handle(allocator, connection, child, port) catch |err| switch (err) {
+        const connection = try listener.accept(io);
+        handle(io, allocator, connection, child, port) catch |err| switch (err) {
             error.RuntimeFailed, error.RuntimeClosed, error.InvalidFrame, error.BrokenPipe => return err,
             else => {}, // A malformed/disconnected client must not stop the writer.
         };

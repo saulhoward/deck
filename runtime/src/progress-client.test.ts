@@ -23,7 +23,7 @@ test("plain previews are bounded/sanitized snapshots; outages, replacements and 
     const { id, command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { id: string; command: string; args: Record<string, unknown> };
     if (command === "stop") stopCalls++;
     const reply = (result: unknown) => response.end(JSON.stringify({ version: 1, id, ok: true, result }));
-    if (command === "status") { reply({ chatId: args.chatId ?? "1", mainChatId: "1", hubId: "progress-client", model: {} }); return; }
+    if (command === "status") { reply({ chatId: args.chatId ?? "1", mainChatId: "1", hubId: "progress-client", model: {}, tools: "offline" }); return; }
     assert.equal(command, "history"); assert.equal(args.includeProgress, true); assert.equal(args.includeInstructions, true); polls++;
     if (failNext) { failNext = false; failed = true; response.writeHead(503); response.end(); return; }
     const chatId = String(args.chatId);
@@ -72,7 +72,7 @@ for (const detach of ["exit", "SIGINT"] as const) test(`blocked stdout backpress
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const { id, command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { id: string; command: string; args: Record<string, unknown> };
     if (command === "stop") stopCalls++;
-    if (command === "status") { response.end(JSON.stringify({ version: 1, id, ok: true, result: { chatId: "1", mainChatId: "1", hubId: "progress-backpressure", model: {} } })); return; }
+    if (command === "status") { response.end(JSON.stringify({ version: 1, id, ok: true, result: { chatId: "1", mainChatId: "1", hubId: "progress-backpressure", model: {}, tools: "offline" } })); return; }
     assert.equal(command, "history"); polls++;
     response.end(JSON.stringify({ version: 1, id, ok: true, result: {
       items: polls === 2 ? [{ id: 1, kind: "pi.assistant", model: [{ content: [{ type: "text", text: "x".repeat(500_000) }] }] }] : [],

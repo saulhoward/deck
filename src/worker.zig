@@ -1,101 +1,110 @@
 const std = @import("std");
+const Native = @import("native.zig");
+const Io = std.Io;
 const file_limit = 128 * 1024;
 const frame_limit = 1024 * 1024;
-const Request = struct { version: u32, id: []const u8, machineId: []const u8, cwd: []const u8, operation: []const u8, args: struct { path: []const u8 = "", content: ?[]const u8 = null, oldText: ?[]const u8 = null, newText: ?[]const u8 = null, command: ?[]const u8 = null, timeout: u32 = 60, target: []const u8 = "", plan: []const u8 = "" } };
+const boundary = @import("native_contracts.zig");
+const Request = contracts.NativeRequest;
+// Historical decoding only, for read-only receipt evidence. Do not tighten old
+// request defaults or re-encode the bytes whose hash was retained.
+const RetainedRequest = struct { version: u32, id: []const u8, machineId: []const u8, cwd: []const u8, operation: []const u8, args: struct { path: []const u8 = "", content: ?[]const u8 = null, oldText: ?[]const u8 = null, newText: ?[]const u8 = null, command: ?[]const u8 = null, timeout: u32 = 60, target: []const u8 = "", plan: []const u8 = "" } };
 const shell = @import("shell.zig");
 const rex = @import("rex.zig");
 const rex_inspect = @import("rex_inspect.zig");
+const rex_resolve = @import("rex_resolve.zig");
 const contracts = @import("generated/contracts.zig");
 const Result = shell.Result;
 const Receipt = struct { hash: []const u8, result: ?Result = null };
 
-fn readExact(file: std.fs.File, bytes: []u8) !void {
+fn readExact(file: Io.File, bytes: []u8) !void {
     var offset: usize = 0;
     while (offset < bytes.len) {
-        const n = try file.read(bytes[offset..]);
+        const n = try std.posix.read(file.handle, bytes[offset..]);
         if (n == 0) return error.EndOfStream;
         offset += n;
     }
 }
-fn save(allocator: std.mem.Allocator, dir: std.fs.Dir, name: []const u8, receipt: Receipt) !void {
+fn save(io: Io, allocator: std.mem.Allocator, dir: Io.Dir, name: []const u8, receipt: Receipt) !void {
     const data = try std.json.Stringify.valueAlloc(allocator, receipt, .{});
     defer allocator.free(data);
     const temporary = try std.fmt.allocPrint(allocator, "{s}.tmp", .{name});
     defer allocator.free(temporary);
-    const file = try dir.createFile(temporary, .{ .mode = 0o600 });
-    defer file.close();
-    try file.writeAll(data);
-    try file.sync();
-    try dir.rename(temporary, name);
+    const file = try dir.createFile(io, temporary, .{ .permissions = .fromMode(0o600) });
+    defer file.close(io);
+    try file.writeStreamingAll(io, data);
+    try file.sync(io);
+    try dir.rename(temporary, dir, name, io);
 }
-fn readText(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const file = std.fs.File{ .handle = try std.posix.open(path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0) };
-    defer file.close();
-    if ((try file.stat()).kind != .file) return error.NotRegularFile;
-    return file.readToEndAlloc(allocator, file_limit);
+fn readText(io: Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const file = Io.File{ .handle = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0), .flags = .{ .nonblocking = true } };
+    defer file.close(io);
+    if ((try file.stat(io)).kind != .file) return error.NotRegularFile;
+    return Native.readAll(io, file, allocator, file_limit);
 }
-fn execute(allocator: std.mem.Allocator, request: Request) !Result {
+fn execute(io: Io, allocator: std.mem.Allocator, request: Request) !Result {
     if (!std.fs.path.isAbsolute(request.cwd)) return error.InvalidArguments;
-    const path = try std.fs.path.resolve(allocator, &.{ request.cwd, request.args.path });
+    const path = try std.fs.path.resolve(allocator, &.{ request.cwd, request.args.path.? });
     defer allocator.free(path);
-    if (std.mem.eql(u8, request.operation, "read")) {
-        const text = try readText(allocator, path);
+    if (request.operation == .read) {
+        const text = try readText(io, allocator, path);
         if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
         return .{ .ok = true, .output = text };
     }
-    const content = if (std.mem.eql(u8, request.operation, "write")) request.args.content orelse return error.InvalidArguments else blk: {
-        if (!std.mem.eql(u8, request.operation, "edit")) return error.InvalidArguments;
+    const content = if (request.operation == .write) request.args.content orelse return error.InvalidArguments else blk: {
+        if (request.operation != .edit) return error.InvalidArguments;
         const old = request.args.oldText orelse return error.InvalidArguments;
         const replacement = request.args.newText orelse return error.InvalidArguments;
         if (old.len == 0) return error.InvalidArguments;
-        const text = try readText(allocator, path);
+        const text = try readText(io, allocator, path);
         if (!std.unicode.utf8ValidateSlice(text)) return error.InvalidUtf8;
         const start = std.mem.indexOf(u8, text, old) orelse return .{ .ok = false, .output = "Exact edit found no match; file unchanged", .code = "conflict" };
         if (std.mem.indexOfPos(u8, text, start + 1, old) != null) return .{ .ok = false, .output = "Exact edit found multiple matches; file unchanged", .code = "conflict" };
         break :blk try std.mem.concat(allocator, u8, &.{ text[0..start], replacement, text[start + old.len ..] });
     };
     if (content.len > file_limit or !std.unicode.utf8ValidateSlice(content)) return error.InvalidArguments;
-    const file = std.fs.File{ .handle = try std.posix.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .NONBLOCK = true, .CLOEXEC = true }, 0o666) };
-    defer file.close();
-    if ((try file.stat()).kind != .file) return error.NotRegularFile;
-    try file.setEndPos(0);
-    try file.writeAll(content);
-    try file.sync();
+    const file = Io.File{ .handle = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .WRONLY, .CREAT = true, .NONBLOCK = true, .CLOEXEC = true }, 0o666), .flags = .{ .nonblocking = true } };
+    defer file.close(io);
+    if ((try file.stat(io)).kind != .file) return error.NotRegularFile;
+    try file.setLength(io, 0);
+    try file.writeStreamingAll(io, content);
+    try file.sync(io);
     return .{ .ok = true, .output = "File updated on assigned worker" };
 }
 
-pub fn operation(allocator: std.mem.Allocator, journal: std.fs.Dir, machine_id: []const u8, body: []const u8) ![]const u8 {
-    return controlled(allocator, journal, machine_id, body, null, null);
+pub fn operation(native: Native, allocator: std.mem.Allocator, journal: Io.Dir, machine_id: []const u8, body: []const u8) ![]const u8 {
+    return controlled(native, allocator, journal, machine_id, body, null, null);
 }
-fn controlled(allocator: std.mem.Allocator, journal: std.fs.Dir, machine_id: []const u8, body: []const u8, cancelled: ?*std.atomic.Value(bool), progress: ?shell.Progress) ![]const u8 {
-    const parsed = try std.json.parseFromSlice(Request, allocator, body, .{});
+fn controlled(native: Native, allocator: std.mem.Allocator, journal: Io.Dir, machine_id: []const u8, body: []const u8, cancelled: ?*std.atomic.Value(bool), progress: ?shell.Progress) ![]const u8 {
+    const io = native.io;
+    const parsed = try boundary.parseRequest(allocator, body);
     defer parsed.deinit();
     const request = parsed.value;
-    if (request.version != 1 or request.id.len == 0 or request.id.len > 20) return error.InvalidArguments;
-    for (request.id) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidArguments;
+    if (request.operation == .bash_progress) return error.InvalidArguments;
     var result: Result = undefined;
     if (!std.mem.eql(u8, machine_id, request.machineId)) {
         result = .{ .ok = false, .output = "offline: assigned worker is not this machine; no local fallback", .code = "offline" };
-    } else if (std.mem.eql(u8, request.operation, "rex_allocation_receipt")) {
+    } else if (request.operation == .rex_allocation_receipt) {
         // Historical evidence only: never accept/dispatch the embedded request or
         // publish a receipt under either the lookup ID or original allocation ID.
-        result = allocationReceipt(allocator, journal, machine_id, request.cwd, request.args.plan) catch .{ .ok = false, .code = "receipt_unavailable", .output = "Receipt inconclusive" };
-    } else if (std.mem.eql(u8, request.operation, "rex_inspect")) {
+        result = allocationReceipt(io, allocator, journal, machine_id, request.cwd, request.args.plan.?) catch .{ .ok = false, .code = "receipt_unavailable", .output = "Receipt inconclusive" };
+    } else if (request.operation == .rex_resolve) {
+        result = rex_resolve.resolve(native, allocator, request.cwd, request.args.plan.?, cancelled orelse return error.Unsupported) catch .{ .ok = false, .code = "rex_unavailable", .output = "Rex target unavailable" };
+    } else if (request.operation == .rex_inspect) {
         // Ephemeral read namespace, disjoint from Pi's safe-integer task IDs.
         // Never consult/publish acceptance or result receipts for fresh inspection.
-        if ((try std.fmt.parseInt(u64, request.id, 10)) < (@as(u64, 1) << 63)) return error.InvalidArguments;
-        result = rex_inspect.inspect(allocator, request.cwd, request.args.plan, cancelled orelse return error.Unsupported) catch .{ .ok = false, .code = "inspection_failed", .output = "Inspection inconclusive" };
+        result = rex_inspect.inspect(native, allocator, request.cwd, request.args.plan.?, cancelled orelse return error.Unsupported) catch .{ .ok = false, .code = "inspection_failed", .output = "Inspection inconclusive" };
     } else blk: {
-        if ((try std.fmt.parseInt(u64, request.id, 10)) >= (@as(u64, 1) << 63)) return error.InvalidArguments;
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(body, &digest, .{});
         const hash = std.fmt.bytesToHex(digest, .lower);
         const name = try std.fmt.allocPrint(allocator, "{s}.json", .{request.id});
-        const previous = journal.readFileAlloc(allocator, name, frame_limit) catch |err| switch (err) {
+        const previous = journal.readFileAlloc(io, name, allocator, .limited(frame_limit)) catch |err| switch (err) {
             error.FileNotFound => null,
             else => return err,
         };
         if (previous) |bytes| {
+            const checked = try contracts.parseNativeReceipt(allocator, bytes);
+            checked.deinit();
             const saved = try std.json.parseFromSlice(Receipt, allocator, bytes, .{});
             if (!std.mem.eql(u8, saved.value.hash, &hash)) {
                 result = .{ .ok = false, .output = "Operation ID reused with conflicting arguments", .code = "conflict" };
@@ -104,11 +113,20 @@ fn controlled(allocator: std.mem.Allocator, journal: std.fs.Dir, machine_id: []c
         }
         // Persist acceptance before touching the workspace. An accepted operation without
         // a retained result is uncertain after restart and is never automatically reissued.
-        try save(allocator, journal, name, .{ .hash = &hash });
-        result = (if (std.mem.eql(u8, request.operation, "bash")) shell.runObserved(allocator, request.cwd, request.args.command orelse "", request.args.timeout, cancelled orelse return error.Unsupported, progress) else if (std.mem.eql(u8, request.operation, "rex_allocate")) rex.allocate(allocator, request.cwd, request.args.plan, cancelled orelse return error.Unsupported) else execute(allocator, request)) catch |err| .{ .ok = false, .output = if (std.mem.eql(u8, request.operation, "read")) @errorName(err) else "effect_uncertain: file operation failed; inspect the file before retrying", .code = if (std.mem.eql(u8, request.operation, "read")) "read_failed" else "effect_uncertain" };
-        try save(allocator, journal, name, .{ .hash = &hash, .result = result });
+        try save(io, allocator, journal, name, .{ .hash = &hash });
+        result = (if (request.operation == .bash) shell.runObserved(native, allocator, request.cwd, request.args.command.?, @intCast(request.args.timeout orelse 60), cancelled orelse return error.Unsupported, progress) else if (request.operation == .rex_allocate) rex.allocate(native, allocator, request.cwd, request.args.plan.?, cancelled orelse return error.Unsupported) else execute(io, allocator, request)) catch |err| .{ .ok = false, .output = if (request.operation == .read) @errorName(err) else "effect_uncertain: file operation failed; inspect the file before retrying", .code = if (request.operation == .read) "read_failed" else "effect_uncertain" };
+        const checked = try resultFrame(allocator, request, result);
+        allocator.free(checked);
+        try save(io, allocator, journal, name, .{ .hash = &hash, .result = result });
     }
-    return std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = request.id, .result = result }, .{});
+    return resultFrame(allocator, request, result);
+}
+
+fn resultFrame(allocator: std.mem.Allocator, request: Request, result: Result) ![]const u8 {
+    const body = try std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = request.id, .result = result }, .{});
+    errdefer allocator.free(body);
+    try boundary.checkReply(allocator, request, body);
+    return body;
 }
 
 fn receiptProjection(allocator: std.mem.Allocator, query: contracts.RexAllocationReceiptQuery, hash: []const u8, state: contracts.RexAllocationReceiptState, creation: ?contracts.RexCreation) !Result {
@@ -119,13 +137,13 @@ fn receiptProjection(allocator: std.mem.Allocator, query: contracts.RexAllocatio
     checked.deinit();
     return .{ .ok = true, .code = "rex_receipt", .output = output };
 }
-fn allocationReceipt(allocator: std.mem.Allocator, journal: std.fs.Dir, machine_id: []const u8, cwd: []const u8, encoded: []const u8) !Result {
+fn allocationReceipt(io: Io, allocator: std.mem.Allocator, journal: Io.Dir, machine_id: []const u8, cwd: []const u8, encoded: []const u8) !Result {
     if (encoded.len > 256 * 1024) return error.InvalidArguments;
     const parsed = try contracts.parseRexAllocationReceiptQuery(allocator, encoded);
     defer parsed.deinit();
     const query = parsed.value;
     if (query.request.len > 128 * 1024) return error.InvalidArguments;
-    const original = try std.json.parseFromSlice(Request, allocator, query.request, .{});
+    const original = try std.json.parseFromSlice(RetainedRequest, allocator, query.request, .{});
     defer original.deinit();
     const request = original.value;
     if (request.version != 1 or !std.mem.eql(u8, request.id, query.operationId) or (try std.fmt.parseInt(u64, request.id, 10)) > 9007199254740991 or !std.mem.eql(u8, request.machineId, machine_id) or !std.mem.eql(u8, request.cwd, cwd) or !std.fs.path.isAbsolute(cwd) or !std.mem.eql(u8, request.operation, "rex_allocate")) return error.InvalidArguments;
@@ -136,13 +154,19 @@ fn allocationReceipt(allocator: std.mem.Allocator, journal: std.fs.Dir, machine_
     const hash = std.fmt.bytesToHex(digest, .lower);
     const name = try std.fmt.allocPrint(allocator, "{s}.json", .{query.operationId});
     defer allocator.free(name);
-    const fd = std.posix.openat(journal.fd, name, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NONBLOCK = true, .NOFOLLOW = true }, 0) catch |err| return receiptProjection(allocator, query, &hash, if (err == error.FileNotFound) .missing else .inconclusive, null);
-    const file = std.fs.File{ .handle = fd };
-    defer file.close();
-    const stat = try file.stat();
+    const fd = std.posix.openat(journal.handle, name, .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NONBLOCK = true, .NOFOLLOW = true }, 0) catch |err| return receiptProjection(allocator, query, &hash, if (err == error.FileNotFound) .missing else .inconclusive, null);
+    const file = Io.File{ .handle = fd, .flags = .{ .nonblocking = true } };
+    defer file.close(io);
+    const stat = try file.stat(io);
     if (stat.kind != .file or stat.size > frame_limit) return receiptProjection(allocator, query, &hash, .inconclusive, null);
-    const bytes = try file.readToEndAlloc(allocator, frame_limit);
+    const bytes = try Native.readAll(io, file, allocator, frame_limit);
     defer allocator.free(bytes);
+    const checked = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch return receiptProjection(allocator, query, &hash, .inconclusive, null);
+    defer checked.deinit();
+    if (!contracts.validNativeReceipt(checked.value)) return receiptProjection(allocator, query, &hash, .inconclusive, null);
+    if (checked.value.object.get("result")) |saved_result| {
+        if (saved_result != .null and !boundary.validResult(.rex_allocate, saved_result)) return receiptProjection(allocator, query, &hash, .inconclusive, null);
+    }
     const receipt = std.json.parseFromSlice(Receipt, allocator, bytes, .{}) catch return receiptProjection(allocator, query, &hash, .inconclusive, null);
     defer receipt.deinit();
     if (!std.mem.eql(u8, receipt.value.hash, &hash)) return receiptProjection(allocator, query, &hash, .conflict, null);
@@ -174,8 +198,8 @@ const ProgressContext = struct {
         const self: *@This() = @ptrCast(@alignCast(raw));
         // No pipe/disk I/O under this mutex: draining and cancellation never wait
         // for a progress reader. Only the latest bounded sample lives here.
-        self.state.mutex.lock();
-        defer self.state.mutex.unlock();
+        self.state.mutex.lockUncancelable(self.state.native.io);
+        defer self.state.mutex.unlock(self.state.native.io);
         const slot = self.slot;
         @memcpy(slot.tail[0..bytes.len], bytes);
         slot.used = bytes.len;
@@ -188,34 +212,40 @@ const ProgressContext = struct {
 };
 const State = struct {
     slots: [4]Slot = .{ .{}, .{}, .{}, .{} },
-    mutex: std.Thread.Mutex = .{},
-    writes: std.Thread.Mutex = .{},
-    jobs: std.Thread.WaitGroup = .{},
+    native: Native,
+    mutex: Io.Mutex = .init,
+    writes: Io.Mutex = .init,
+    jobs: Native.WaitGroup = .{},
     stopping: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
-    cancelled_ids: [16]u64 = [_]u64{0} ** 16,
+    cancelled_ids: [16]u64 = @splat(0),
     cancel_index: usize = 0,
-    journal: std.fs.Dir,
-    output: std.fs.File,
+    journal: Io.Dir,
+    output: Io.File,
     machine_id: []const u8,
     fn send(self: *State, response: []const u8) !void {
         if (response.len > frame_limit) return error.InvalidFrame;
-        self.writes.lock();
-        defer self.writes.unlock();
+        const checked = try contracts.parseNativeResponse(std.heap.page_allocator, response);
+        defer checked.deinit();
+        if ((checked.value.result == null) == (checked.value.progress == null)) return error.InvalidFrame;
+        const io = self.native.io;
+        self.writes.lockUncancelable(io);
+        defer self.writes.unlock(io);
         var header: [4]u8 = undefined;
         std.mem.writeInt(u32, &header, @intCast(response.len), .big);
-        try self.output.writeAll(&header);
-        try self.output.writeAll(response);
+        try self.output.writeStreamingAll(io, &header);
+        try self.output.writeStreamingAll(io, response);
     }
     fn cancelAll(self: *State) void {
         self.stopping.store(true, .release);
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        self.mutex.lockUncancelable(self.native.io);
+        defer self.mutex.unlock(self.native.io);
         for (&self.slots) |*slot| slot.cancelled.store(true, .release);
     }
 };
 fn control(state: *State, fd: std.posix.fd_t) void {
-    const file = std.fs.File{ .handle = fd };
-    defer file.close();
+    const io = state.native.io;
+    const file = Io.File{ .handle = fd, .flags = .{ .nonblocking = false } };
+    defer file.close(io);
     defer state.cancelAll();
     // Fixed-size cancellation records cannot be blocked by command bodies or output.
     while (!state.stopping.load(.acquire)) {
@@ -224,50 +254,53 @@ fn control(state: *State, fd: std.posix.fd_t) void {
         var bytes: [8]u8 = undefined;
         readExact(file, &bytes) catch return;
         const id = std.mem.readInt(u64, &bytes, .big);
-        state.mutex.lock();
+        if (!boundary.validCancellationId(id)) return;
+        state.mutex.lockUncancelable(io);
         state.cancelled_ids[state.cancel_index] = id;
         state.cancel_index = (state.cancel_index + 1) % state.cancelled_ids.len;
         for (&state.slots) |*slot| if (slot.id == id) {
             slot.cancelled.store(true, .release);
         };
-        state.mutex.unlock();
+        state.mutex.unlock(io);
     }
 }
 fn processJob(state: *State, slot: *Slot, body: []u8) void {
-    defer state.jobs.finish();
+    const io = state.native.io;
+    defer state.jobs.finish(io);
     defer {
-        state.mutex.lock();
+        state.mutex.lockUncancelable(io);
         slot.id = 0;
-        state.mutex.unlock();
+        state.mutex.unlock(io);
     }
     defer std.heap.page_allocator.free(body);
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
     var progress = ProgressContext{ .state = state, .slot = slot };
-    const response = controlled(allocator, state.journal, state.machine_id, body, &slot.cancelled, .{ .context = &progress, .publish = ProgressContext.publish }) catch blk: {
+    const response = controlled(state.native, allocator, state.journal, state.machine_id, body, &slot.cancelled, .{ .context = &progress, .publish = ProgressContext.publish }) catch blk: {
         const id = std.fmt.allocPrint(allocator, "{d}", .{slot.id}) catch return;
         break :blk std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = id, .result = Result{ .ok = false, .output = if (slot.id >= (@as(u64, 1) << 63)) "Inspection inconclusive" else "effect_uncertain: worker failed; inspect effects before retrying", .code = if (slot.id >= (@as(u64, 1) << 63)) "inspection_failed" else "effect_uncertain" } }, .{}) catch return;
     };
     state.send(response) catch {};
 }
 
-pub fn serve(read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8) void {
-    const input = std.fs.File{ .handle = read_fd };
-    const output = std.fs.File{ .handle = write_fd };
-    defer input.close();
-    defer output.close();
+pub fn serve(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8) void {
+    const io = native.io;
+    const input = Io.File{ .handle = read_fd, .flags = .{ .nonblocking = false } };
+    const output = Io.File{ .handle = write_fd, .flags = .{ .nonblocking = false } };
+    defer input.close(io);
+    defer output.close(io);
     var control_owned = true;
-    defer if (control_owned) std.posix.close(control_fd);
-    var journal = std.fs.cwd().openDir(journal_path, .{}) catch return;
-    defer journal.close();
-    var state = State{ .journal = journal, .output = output, .machine_id = machine_id };
+    defer if (control_owned) Native.close(control_fd);
+    var journal = Io.Dir.cwd().openDir(io, journal_path, .{}) catch return;
+    defer journal.close(io);
+    var state = State{ .native = native, .journal = journal, .output = output, .machine_id = machine_id };
     const controller = std.Thread.spawn(.{}, control, .{ &state, control_fd }) catch return;
     control_owned = false;
     defer controller.join();
     defer {
         state.cancelAll();
-        state.jobs.wait();
+        state.jobs.wait(io);
     }
     while (true) {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -279,20 +312,22 @@ pub fn serve(read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.
         if (length == 0 or length > frame_limit) return;
         const body = allocator.alloc(u8, length) catch return;
         readExact(input, body) catch return;
-        const parsed = std.json.parseFromSlice(Request, allocator, body, .{}) catch return;
-        if (std.mem.eql(u8, parsed.value.operation, "bash_progress")) {
+        // Observed control failure refuses subsequent requests. In-flight file
+        // operations still drain; process groups are independently cancelled.
+        if (state.stopping.load(.acquire)) return;
+        const parsed = boundary.parseRequest(allocator, body) catch return;
+        if (parsed.value.operation == .bash_progress) {
             // Read-only ephemeral sampling, not an accepted operation or receipt.
             // Copy under the slot mutex; serialize/write only after releasing it.
             const request = parsed.value;
-            if (request.version != 1) return;
-            const target = std.fmt.parseInt(u64, request.args.target, 10) catch return;
+            const target = std.fmt.parseInt(u64, request.args.target.?, 10) catch return;
             var cwd_hash: [32]u8 = undefined;
             std.crypto.hash.sha2.Sha256.hash(request.cwd, &cwd_hash, .{});
             var tail: [shell.progress_limit]u8 = undefined;
             var used: usize = 0;
             var truncated = false;
             var lossy = false;
-            state.mutex.lock();
+            state.mutex.lockUncancelable(io);
             if (target != 0 and std.mem.eql(u8, request.machineId, machine_id)) for (&state.slots) |*slot| {
                 if (slot.id == target and std.mem.eql(u8, &cwd_hash, &slot.cwd_hash)) {
                     used = slot.used;
@@ -302,12 +337,13 @@ pub fn serve(read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.
                     break;
                 }
             };
-            state.mutex.unlock();
+            state.mutex.unlock(io);
             const response = std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = request.id, .progress = .{ .output = tail[0..used], .truncated = truncated, .lossyUtf8 = lossy } }, .{}) catch return;
+            boundary.checkReply(allocator, request, response) catch return;
             state.send(response) catch return;
-        } else if (std.mem.eql(u8, parsed.value.operation, "bash") or std.mem.eql(u8, parsed.value.operation, "rex_allocate") or std.mem.eql(u8, parsed.value.operation, "rex_inspect")) {
+        } else if (parsed.value.operation == .bash or parsed.value.operation == .rex_allocate or parsed.value.operation == .rex_inspect or parsed.value.operation == .rex_resolve) {
             const id = std.fmt.parseInt(u64, parsed.value.id, 10) catch return;
-            state.mutex.lock();
+            state.mutex.lockUncancelable(io);
             var selected: ?*Slot = null;
             var duplicate = false;
             for (&state.slots) |*slot| if (slot.id == id) {
@@ -329,16 +365,16 @@ pub fn serve(read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.
                     break;
                 }
             };
-            state.mutex.unlock();
+            state.mutex.unlock(io);
             if (selected) |slot| {
                 const copy = std.heap.page_allocator.dupe(u8, body) catch return;
-                state.jobs.start();
+                state.jobs.start(io);
                 const thread = std.Thread.spawn(.{}, processJob, .{ &state, slot, copy }) catch {
-                    state.jobs.finish();
+                    state.jobs.finish(io);
                     std.heap.page_allocator.free(copy);
-                    state.mutex.lock();
+                    state.mutex.lockUncancelable(io);
                     slot.id = 0;
-                    state.mutex.unlock();
+                    state.mutex.unlock(io);
                     return;
                 };
                 thread.detach();
@@ -347,7 +383,7 @@ pub fn serve(read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.
                 state.send(response) catch return;
             }
         } else {
-            const response = operation(allocator, journal, machine_id, body) catch return;
+            const response = operation(native, allocator, journal, machine_id, body) catch return;
             state.send(response) catch return;
         }
     }

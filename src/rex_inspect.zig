@@ -1,17 +1,19 @@
 const std = @import("std");
+const Native = @import("native.zig");
 const shell = @import("shell.zig");
+const local_endpoint = @import("rex_endpoint.zig");
 const wire = @import("generated/contracts.zig");
 const Value = std.json.Value;
 const Query = wire.RexInspectionQuery;
 const Observation = wire.RexInspectionObservation;
 const State = wire.RexPresenceState;
 
-fn call(allocator: std.mem.Allocator, cwd: []const u8, query: Query, args: []const []const u8, cancelled: *std.atomic.Value(bool)) !shell.Captured {
+fn call(native: Native, allocator: std.mem.Allocator, cwd: []const u8, query: Query, args: []const []const u8, cancelled: *std.atomic.Value(bool)) !shell.Captured {
     var argv: std.array_list.Managed([]const u8) = .init(allocator);
     defer argv.deinit();
     try argv.appendSlice(&.{ query.executable, "--autostart=false", "--timeout", "2s", "--server", query.scope.server });
     try argv.appendSlice(args);
-    return shell.runArgvCaptured(allocator, cwd, argv.items, 4, cancelled);
+    return shell.runArgvCaptured(native, allocator, cwd, argv.items, 4, cancelled);
 }
 fn json(allocator: std.mem.Allocator, result: shell.Captured) !Value {
     if (!result.result.ok or result.stderr.len != 0) return error.ReadFailed;
@@ -42,8 +44,8 @@ fn integer(value: Value, min: i64, max: i64) !i64 {
     return if (n >= min and n <= max) n else error.InvalidResponse;
 }
 const Identity = enum { same, changed, unavailable, inconclusive, cancelled };
-fn identity(allocator: std.mem.Allocator, cwd: []const u8, query: Query, cancelled: *std.atomic.Value(bool)) Identity {
-    const result = call(allocator, cwd, query, &.{ "server", "status", "--json" }, cancelled) catch return .unavailable;
+fn identity(native: Native, allocator: std.mem.Allocator, cwd: []const u8, query: Query, cancelled: *std.atomic.Value(bool)) Identity {
+    const result = call(native, allocator, cwd, query, &.{ "server", "status", "--json" }, cancelled) catch return .unavailable;
     if (cancelled.load(.acquire)) return .cancelled;
     if (!result.result.ok) return if (std.mem.eql(u8, result.result.code, "invalid_output")) .inconclusive else .unavailable;
     const value = json(allocator, result) catch return .inconclusive;
@@ -53,7 +55,7 @@ fn identity(allocator: std.mem.Allocator, cwd: []const u8, query: Query, cancell
     if (!wire.validRexUuid(host) or !wire.validRexUuid(instance)) return .inconclusive;
     const revision = integer(field(value, "api_revision") catch return .inconclusive, 0, 9007199254740991) catch return .inconclusive;
     if (!@import("rex.zig").supportedApi(revision)) return .inconclusive;
-    return if (std.mem.eql(u8, endpoint, query.scope.server) and std.mem.eql(u8, host.string, query.scope.hostId) and std.mem.eql(u8, instance.string, query.scope.instanceId)) .same else .changed;
+    return if (local_endpoint.same(endpoint, query.scope.server) and std.mem.eql(u8, host.string, query.scope.hostId) and std.mem.eql(u8, instance.string, query.scope.instanceId)) .same else .changed;
 }
 fn add(seen: *std.StringHashMap(void), id: []const u8) !void {
     if ((try seen.getOrPut(id)).found_existing) return error.BindingConflict;
@@ -160,10 +162,10 @@ fn process(value: Value) !struct { state: State, exit: ?i64 } {
 fn failure(err: anyerror) State {
     return if (err == error.BindingConflict) .conflict else .inconclusive;
 }
-fn objects(allocator: std.mem.Allocator, cwd: []const u8, query: Query, cancelled: *std.atomic.Value(bool)) !Observation {
+fn objects(native: Native, allocator: std.mem.Allocator, cwd: []const u8, query: Query, cancelled: *std.atomic.Value(bool)) !Observation {
     var observation = Observation{ .version = 1, .scope = query.scope, .state = .inconclusive, .exitCode = null, .revision = null };
     const args = try std.json.Stringify.valueAlloc(allocator, .{ .session_id = query.scope.sessionId }, .{});
-    const first = try call(allocator, cwd, query, &.{ "api", "call", "session.view", args }, cancelled);
+    const first = try call(native, allocator, cwd, query, &.{ "api", "call", "session.view", args }, cancelled);
     // Installed API 8 evidence: the native API path, not CLI target resolution.
     // Require exact scoped stderr, empty stdout, normal exit 3 and lossless bounds.
     const absent = try std.fmt.allocPrint(allocator, "Error: stream response \"control-1\" failed: session {s} not found (status=404 code=session_not_found)\n", .{query.scope.sessionId});
@@ -176,7 +178,7 @@ fn objects(allocator: std.mem.Allocator, cwd: []const u8, query: Query, cancelle
         return observation;
     };
     observation.revision = before.revision;
-    const listed = list(allocator, try json(allocator, try call(allocator, cwd, query, &.{ "api", "call", "session.list_blocks", args }, cancelled)), query, before) catch |err| {
+    const listed = list(allocator, try json(allocator, try call(native, allocator, cwd, query, &.{ "api", "call", "session.list_blocks", args }, cancelled)), query, before) catch |err| {
         observation.state = failure(err);
         return observation;
     };
@@ -188,32 +190,31 @@ fn objects(allocator: std.mem.Allocator, cwd: []const u8, query: Query, cancelle
         observation.state = .missing_terminal;
     } else {
         const process_args = try std.json.Stringify.valueAlloc(allocator, .{ .session_id = query.scope.sessionId, .block_id = query.scope.blockId, .args = struct {}{} }, .{});
-        const state = try process(try json(allocator, try call(allocator, cwd, query, &.{ "api", "call", "com.superlogical.terminal.process", process_args }, cancelled)));
+        const state = try process(try json(allocator, try call(native, allocator, cwd, query, &.{ "api", "call", "com.superlogical.terminal.process", process_args }, cancelled)));
         observation.state = state.state;
         observation.exitCode = state.exit;
     }
-    const after = try view(allocator, try json(allocator, try call(allocator, cwd, query, &.{ "api", "call", "session.view", args }, cancelled)), query);
+    const after = try view(allocator, try json(allocator, try call(native, allocator, cwd, query, &.{ "api", "call", "session.view", args }, cancelled)), query);
     if (after.revision != before.revision or after.found != before.found or after.coherent != before.coherent) {
         observation.state = .inconclusive;
         observation.exitCode = null;
     }
     return observation;
 }
-pub fn inspect(allocator: std.mem.Allocator, cwd: []const u8, encoded: []const u8, cancelled: *std.atomic.Value(bool)) !shell.Result {
+pub fn inspect(native: Native, allocator: std.mem.Allocator, cwd: []const u8, encoded: []const u8, cancelled: *std.atomic.Value(bool)) !shell.Result {
     if (encoded.len > 16 * 1024) return .{ .ok = false, .code = "invalid", .output = "invalid" };
     const parsed = wire.parseRexInspectionQuery(allocator, encoded) catch return .{ .ok = false, .code = "invalid", .output = "invalid" };
     defer parsed.deinit();
     const query = parsed.value;
-    const socket = if (std.mem.startsWith(u8, query.scope.server, "unix:///")) query.scope.server[7..] else "";
-    if (!std.fs.path.isAbsolute(cwd) or query.executable.len > 4096 or !std.fs.path.isAbsolute(query.executable) or std.mem.indexOfScalar(u8, query.executable, 0) != null or socket.len == 0 or socket.len > 100 or std.mem.indexOfAny(u8, socket, "?#%\x00\r\n") != null) return .{ .ok = false, .code = "invalid", .output = "invalid" };
+    if (!std.fs.path.isAbsolute(cwd) or query.executable.len > 4096 or !std.fs.path.isAbsolute(query.executable) or std.mem.indexOfScalar(u8, query.executable, 0) != null or !local_endpoint.valid(query.scope.server)) return .{ .ok = false, .code = "invalid", .output = "invalid" };
     var observation = Observation{ .version = 1, .scope = query.scope, .state = .inconclusive, .exitCode = null, .revision = null };
-    const before = identity(allocator, cwd, query, cancelled);
+    const before = identity(native, allocator, cwd, query, cancelled);
     if (before == .same) {
-        observation = objects(allocator, cwd, query, cancelled) catch |err| blk: {
+        observation = objects(native, allocator, cwd, query, cancelled) catch |err| blk: {
             observation.state = failure(err);
             break :blk observation;
         };
-        switch (identity(allocator, cwd, query, cancelled)) {
+        switch (identity(native, allocator, cwd, query, cancelled)) {
             .same => {},
             .changed => observation.state = .identity_changed,
             .cancelled => observation.state = .cancelled,

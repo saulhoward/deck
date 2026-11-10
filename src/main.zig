@@ -1,4 +1,5 @@
 const std = @import("std");
+const Native = @import("native.zig");
 const state = @import("state.zig");
 const hub = @import("hub.zig");
 const worker = @import("worker.zig");
@@ -14,7 +15,7 @@ const help =
     \\  deck serve [--mock | --api-key] [--model ID] [--port 52800] [--directory PATH]
     \\  deck login [--port 52800]
     \\  deck rex open|reopen|status|inspect --task CHAT_ID [--port 52800]
-    \\    [--rex /path/to/rex --server unix:///path/to/socket --host-id UUID --instance-id UUID]
+    \\    [--rex /path/to/rex] [--server unix:///path/to/socket] [--host-id UUID] [--instance-id UUID]
     \\  deck serve --stdio --mock [--directory PATH] [--runtime PATH]
     \\  deck agent --no-tui [--port 52800] [--task CHAT_ID] [--message TEXT]
     \\  deck --help | --version
@@ -44,10 +45,11 @@ const help =
     \\Restore preserves identity/bindings and refuses existing destinations.
     \\Restoring old state can repeat later external effects; reconcile before serving.
     \\Backups exclude credentials unless explicitly requested; treat all as sensitive.
-    \\Rex first open needs the full explicit target above; later opens reuse it.
+    \\Rex first open defaults to rex on the hub's PATH and its local Unix server.
+    \\Target overrides are optional; later opens reuse the saved target. No autostart.
     \\Rex open/reopen is best-effort, ownerless-task-only, with no automatic retry.
     \\Duplicates after races/lost replies need manual cleanup. No GUI focus/attach.
-    \\Plain /rex open|reopen|status|inspect uses the selected task and saved target.
+    \\Plain /rex open|reopen|status|inspect uses the selected task and defaults/saved target.
     \\Remote workers and TUI are not yet available.
     \\
 ;
@@ -109,68 +111,64 @@ fn parse(args: []const []const u8) !Options {
     return result;
 }
 
-fn run(allocator: std.mem.Allocator, options: Options) !void {
+fn run(native: Native, allocator: std.mem.Allocator, options: Options) !void {
+    const io = native.io;
     const command = options.command;
-    if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) return std.fs.File.stdout().writeAll(help);
-    if (std.mem.eql(u8, command, "--version")) return std.fs.File.stdout().writeAll("deck 0.1.0-dev\n");
-    if (std.mem.eql(u8, command, "backup") or std.mem.eql(u8, command, "restore")) return maintenance(allocator, options);
+    if (std.mem.eql(u8, command, "help") or std.mem.eql(u8, command, "--help")) return std.Io.File.stdout().writeStreamingAll(io, help);
+    if (std.mem.eql(u8, command, "--version")) return std.Io.File.stdout().writeStreamingAll(io, "deck 0.1.0-dev\n");
+    if (std.mem.eql(u8, command, "backup") or std.mem.eql(u8, command, "restore")) return maintenance(native, allocator, options);
     if (options.output != null or options.from != null or options.include_credentials) return error.InvalidArguments;
     if (!std.mem.eql(u8, command, "init") and !std.mem.eql(u8, command, "serve")) return error.InvalidArguments;
-    const path = try state.directory(allocator, options.directory);
+    const path = try state.directory(native, allocator, options.directory);
     defer allocator.free(path);
     if (std.mem.eql(u8, command, "init")) {
         if (options.stdio or options.mock or options.api_key or options.model.len != 0 or options.workspace != null) return error.InvalidArguments;
-        try state.initialize(allocator, path);
-        try std.fs.File.stdout().writeAll("Deck initialized (existing identity preserved).\n");
+        try state.initialize(io, allocator, path);
+        try std.Io.File.stdout().writeStreamingAll(io, "Deck initialized (existing identity preserved).\n");
         return;
     }
-    var dir = try std.fs.cwd().openDir(path, .{});
-    defer dir.close();
-    const held = try state.lock(dir);
-    defer held.close();
-    const config = try state.load(allocator, dir);
+    var dir = try std.Io.Dir.cwd().openDir(io, path, .{});
+    defer dir.close(io);
+    const held = try state.lock(io, dir);
+    defer held.close(io);
+    const config = try state.load(io, allocator, dir);
     defer config.deinit();
     const database = try std.fs.path.join(allocator, &.{ path, "session.sqlite" });
     defer allocator.free(database);
-    const cwd = if (options.workspace) |workspace| try std.fs.cwd().realpathAlloc(allocator, workspace) else try std.process.getCwdAlloc(allocator);
+    const cwd = if (options.workspace) |workspace| try std.Io.Dir.cwd().realPathFileAlloc(io, workspace, allocator) else try std.process.currentPathAlloc(io, allocator);
     defer allocator.free(cwd);
-    var workspace_dir = try std.fs.cwd().openDir(cwd, .{});
-    workspace_dir.close();
-    const runtime = try runtime_paths.entry(allocator, options.runtime, "main.js");
+    var workspace_dir = try std.Io.Dir.cwd().openDir(io, cwd, .{});
+    workspace_dir.close(io);
+    const runtime = try runtime_paths.entry(native, allocator, options.runtime, "main.js");
     defer allocator.free(runtime);
-    const node_path = try runtime_paths.node(allocator);
+    const node_path = try runtime_paths.node(native, allocator);
     defer allocator.free(node_path);
     const descriptor = try std.fmt.allocPrint(allocator, "{d}", .{held.handle});
     defer allocator.free(descriptor);
-    // flock belongs to the shared open file description. Keeping this descriptor across
-    // exec retains the lock even if the Zig supervisor dies before its writer child.
-    _ = try std.posix.fcntl(held.handle, std.posix.F.SETFD, 0);
-    const requests = try std.posix.pipe2(.{ .CLOEXEC = true });
-    const results = std.posix.pipe2(.{ .CLOEXEC = true }) catch |err| {
-        std.posix.close(requests[0]);
-        std.posix.close(requests[1]);
+    // Explicit inherit_files below passes the shared flock description only to Pi.
+    // The parent's descriptors stay CLOEXEC, including during concurrent tool spawns.
+    const requests = try Native.pipe();
+    const results = Native.pipe() catch |err| {
+        for (requests) |fd| Native.close(fd);
         return err;
     };
-    const controls = std.posix.pipe2(.{ .CLOEXEC = true }) catch |err| {
-        for (requests) |fd| std.posix.close(fd);
-        for (results) |fd| std.posix.close(fd);
+    const controls = Native.pipe() catch |err| {
+        for (requests) |fd| Native.close(fd);
+        for (results) |fd| Native.close(fd);
         return err;
     };
     var child_ends_open = true;
     defer if (child_ends_open) {
-        std.posix.close(requests[1]);
-        std.posix.close(results[0]);
-        std.posix.close(controls[1]);
+        Native.close(requests[1]);
+        Native.close(results[0]);
+        Native.close(controls[1]);
     };
     var worker_started = false;
     defer if (!worker_started) {
-        std.posix.close(requests[0]);
-        std.posix.close(results[1]);
-        std.posix.close(controls[0]);
+        Native.close(requests[0]);
+        Native.close(results[1]);
+        Native.close(controls[0]);
     };
-    _ = try std.posix.fcntl(requests[1], std.posix.F.SETFD, 0);
-    _ = try std.posix.fcntl(results[0], std.posix.F.SETFD, 0);
-    _ = try std.posix.fcntl(controls[1], std.posix.F.SETFD, 0);
     const control_fd = try std.fmt.allocPrint(allocator, "{d}", .{controls[1]});
     defer allocator.free(control_fd);
     const request_fd = try std.fmt.allocPrint(allocator, "{d}", .{requests[1]});
@@ -179,85 +177,82 @@ fn run(allocator: std.mem.Allocator, options: Options) !void {
     defer allocator.free(result_fd);
     const journal = try std.fs.path.join(allocator, &.{ path, "worker", "operations" });
     defer allocator.free(journal);
-    try std.fs.cwd().makePath(journal);
-    const native_executable = try std.fs.selfExePathAlloc(allocator);
+    try std.Io.Dir.cwd().createDirPath(io, journal);
+    const native_executable = try std.process.executablePathAlloc(io, allocator);
     defer allocator.free(native_executable);
-    var child = std.process.Child.init(&.{ node_path, runtime, database, config.value.machine_id, cwd, descriptor, if (options.mock) "--mock" else if (options.api_key) "--api-key" else "--chatgpt", options.model, result_fd, request_fd, control_fd, native_executable }, allocator);
-    child.stdin_behavior = if (options.stdio) .Inherit else .Pipe;
-    child.stdout_behavior = if (options.stdio) .Inherit else .Pipe;
-    child.stderr_behavior = .Inherit;
-    try child.spawn();
-    // Only the Pi child inherits the writer lock, never shell tool descendants.
-    _ = std.posix.fcntl(held.handle, std.posix.F.SETFD, std.posix.FD_CLOEXEC) catch |err| {
-        _ = child.kill() catch {};
-        return err;
-    };
-    std.posix.close(requests[1]);
-    std.posix.close(results[0]);
-    std.posix.close(controls[1]);
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ node_path, runtime, database, config.value.machine_id, cwd, descriptor, if (options.mock) "--mock" else if (options.api_key) "--api-key" else "--chatgpt", options.model, result_fd, request_fd, control_fd, native_executable },
+        .stdin = if (options.stdio) .inherit else .pipe,
+        .stdout = if (options.stdio) .inherit else .pipe,
+        .inherit_files = &.{ held, .{ .handle = requests[1], .flags = .{ .nonblocking = false } }, .{ .handle = results[0], .flags = .{ .nonblocking = false } }, .{ .handle = controls[1], .flags = .{ .nonblocking = false } } },
+    });
+    Native.close(requests[1]);
+    Native.close(results[0]);
+    Native.close(controls[1]);
     child_ends_open = false;
-    const thread = std.Thread.spawn(.{}, worker.serve, .{ requests[0], results[1], controls[0], journal, config.value.machine_id }) catch |err| {
-        _ = child.kill() catch {};
+    const thread = std.Thread.spawn(.{}, worker.serve, .{ native, requests[0], results[1], controls[0], journal, config.value.machine_id }) catch |err| {
+        child.kill(io);
         return err;
     };
     worker_started = true;
     defer thread.join();
     if (!options.stdio) {
         defer {
-            if (child.stdin) |file| file.close();
+            if (child.stdin) |file| file.close(io);
             child.stdin = null;
-            _ = child.wait() catch {};
+            if (child.id != null) _ = child.wait(io) catch {};
+            Native.closeStreams(io, &child);
         }
-        return hub.serve(allocator, &child, options.port);
+        return hub.serve(io, allocator, &child, options.port);
     }
-    const term = try child.wait();
+    const term = try child.wait(io);
     switch (term) {
-        .Exited => |code| if (code != 0) return error.RuntimeFailed,
+        .exited => |code| if (code != 0) return error.RuntimeFailed,
         else => return error.RuntimeFailed,
     }
 }
 
-fn maintenance(allocator: std.mem.Allocator, options: Options) !void {
+fn maintenance(native: Native, allocator: std.mem.Allocator, options: Options) !void {
+    const io = native.io;
     const restoring = std.mem.eql(u8, options.command, "restore");
     if (options.stdio or options.mock or options.api_key or options.model.len != 0 or options.workspace != null or options.runtime != null or options.port != 52800) return error.InvalidArguments;
     const artifact = if (restoring) options.from orelse return error.InvalidArguments else options.output orelse return error.InvalidArguments;
     if (restoring) {
         if (options.directory == null or options.output != null or options.include_credentials) return error.InvalidArguments;
     } else if (options.from != null) return error.InvalidArguments;
-    const path = try state.directory(allocator, options.directory);
+    const path = try state.directory(native, allocator, options.directory);
     defer allocator.free(path);
-    if (restoring) try state.restoreDirectory(allocator, artifact, path);
-    var dir = try std.fs.cwd().openDir(path, .{ .iterate = true });
-    defer dir.close();
-    const held = try state.lock(dir);
-    defer held.close();
-    if (restoring) try state.markRestore(dir) else {
-        const config = try state.load(allocator, dir);
+    if (restoring) try state.restoreDirectory(io, allocator, artifact, path);
+    var dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
+    defer dir.close(io);
+    const held = try state.lock(io, dir);
+    defer held.close(io);
+    if (restoring) try state.markRestore(io, dir) else {
+        const config = try state.load(io, allocator, dir);
         config.deinit();
     }
-    const node_path = try runtime_paths.node(allocator);
+    const node_path = try runtime_paths.node(native, allocator);
     defer allocator.free(node_path);
-    const entry = try runtime_paths.entry(allocator, null, "backup-main.js");
+    const entry = try runtime_paths.entry(native, allocator, null, "backup-main.js");
     defer allocator.free(entry);
     const descriptor = try std.fmt.allocPrint(allocator, "{d}", .{held.handle});
     defer allocator.free(descriptor);
-    _ = try std.posix.fcntl(held.handle, std.posix.F.SETFD, 0);
-    defer _ = std.posix.fcntl(held.handle, std.posix.F.SETFD, std.posix.FD_CLOEXEC) catch {};
-    var child = std.process.Child.init(&.{ node_path, entry, options.command, path, artifact, descriptor, if (options.include_credentials) "include" else "exclude" }, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-    const term = try child.spawnAndWait();
+    var child = try std.process.spawn(io, .{
+        .argv = &.{ node_path, entry, options.command, path, artifact, descriptor, if (options.include_credentials) "include" else "exclude" },
+        .stdin = .ignore,
+        .inherit_files = &.{held},
+    });
+    const term = try child.wait(io);
     switch (term) {
-        .Exited => |code| if (code != 0) return error.BackupFailed,
+        .exited => |code| if (code != 0) return error.BackupFailed,
         else => return error.BackupFailed,
     }
 }
 
-fn launchClient(allocator: std.mem.Allocator, args: []const []const u8) !std.process.Child.Term {
-    const node_path = try runtime_paths.node(allocator);
+fn launchClient(native: Native, allocator: std.mem.Allocator, args: []const []const u8) !std.process.Child.Term {
+    const node_path = try runtime_paths.node(native, allocator);
     defer allocator.free(node_path);
-    const path = try runtime_paths.entry(allocator, null, "client.js");
+    const path = try runtime_paths.entry(native, allocator, null, "client.js");
     defer allocator.free(path);
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
@@ -268,29 +263,29 @@ fn launchClient(allocator: std.mem.Allocator, args: []const []const u8) !std.pro
         try argv.appendSlice(allocator, &.{ "--rex-command", args[2] });
         try argv.appendSlice(allocator, args[3..]);
     } else try argv.appendSlice(allocator, args[2..]);
-    var client = std.process.Child.init(argv.items, allocator);
-    return client.spawnAndWait();
+    var client = try std.process.spawn(native.io, .{ .argv = argv.items });
+    return client.wait(native.io);
 }
 
-pub fn main() void {
-    const allocator = std.heap.page_allocator;
-    const args = std.process.argsAlloc(allocator) catch std.process.exit(1);
-    defer std.process.argsFree(allocator, args);
+pub fn main(init: std.process.Init) void {
+    const allocator = init.gpa;
+    const native: Native = .{ .io = init.io, .environ = init.minimal.environ };
+    const args = init.minimal.args.toSlice(init.arena.allocator()) catch std.process.exit(1);
     if (args.len > 1 and (std.mem.eql(u8, args[1], "agent") or std.mem.eql(u8, args[1], "login") or std.mem.eql(u8, args[1], "rex"))) {
-        const term = launchClient(allocator, args) catch {
-            std.fs.File.stderr().writeAll("deck: client runtime unavailable; rebuild or check the installation\n") catch {};
+        const term = launchClient(native, allocator, args) catch {
+            std.Io.File.stderr().writeStreamingAll(init.io, "deck: client runtime unavailable; rebuild or check the installation\n") catch {};
             std.process.exit(1);
         };
         switch (term) {
-            .Exited => |code| std.process.exit(code),
+            .exited => |code| std.process.exit(code),
             else => std.process.exit(1),
         }
     }
     const options = parse(args[1..]) catch {
-        std.fs.File.stderr().writeAll("deck: invalid arguments; use --help\n") catch {};
+        std.Io.File.stderr().writeStreamingAll(init.io, "deck: invalid arguments; use --help\n") catch {};
         std.process.exit(2);
     };
-    run(allocator, options) catch |err| {
+    run(native, allocator, options) catch |err| {
         const message = switch (err) {
             error.RestoreIncomplete => "deck: incomplete restore; leave it offline and restore into a new directory\n",
             error.PathAlreadyExists => "deck: destination already exists; use a new backup/restore directory\n",
@@ -300,7 +295,7 @@ pub fn main() void {
             error.RuntimeFailed, error.RuntimeClosed, error.InvalidFrame, error.BrokenPipe => "deck: runtime unavailable; hub stopped; inspect pending work before restarting serve\n",
             else => "deck: command failed; check arguments, config and runtime\n",
         };
-        std.fs.File.stderr().writeAll(message) catch {};
+        std.Io.File.stderr().writeStreamingAll(init.io, message) catch {};
         std.process.exit(1);
     };
 }
@@ -314,10 +309,20 @@ test "parse explicit prototype flags and reject malformed options" {
 }
 
 test {
+    _ = Native;
+    _ = runtime_paths;
     _ = state;
     _ = worker;
+    _ = hub;
+    _ = @import("views.zig");
+    _ = @import("status_login.zig");
+    _ = @import("rex_open.zig");
+    _ = @import("rex_endpoint.zig");
+    _ = @import("rex.zig");
     _ = @import("worker_test.zig");
     _ = @import("worker_limits_test.zig");
     _ = @import("shell_test.zig");
     _ = @import("contracts_test.zig");
+    _ = @import("native_contracts_test.zig");
+    _ = @import("command_policy_test.zig");
 }

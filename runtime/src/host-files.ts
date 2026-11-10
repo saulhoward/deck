@@ -4,12 +4,22 @@ import type { Context } from "@earendil-works/chord";
 import { defineExtension, defineTool, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { FrameDecoder, encodeFrame } from "./protocol.js";
 import { ChatDoc, type Binding } from "./deck.js";
+import { validNativeRequest, validNativeReply, type NativeRequest } from "./native-contracts.js";
+import type { NativeArguments } from "./generated/contracts.js";
+export type { NativeResult as FileResult, NativeProgress as ShellProgress } from "./generated/contracts.js";
+import type { NativeResult as FileResult, NativeProgress as ShellProgress } from "./generated/contracts.js";
 
-type Args = Record<string, string | number | undefined>;
-export type FileResult = { ok: boolean; output: string; code?: string; exitCode?: number | null; truncated?: boolean };
-export type ShellProgress = { output: string; truncated: boolean; lossyUtf8: boolean };
+type Args = NativeArguments;
 export interface HostFiles { call(binding: Binding, id: string, operation: string, args: Args, signal?: AbortSignal, onProgress?: (progress: ShellProgress) => void): Promise<FileResult>; }
-type Pending = { reject: (error: Error) => void } & ({ kind: "result"; resolve: (result: FileResult) => void } | { kind: "progress"; resolve: (result: ShellProgress) => void });
+function nativeFrame(value: unknown): { frame: Buffer; request: NativeRequest } {
+  // Validate what will actually be sent, without normalizing or changing hash bytes.
+  try {
+    const frame = encodeFrame(value); const request: unknown = JSON.parse(frame.subarray(4).toString("utf8"));
+    if (validNativeRequest(request)) return { frame, request };
+  } catch { /* Payload-free, pre-send refusal. */ }
+  throw new Error("invalid: invalid native request; no operation sent");
+}
+type Pending = { request: NativeRequest; reject: (error: Error) => void } & ({ kind: "result"; resolve: (result: FileResult) => void } | { kind: "progress"; resolve: (result: ShellProgress) => void });
 
 export class PipeFiles implements HostFiles {
   private readonly reader;
@@ -23,30 +33,20 @@ export class PipeFiles implements HostFiles {
     this.reader = createReadStream("", { fd: readFd, autoClose: true });
     this.writer = createWriteStream("", { fd: writeFd, autoClose: true });
     this.control = controlFd === undefined ? undefined : createWriteStream("", { fd: controlFd, autoClose: true });
-    const fail = () => {
-      if (this.failed) return;
-      this.failed = true;
-      for (const item of this.pending.values()) item.reject(new Error("effect_uncertain: worker connection lost; issued effects may have happened"));
-      this.pending.clear(); this.close();
-    };
+    const fail = () => { void this.close(); };
     this.control?.on("error", fail);
     this.writer.on("error", fail); this.reader.on("error", fail);
     const decoder = this.reader.pipe(this.decoder);
     void (async () => {
       try {
         for await (const raw of decoder) {
-          const value = raw as { version?: unknown; id?: unknown; result?: FileResult; progress?: ShellProgress };
-          if (value.version !== 1 || typeof value.id !== "string") throw new Error("Invalid worker response");
-          const pending = this.pending.get(value.id);
-          if (!pending) throw new Error("Unexpected worker response");
-          if (pending.kind === "progress") {
-            const sample = value.progress;
-            if (value.result !== undefined || typeof sample?.output !== "string" || Buffer.byteLength(sample.output) > 2048 || typeof sample.truncated !== "boolean" || typeof sample.lossyUtf8 !== "boolean") throw new Error("Invalid worker progress");
-            this.pending.delete(value.id); pending.resolve({ output: sample.output, truncated: sample.truncated, lossyUtf8: sample.lossyUtf8 });
-          } else {
-            if (value.progress !== undefined || typeof value.result?.ok !== "boolean" || typeof value.result.output !== "string") throw new Error("Invalid worker result");
-            this.pending.delete(value.id); pending.resolve(value.result);
-          }
+          if (this.failed) break;
+          const id: unknown = (raw as { id?: unknown }).id;
+          const pending = typeof id === "string" ? this.pending.get(id) : undefined;
+          if (!pending || !validNativeReply(pending.request, raw)) throw new Error("Invalid worker response");
+          this.pending.delete(raw.id);
+          if (pending.kind === "progress") pending.resolve(raw.progress!);
+          else pending.resolve(raw.result!);
         }
       } catch { /* Fail closed, never resend an issued effect. */ }
       finally { fail(); }
@@ -55,25 +55,24 @@ export class PipeFiles implements HostFiles {
   private sample(binding: Binding, target: string): Promise<ShellProgress> | undefined {
     const id = `progress:${target}`;
     if (this.failed || [...this.pending.values()].filter((item) => item.kind === "progress").length >= 4 || this.pending.has(id)) return;
-    const frame = encodeFrame({ version: 1, id, ...binding, operation: "bash_progress", args: { target } });
+    const { frame, request } = nativeFrame({ version: 1, id, ...binding, operation: "bash_progress", args: { target } });
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { kind: "progress", resolve, reject });
-      this.writer.write(frame, (error) => {
-        if (error) { this.pending.get(id)?.reject(new Error("Progress unavailable")); this.pending.delete(id); }
-      });
+      this.pending.set(id, { request, kind: "progress", resolve, reject });
+      this.writer.write(frame, (error) => { if (error) void this.close(); });
     });
   }
   async call(binding: Binding, id: string, operation: string, args: Args, signal?: AbortSignal, onProgress?: (progress: ShellProgress) => void): Promise<FileResult> {
     signal?.throwIfAborted();
-    const processOperation = operation === "bash" || operation === "rex_allocate" || operation === "rex_inspect";
+    const processOperation = operation === "bash" || operation === "rex_allocate" || operation === "rex_inspect" || operation === "rex_resolve";
     if (processOperation && !this.control) throw new Error("offline: process cancellation channel unavailable");
     if (this.failed) throw new Error("offline: local worker unavailable");
     if ([...this.pending.values()].filter((item) => item.kind === "result").length >= 16 || this.pending.has(id)) throw new Error("busy: native operation capacity reached");
-    const frame = encodeFrame({ version: 1, id, ...binding, operation, args });
+    const { frame, request } = nativeFrame({ version: 1, id, ...binding, operation, args });
+    if (request.id !== id || request.operation === "bash_progress") throw new Error("invalid: invalid native request; no operation sent");
     let ended = false;
     const timer = operation === "bash" && onProgress ? setInterval(() => {
       if (ended || signal?.aborted) return;
-      void this.sample(binding, id)?.then((sample) => {
+      void this.sample({ machineId: request.machineId, cwd: request.cwd }, id)?.then((sample) => {
         if (!ended && !signal?.aborted) { try { onProgress(sample); } catch { /* Presentation cannot change an effect's outcome. */ } }
       }, () => {});
     }, 500) : undefined;
@@ -84,16 +83,17 @@ export class PipeFiles implements HostFiles {
         this.control!.write(bytes);
       };
       const clean = () => signal?.removeEventListener("abort", cancel);
-      this.pending.set(id, { kind: "result", resolve: (result) => { clean(); resolve(result); }, reject: (error) => { clean(); reject(error); } });
+      this.pending.set(id, { request, kind: "result", resolve: (result) => { clean(); resolve(result); }, reject: (error) => { clean(); reject(error); } });
       signal?.addEventListener("abort", cancel, { once: true });
       if (signal?.aborted) cancel();
-      this.writer.write(frame, (error) => {
-        if (error) { this.pending.get(id)?.reject(new Error("effect_uncertain: failed to send native operation")); this.pending.delete(id); }
-      });
+      this.writer.write(frame, (error) => { if (error) void this.close(); });
     }); } finally { ended = true; clearInterval(timer); }
   }
   close(): Promise<void> {
     if (this.closing) return this.closing;
+    this.failed = true;
+    for (const item of this.pending.values()) item.reject(new Error("effect_uncertain: worker connection lost; issued effects may have happened"));
+    this.pending.clear();
     const streams: { closed: boolean; once(event: "close", listener: () => void): unknown; destroy(): unknown }[] = [this.writer, this.reader, this.decoder, ...(this.control ? [this.control] : [])];
     this.closing = Promise.all(streams.map((stream) => new Promise<void>((resolve) => {
       if (stream.closed) resolve(); else stream.once("close", resolve);

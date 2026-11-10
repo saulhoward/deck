@@ -59,7 +59,7 @@ test("hub login supports prompt reply, duplicate start, cancellation and never e
     models.setProvider({ ...faux.provider, id: "openai", auth: { oauth: {
       name: "test", toAuth: async () => ({}), refresh: async (credential) => credential,
       login: async (interaction) => {
-        interaction.notify({ type: "info", message: "Test sign-in" });
+        for (let i = 0; i < 20; i++) interaction.notify({ type: "info", message: `Test sign-in ${i}`, access: "private-access" } as any);
         assert.equal(await interaction.prompt({ type: "manual_code", message: "Code", signal: interaction.signal }), "answer");
         return token();
       },
@@ -71,12 +71,30 @@ test("hub login supports prompt reply, duplicate start, cancellation and never e
       let state = login.snapshot();
       for (let i = 0; i < 100 && !("prompt" in state && state.prompt); i++) { await new Promise((resolve) => setTimeout(resolve, 1)); state = login.snapshot(); }
       assert.ok("prompt" in state && state.prompt);
+      assert.equal(state.events.length, 16); assert.doesNotMatch(JSON.stringify(state), /private-access/);
       login.answer("request-one", state.prompt.id, "answer");
       for (let i = 0; i < 100 && login.snapshot().status === "pending"; i++) await new Promise((resolve) => setTimeout(resolve, 1));
       assert.equal(login.snapshot().status, "done"); assert.equal((await store.read("openai"))?.type, "oauth");
       assert.doesNotMatch(JSON.stringify(login.snapshot()), /private-access|private-refresh/);
       login.start("request-two"); await login.cancel("request-two");
       assert.equal(login.snapshot().status, "cancelled");
+    } finally { await login.close(); }
+  });
+});
+
+test("malformed provider login events fail without exposing diagnostics or storing credentials", async () => {
+  await fixture(async (store) => {
+    const models = createModels({ credentials: store }); const faux = fauxProvider();
+    models.setProvider({ ...faux.provider, id: "openai", auth: { oauth: {
+      name: "test", toAuth: async () => ({}), refresh: async (credential) => credential,
+      login: async (interaction) => { interaction.notify({ type: "progress", message: "PRIVATE".repeat(40000) }); return token(); },
+    } } });
+    const login = new Login(models, "machine");
+    try {
+      login.start("request");
+      for (let i = 0; i < 100 && login.snapshot().status === "pending"; i++) await new Promise((resolve) => setTimeout(resolve, 1));
+      assert.deepEqual(login.snapshot(), { id: "request", status: "failed", events: [] });
+      assert.equal(await store.read("openai"), undefined);
     } finally { await login.close(); }
   });
 });

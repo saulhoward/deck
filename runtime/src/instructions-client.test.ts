@@ -33,7 +33,7 @@ test("SIGKILL after real Pi application/lost ACK: frozen import draft survives p
     try {
       const chunks = []; for await (const chunk of request) chunks.push(chunk);
       const value = JSON.parse(Buffer.concat(chunks).toString()); id = value.id; const { command, args } = value; let result: unknown;
-      if (command === "status") result = { hubId: runtime.hubId, chatId: args.chatId ?? chatId, mainChatId: String(runtime.main.id), model: {}, tools: "native-files", binding: advertised };
+      if (command === "status") result = { hubId: runtime.hubId, chatId: args.chatId ?? chatId, mainChatId: String(runtime.main.id), model: {}, tools: "native-files + bash", binding: advertised };
       else if (command === "history") result = { items: [], instructions: await runtime.instructionsStatus(String(args.chatId)) };
       else if (command === "instruction_status") result = await runtime.instructionsStatus(String(args.chatId), args.taskId);
       else {
@@ -72,7 +72,7 @@ for (const failure of ["malformed-ack", "cleanup"] as const) test(`import ${fail
   let repaired = false;
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk); const { id, command, args } = JSON.parse(Buffer.concat(chunks).toString()); let result: unknown;
-    if (command === "status") result = { hubId: "import-ack", chatId: "1", mainChatId: "1", model: {}, tools: "native-files", binding: { machineId: "worker", cwd: "/work" } };
+    if (command === "status") result = { hubId: "import-ack", chatId: "1", mainChatId: "1", model: {}, tools: "native-files + bash", binding: { machineId: "worker", cwd: "/work" } };
     else if (command === "history") result = { items: [] };
     else if (command === "instruction_status") result = { version: 1, chatId: "1", source: null, import: { taskId: "9", state: "running" } };
     else {
@@ -106,7 +106,7 @@ test("import save failure blocks initial send and retry; detach with a stalled A
     const chunks = []; for await (const chunk of request) chunks.push(chunk); const { id, command } = JSON.parse(Buffer.concat(chunks).toString());
     if (command === "import_instructions") { imports++; return; }
     if (command === "stop") stops++;
-    response.end(JSON.stringify({ version: 1, id, ok: true, result: command === "status" ? { hubId: "save-fail", chatId: "1", mainChatId: "1", model: {}, tools: "native-files", binding: { machineId: "worker", cwd: "/work" } } : { items: [] } }));
+    response.end(JSON.stringify({ version: 1, id, ok: true, result: command === "status" ? { hubId: "save-fail", chatId: "1", mainChatId: "1", model: {}, tools: "native-files + bash", binding: { machineId: "worker", cwd: "/work" } } : { items: [] } }));
   });
   const port = await listen(server);
   try {

@@ -6,13 +6,15 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { encodeFrame, FrameDecoder } from "./protocol.js";
+import { independentStdin } from "./native-stdin.test.support.js";
 
 const binary = process.env.DECK_TEST_BINARY;
 test("Zig init/supervisor: private state, IPC, reopen and inherited lock after supervisor death", { skip: !binary, timeout: 20_000 }, async () => {
   const directory = await mkdtemp(join(tmpdir(), "deck-supervisor-"));
   const state = join(directory, "new-state");
   const invoke = (...args: string[]) => spawnSync(binary!, [...args, "--directory", state], { encoding: "utf8" });
-  const launch = () => spawn(binary!, ["serve", "--stdio", "--mock", "--directory", state, "--runtime", resolve("runtime/dist/main.js")], { stdio: ["pipe", "pipe", "pipe"] });
+  let input = await independentStdin();
+  const launch = () => spawn(binary!, ["serve", "--stdio", "--mock", "--directory", state, "--runtime", resolve("runtime/dist/main.js")], { stdio: [input.reader, "pipe", "pipe"] });
   let writer: ReturnType<typeof launch> | undefined;
   try {
     assert.equal(invoke("init").status, 0);
@@ -22,10 +24,10 @@ test("Zig init/supervisor: private state, IPC, reopen and inherited lock after s
     assert.equal((await stat(state)).mode & 0o777, 0o700);
     assert.equal((await stat(join(state, "config.json"))).mode & 0o777, 0o600);
     writer = launch();
-    const frames = writer.stdout.pipe(new FrameDecoder());
+    const frames = writer.stdout!.pipe(new FrameDecoder());
     const values = frames[Symbol.asyncIterator]();
     const rawRequest = async (id: string, command: string, args = {}) => {
-      writer!.stdin.write(encodeFrame({ version: 1, id, command, args }));
+      input.writer.write(encodeFrame({ version: 1, id, command, args }));
       const frame = await values.next();
       assert.equal(frame.value.id, id);
       return frame.value;
@@ -50,20 +52,23 @@ test("Zig init/supervisor: private state, IPC, reopen and inherited lock after s
     const exited = once(writer, "exit");
     writer.kill("SIGKILL");
     await exited;
-    // Node still owns the inherited lock even though Zig is gone.
+    // Node still owns the inherited lock even though Zig is gone. Its input
+    // stays open independently of Node's ChildProcess exit cleanup.
+    assert.equal((await request("orphan", "status")).mainChatId, chatId);
     const stillBlocked = invoke("serve", "--stdio", "--mock");
     assert.notEqual(stillBlocked.status, 0); assert.match(stillBlocked.stderr, /running writer/);
-    writer.stdin.end();
+    input.writer.end();
     // EOF closes the writer; stdout closes only when that orphan child has exited.
     while (!(await values.next()).done) { /* drain */ }
+    input.close(); input = await independentStdin();
     writer = launch();
-    const reopened = writer.stdout.pipe(new FrameDecoder())[Symbol.asyncIterator]();
-    writer.stdin.write(encodeFrame({ version: 1, id: "reopen", command: "status" }));
+    const reopened = writer.stdout!.pipe(new FrameDecoder())[Symbol.asyncIterator]();
+    input.writer.write(encodeFrame({ version: 1, id: "reopen", command: "status" }));
     assert.equal((await reopened.next()).value.result.mainChatId, chatId);
-    const closed = once(writer, "close"); writer.stdin.end();
+    const closed = once(writer, "close"); input.writer.end();
     const [code] = await closed; assert.equal(code, 0);
   } finally {
-    writer?.stdin.end();
+    input.close();
     await rm(directory, { recursive: true, force: true });
   }
 });

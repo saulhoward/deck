@@ -10,6 +10,7 @@ import type { TaskId } from "@earendil-works/pi-durable";
 import { DeckRuntime } from "./deck.js";
 import { RexDoc, type RexPlan, type RexResult } from "./rex-allocation.js";
 import { validOpenArgs, validRexReply } from "./rex-open-contracts.js";
+import { rexSocketPath } from "./rex-endpoint.js";
 import { IMPLEMENTATION, model, provider } from "./instructions.test.support.js";
 import { serveIpc } from "./ipc.js";
 import { encodeFrame, FrameDecoder } from "./protocol.js";
@@ -18,6 +19,16 @@ const uuid = "12345678-1234-1234-1234-123456789abc";
 const target = { executable: "/tools/rex", server: "unix:///tmp/rex.sock", hostId: uuid, instanceId: uuid };
 const binding = { machineId: "worker", cwd: "/saved" };
 const fixtures = JSON.parse(await readFile(new URL("../../src/rex_open.test.json", import.meta.url), "utf8")) as { name: string; command: string; args: unknown; hubId?: string; result: unknown; valid: boolean }[];
+
+test("shared local Rex endpoint fixtures", async () => {
+  for (const invalid of ["unix:///\ud800", "unix:///\udfff"]) assert.equal(rexSocketPath(invalid), undefined);
+  const cases = JSON.parse(await readFile(new URL("../../src/rex_endpoint.test.json", import.meta.url), "utf8")) as { server: string; valid: boolean; same?: string }[];
+  for (const sample of cases) {
+    assert.equal(rexSocketPath(sample.server) !== undefined, sample.valid, sample.server);
+    assert.equal(validOpenArgs({ chatId: "2", requestId: uuid, port: 52800, target: { server: sample.server } }), sample.valid);
+    if (sample.same) assert.equal(rexSocketPath(sample.server), rexSocketPath(sample.same));
+  }
+});
 
 test("shared Rex open/read contracts reject malformed replies at serialized egress and ingress", () => {
   for (const fixture of fixtures) {
@@ -35,10 +46,16 @@ test("shared Rex open/read contracts reject malformed replies at serialized egre
 
 test("public open reuses running clients, replaces exited/missing ones, and explicitly retries uncertainty without input replay", async () => {
   const root = await mkdtemp(join(tmpdir(), "deck-rex-open-")); const { models } = provider();
-  let state = "running", failed = false; let inspectCalls = 0;
+  let state = "running", failed = false; let inspectCalls = 0, resolveCalls = 0;
+  let resolved: unknown = { ...target, private: "PRIVATE" }; const readIds = new Set<string>();
   const plans: RexPlan[] = [];
   const runtime = await DeckRuntime.open(join(root, "pi.sqlite"), { models, model, binding, implementation: IMPLEMENTATION, rexClient: "/tools/deck", environment: () => undefined, hostFiles: { call: async (saved, _id, operation, args) => {
     assert.deepEqual(saved, binding);
+    if (operation !== "rex_allocate") { assert.ok(BigInt(_id) >= 1n << 63n); assert.ok(!readIds.has(_id)); readIds.add(_id); }
+    if (operation === "rex_resolve") {
+      resolveCalls++; assert.deepEqual(JSON.parse(String(args.plan)), { server: target.server });
+      return { ok: true, code: "rex_resolved", output: JSON.stringify(resolved) };
+    }
     if (operation === "rex_inspect") {
       inspectCalls++; const query = JSON.parse(String(args.plan));
       return { ok: true, code: "rex_inspected", output: JSON.stringify({ version: 1, scope: query.scope, state, exitCode: state === "exited" ? 0 : null, revision: 1 }) };
@@ -53,9 +70,15 @@ test("public open reuses running clients, replaces exited/missing ones, and expl
     const openArgs = (first = false) => ({ chatId, requestId: randomUUID(), port: 52800, ...(first ? { target } : {}) });
     assert.equal((await runtime.terminalStatus(chatId)).status, "unallocated");
     assert.equal(await runtime.harness.snapshot(RexDoc, chat.id, context), undefined);
-    await assert.rejects(runtime.openTerminal(openArgs()), { code: "invalid" });
-    await assert.rejects(runtime.openTerminal({ ...openArgs(true), chatId: String(runtime.main.id) }), { code: "invalid" });
-    const request = openArgs(true), first = await runtime.openTerminal(request); await settled(first.taskId);
+    const request = { ...openArgs(), target: { server: target.server } };
+    await assert.rejects(runtime.openTerminal({ ...request, chatId: String(runtime.main.id) }), { code: "invalid" }); assert.equal(resolveCalls, 0);
+    await assert.rejects(runtime.openTerminal(request), { code: "invalid_response" }); assert.equal(plans.length, 0);
+    assert.equal(await runtime.harness.snapshot(RexDoc, chat.id, context), undefined);
+    resolved = { ...target, hostId: "bad" }; await assert.rejects(runtime.openTerminal(request), { code: "invalid_response" });
+    resolved = { ...target, server: "unix:///wrong.sock" }; await assert.rejects(runtime.openTerminal(request), { code: "invalid_response" });
+    resolved = target;
+    const first = await runtime.openTerminal(request); await settled(first.taskId);
+    assert.equal(resolveCalls, 4);
     assert.equal(first.status, "admitted"); assert.equal(plans.length, 1);
     assert.deepEqual(await runtime.openTerminal(request), first); assert.equal(inspectCalls, 0);
     let status = await runtime.terminalStatus(chatId); assert.equal(status.status, "allocated"); const original = status.binding!;
@@ -79,6 +102,7 @@ test("public open reuses running clients, replaces exited/missing ones, and expl
     await assert.rejects(runtime.openTerminal({ ...openArgs(true), target: { ...target, instanceId: randomUUID() } }), { code: "conflict" });
     assert.deepEqual((await runtime.history(chatId)).items, []);
     assert.equal((await runtime.listChats()).items.length, 2);
+    assert.equal(resolveCalls, 4); // Saved targets, retries and request replay do not rediscover defaults.
     // Wire validation happens before dispatch, and a lost/invalid response never
     // dispatches twice or emits arbitrary/private fields.
     const input = new PassThrough(), output = new PassThrough(), decoded = output.pipe(new FrameDecoder());

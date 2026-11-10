@@ -1,4 +1,5 @@
 import { isAbsolute } from "node:path";
+import { rexSocketPath } from "./rex-endpoint.js";
 import { AgentDoc, defineDoc, defineDocFamily, defineExtension, defineTask, type TaskId, type Tx, type ConversationId } from "@earendil-works/pi-durable";
 import { ChatDoc, type Binding } from "./deck.js";
 import type { HostFiles } from "./host-files.js";
@@ -27,7 +28,7 @@ export const RexRequest = defineDocFamily<{ hash: string; taskId: number }, stri
 const uuid = rexUuid;
 const absolute = (value: unknown): value is string => typeof value === "string" && Buffer.byteLength(value) <= 4096 && isAbsolute(value) && !value.includes("\0");
 export function rexTarget(value: RexTarget): RexTarget {
-  if (!value || !absolute(value.executable) || !absolute(value.client) || typeof value.server !== "string" || !value.server.startsWith("unix:///") || Buffer.byteLength(value.server.slice(7)) > 100 || /[?#%\0\r\n]/.test(value.server) || !uuid(value.hostId) || !uuid(value.instanceId) || !Number.isInteger(value.port) || value.port < 1 || value.port > 65535) throw new Error("Invalid explicit local Rex target");
+  if (!value || !absolute(value.executable) || !absolute(value.client) || typeof value.server !== "string" || rexSocketPath(value.server) === undefined || !uuid(value.hostId) || !uuid(value.instanceId) || !Number.isInteger(value.port) || value.port < 1 || value.port > 65535) throw new Error("Invalid explicit local Rex target");
   return { executable: value.executable, server: value.server, hostId: value.hostId, instanceId: value.instanceId, client: value.client, port: value.port };
 }
 export async function rexCoherent(tx: Tx, id: ConversationId, expected?: Binding): Promise<boolean> {

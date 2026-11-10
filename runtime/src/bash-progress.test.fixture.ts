@@ -25,7 +25,7 @@ if (process.env.DECK_BASH_PROGRESS_FAULT) {
   requests.write(encodeFrame({ version: 1, id: "5001", ...binding, operation: "bash", args: { command: 'echo $$ > child.pid; trap "" TERM; while :; do printf flood-output; done', timeout: 30 } }));
   await until(() => readFile(join(receipts, "5001.json"), "utf8").catch(() => ""), (text) => !!text);
   await new Promise((resolve) => setTimeout(resolve, 300));
-  for (let i = 0; i < 256; i++) requests.write(encodeFrame({ version: 1, id: `sample:${i}`, ...binding, operation: "bash_progress", args: { target: "5001" } }));
+  for (let i = 0; i < 256; i++) requests.write(encodeFrame({ version: 1, id: "progress:5001", ...binding, operation: "bash_progress", args: { target: "5001" } }));
   await new Promise((resolve) => setTimeout(resolve, 300));
   const started = Date.now(); const bytes = Buffer.alloc(8); bytes.writeBigUInt64BE(5001n); control.write(bytes);
   const settled = await until(() => readFile(join(receipts, "5001.json"), "utf8").then(JSON.parse), (receipt) => receipt.result?.code === "cancelled");

@@ -1,10 +1,17 @@
 import * as wire from "./generated/contracts.js";
+import { rexSocketPath } from "./rex-endpoint.js";
 import { validSafePiId, type ReplyContext } from "./mutation-contracts.js";
 
 export function validOpenArgs(value: unknown): value is wire.RexOpenArgs {
   if (!wire.validRexOpenArgs(value) || !validSafePiId(value.chatId)) return false;
   const target = value.target;
-  return !target || (target.executable.startsWith("/") && !target.executable.includes("\0") && Buffer.byteLength(target.executable) <= 4096 && target.server.startsWith("unix:///") && Buffer.byteLength(target.server.slice(7)) <= 100 && !/[?#%\0\r\n]/.test(target.server));
+  return !target || validTargetOptions(target);
+}
+export function validTargetOptions(value: unknown): value is wire.RexTargetOptions {
+  return wire.validRexTargetOptions(value) && (value.executable === undefined || (value.executable.startsWith("/") && !value.executable.includes("\0") && Buffer.byteLength(value.executable) <= 4096)) && (value.server === undefined || rexSocketPath(value.server) !== undefined);
+}
+export function validResolvedTarget(value: unknown): value is wire.RexOpenTarget {
+  return wire.validRexOpenTarget(value) && validTargetOptions(value);
 }
 export function validRexReadArgs(value: unknown): value is wire.RexReadArgs { return wire.validRexReadArgs(value) && validSafePiId(value.chatId); }
 export function validRexArgs(command: string, value: unknown): boolean {

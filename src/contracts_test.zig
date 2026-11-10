@@ -33,7 +33,7 @@ test "schema-derived Zig validators/codecs consume the shared positive and negat
         var value = (try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{})).value;
         if (fixture.object.get("set")) |set| {
             var it = set.object.iterator();
-            while (it.next()) |entry| try value.object.put(entry.key_ptr.*, entry.value_ptr.*);
+            while (it.next()) |entry| try value.object.put(allocator, entry.key_ptr.*, entry.value_ptr.*);
         }
         if (fixture.object.get("remove")) |remove| for (remove.array.items) |key| {
             _ = value.object.swapRemove(key.string);
@@ -43,7 +43,7 @@ test "schema-derived Zig validators/codecs consume the shared positive and negat
             const count: usize = @intCast(repeat.object.get("count").?.integer);
             const repeated = try allocator.alloc(u8, text.len * count);
             for (0..count) |i| @memcpy(repeated[i * text.len ..][0..text.len], text);
-            try value.object.put(repeat.object.get("field").?.string, .{ .string = repeated });
+            try value.object.put(allocator, repeat.object.get("field").?.string, .{ .string = repeated });
         }
         if (fixture.object.get("repeatItems")) |repeat| {
             const count: usize = @intCast(repeat.integer);
@@ -51,10 +51,10 @@ test "schema-derived Zig validators/codecs consume the shared positive and negat
             const item = value.object.get(field).?.array.items[0];
             var items = std.array_list.Managed(std.json.Value).init(allocator);
             for (0..count) |_| try items.append(item);
-            try value.object.put(field, .{ .array = items });
+            try value.object.put(allocator, field, .{ .array = items });
         }
         var found = false;
-        inline for (.{ "RexOpenTarget", "RexOpenArgs", "RexReadArgs", "RexOpenAck", "RexPublicBinding", "RexStatusSnapshot", "RequestEnvelope", "RexUuid", "RexSessionId", "RexWindowId", "RexBlockId", "ChatId", "NullableRexUuid", "RexAllocationPlan", "RexCreation", "RexInspectionScope", "RexInspectionQuery", "RexPresenceState", "RexInspectionObservation", "RexInspectionStatus", "RexInspectionSnapshot", "Sha256", "RexAllocationReceiptQuery", "RexAllocationReceiptState", "RexAllocationReceipt", "TransportId", "CommandError", "SuccessResponse", "ErrorResponse", "ResponseEnvelope", "PiId", "DurableRequestId", "CommandString", "AdmissionMode", "AdmitArgs", "CreateTaskArgs", "InstructionImportArgs", "AdmitAck", "CreateTaskAck", "InstructionImportAck", "StopArgs", "StopAck", "RexStartupArgs", "RexRegistrationObservation", "RexStartupAck", "ListChatsArgs", "ChatListKind", "ChatListLabel", "ChatListItem", "ChatListItems", "ChatListPage", "HistoryArgs", "HistoryEntry", "HistoryInputData", "HistoryAgentOrigin", "HistoryContentPart", "HistoryMessage", "HistoryMessages", "HistoryPage", "LiveViewArgs", "InstructionStatusArgs", "ActivitySnapshot", "ProgressGeneration", "ProgressTool", "ProgressSnapshot", "InstructionSourceView", "InstructionResultView", "InstructionTaskView", "InstructionSnapshot" }) |schema| {
+        inline for (.{ "HubCommand", "KnownCommandErrorCode", "FailureSource", "FailurePolicy", "NativeOperation", "NativeCorrelationId", "NativePath", "NativeText", "NativeArguments", "NativeReadArgs", "NativeWriteArgs", "NativeEditArgs", "NativeBashArgs", "NativeProgressArgs", "NativePlanArgs", "NativeRequest", "NativeResult", "NativeProgress", "NativeResponse", "NativeReceipt", "StatusArgs", "StatusSnapshot", "StatusBinding", "StatusInspection", "LoginStartArgs", "LoginStatusArgs", "LoginCancelArgs", "LoginReplyArgs", "LoginReplyAck", "LoginCancelAck", "LoginSnapshot", "LoginEvent", "LoginPrompt", "RexTargetOptions", "RexServer", "RexOpenTarget", "RexOpenArgs", "RexReadArgs", "RexOpenAck", "RexPublicBinding", "RexStatusSnapshot", "RequestEnvelope", "RexUuid", "RexSessionId", "RexWindowId", "RexBlockId", "ChatId", "NullableRexUuid", "RexAllocationPlan", "RexCreation", "RexInspectionScope", "RexInspectionQuery", "RexPresenceState", "RexInspectionObservation", "RexInspectionStatus", "RexInspectionSnapshot", "Sha256", "RexAllocationReceiptQuery", "RexAllocationReceiptState", "RexAllocationReceipt", "TransportId", "CommandError", "SuccessResponse", "ErrorResponse", "ResponseEnvelope", "PiId", "DurableRequestId", "CommandString", "AdmissionMode", "AdmitArgs", "CreateTaskArgs", "InstructionImportArgs", "AdmitAck", "CreateTaskAck", "InstructionImportAck", "StopArgs", "StopAck", "RexStartupArgs", "RexRegistrationObservation", "RexStartupAck", "ListChatsArgs", "ChatListKind", "ChatListLabel", "ChatListItem", "ChatListItems", "ChatListPage", "HistoryArgs", "HistoryEntry", "HistoryInputData", "HistoryAgentOrigin", "HistoryContentPart", "HistoryMessage", "HistoryMessages", "HistoryPage", "LiveViewArgs", "InstructionStatusArgs", "ActivitySnapshot", "ProgressGeneration", "ProgressTool", "ProgressSnapshot", "InstructionSourceView", "InstructionResultView", "InstructionTaskView", "InstructionSnapshot" }) |schema| {
             if (std.mem.eql(u8, name, schema)) {
                 check(schema, value, fixture.object.get("valid").?.bool, allocator) catch |err| {
                     std.debug.print("contract fixture failed: {s}\n", .{fixture.object.get("name").?.string});

@@ -20,13 +20,17 @@ pub fn validArgs(command: []const u8, args: V) bool {
     if (std.mem.eql(u8, command, "rex_open")) {
         if (!contracts.validRexOpenArgs(args) or !safeId(field(args, "chatId"))) return false;
         if (args.object.get("target")) |target| {
-            const executable = field(target, "executable").string;
-            const server = field(target, "server").string;
-            if (executable.len > 4096 or executable[0] != '/' or std.mem.indexOfScalar(u8, executable, 0) != null or !std.mem.startsWith(u8, server, "unix:///") or server.len > 107 or std.mem.indexOfAny(u8, server, "?#%\x00\r\n") != null) return false;
+            if (target.object.get("executable")) |exe| {
+                if (exe.string.len > 4096 or exe.string[0] != '/' or std.mem.indexOfScalar(u8, exe.string, 0) != null) return false;
+            }
+            if (target.object.get("server")) |server| {
+                if (!@import("rex_endpoint.zig").valid(server.string)) return false;
+            }
         }
         return true;
     }
-    return contracts.validRexReadArgs(args) and safeId(field(args, "chatId"));
+    if (std.mem.eql(u8, command, "rex_status") or std.mem.eql(u8, command, "rex_inspect")) return contracts.validRexReadArgs(args) and safeId(field(args, "chatId"));
+    return true;
 }
 pub fn validReply(command: []const u8, args: V, hub_id: V, result: V) bool {
     if (!std.mem.eql(u8, command, "rex_open") and !std.mem.eql(u8, command, "rex_status") and !std.mem.eql(u8, command, "rex_inspect")) return true;

@@ -1,0 +1,21 @@
+[
+ {"server":"unix:///tmp/rex.sock","valid":true},
+ {"server":"unix:///Users/example/Library/Application%20Support/rex/server.sock","valid":true,"same":"unix:///Users/example/Library/Application Support/rex/server.sock"},
+ {"server":"unix:///tmp/%F0%9F%8C%8D.sock","valid":true,"same":"unix:///tmp/🌍.sock"},
+ {"server":"unix:///tmp/%3f%23.sock","valid":true,"same":"unix:///tmp/%3F%23.sock"},
+ {"server":"unix:///tmp/%25.sock","valid":true},
+ {"server":"unix:///tmp/%00.sock","valid":false},
+ {"server":"unix:///tmp/%0A.sock","valid":false},
+ {"server":"unix:///tmp/%0d.sock","valid":false},
+ {"server":"unix:///tmp/%FF.sock","valid":false},
+ {"server":"unix:///tmp/%ED%A0%80.sock","valid":false},
+ {"server":"unix:///tmp/%.sock","valid":false},
+ {"server":"unix:///tmp/%2","valid":false},
+ {"server":"unix:///tmp/%+1.sock","valid":false},
+ {"server":"unix:///tmp/rex.sock?secret","valid":false},
+ {"server":"unix:///tmp/rex.sock#fragment","valid":false},
+ {"server":"unix://remote/tmp/rex.sock","valid":false},
+ {"server":"http://127.0.0.1:7297","valid":false},
+ {"server":"local","valid":false},
+ {"server":"unix:///aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","valid":false}
+]

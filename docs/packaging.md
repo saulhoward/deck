@@ -2,7 +2,7 @@
 
 The Nix package now includes the working **local prototype**, not just the Zig bootstrap CLI:
 
-- Zig executable, built with the pinned Zig 0.15.2;
+- Zig executable, built with the pinned stable Zig 0.17.1 and linked with the target platform's libc;
 - compiled ESM TypeScript under `libexec/deck/runtime/dist`;
 - the exact production npm closure from `package-lock.json`;
 - a wrapper selecting private Node 24 and the packaged runtime;
@@ -54,6 +54,8 @@ DECK_PACKAGE_BINARY="$PWD/result/bin/deck" node --test runtime/dist/package.test
 ```
 
 The installed check is skipped by ordinary `npm test` unless DECK_PACKAGE_BINARY is set. All automated inference is faux; the package smoke test never uses credentials or calls a provider. macOS builds allow local networking solely for loopback test listeners. This package was built/tested locally on arm64 macOS; the existing CI matrix also builds/checks its available macOS/Linux runner architectures. Other listed target architectures remain unverified until tested.
+
+The [Zig 0.17.1 migration](zig-toolchain.md) updates both package and development-shell compiler selections. Cross-compilation is a build check only, not evidence that another platform's process supervision or terminal behavior has been exercised.
 
 ## Runtime paths and updates
 

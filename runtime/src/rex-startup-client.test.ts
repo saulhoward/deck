@@ -15,7 +15,7 @@ for (const mode of ["unbound", "matched", "old_hub", "wrong_chat", "bad_history"
     assert.equal(value.hubId, "expected-hub");
     const reply = (result: object) => response.end(JSON.stringify({ version: 1, id: value.id, ok: true, result }));
     const fail = () => response.end(JSON.stringify({ version: 1, id: value.id, ok: false, error: { code: "conflict", message: "Startup refused" } }));
-    if (value.command === "status") reply({ hubId: "expected-hub", hubGuard: 1, ...(mode === "old_hub" ? {} : { rexStartup: 1 }), chatId: mode === "wrong_chat" ? "3" : "2", mainChatId: "1", provider: "faux", model: { provider: "faux", modelId: "faux-1" }, tools: "native" });
+    if (value.command === "status") reply({ hubId: "expected-hub", hubGuard: 1, ...(mode === "old_hub" ? {} : { rexStartup: 1 }), chatId: mode === "wrong_chat" ? "3" : "2", mainChatId: "1", provider: "faux", model: { provider: "faux", modelId: "faux-1" }, tools: "native-files + bash" });
     else if (value.command === "history") { if (mode === "bad_history") fail(); else reply({ items: [] }); }
     else if (value.command === "rex_startup") {
       startups++; assert.deepEqual(value.args, { chatId: "2", allocationId: allocation, blockId: block });

@@ -144,7 +144,7 @@ ${node.oneOf.map((child, index) => `    case${index}: ${zigType(child)},`).join(
     pub fn jsonParseFromValue(allocator: std.mem.Allocator, value: std.json.Value, options: std.json.ParseOptions) !@This() {
         var decode = options;
         decode.ignore_unknown_fields = true;
-${node.oneOf.map((child, index) => `        if (${fn(child)}(value)) return .{ .case${index} = try std.json.innerParseFromValue(${zigType(child)}, allocator, value, decode) };`).join("\n")}
+${node.oneOf.map((child, index) => `        if (${fn(child)}(value)) return .{ .case${index} = try std.json.innerParseFromValue(@FieldType(@This(), "case${index}"), allocator, value, decode) };`).join("\n")}
         return error.UnexpectedToken;
     }
     pub fn jsonStringify(self: @This(), writer: anytype) !void {

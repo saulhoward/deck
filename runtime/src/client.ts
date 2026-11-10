@@ -6,13 +6,13 @@ import { DraftStore, type Draft } from "./drafts.js";
 import { InstructionsDisplay, validInstructionId } from "./instructions-view.js";
 import { ProgressDisplay } from "./progress.js";
 import { loginClient } from "./login-client.js";
-import { HubError, responseResult } from "./responses.js";
+import { HubError } from "./responses.js";
+import { hubCommand } from "./hub-client.js";
 import { validMutationArgs } from "./mutation-contracts.js";
 import { validRexUuid } from "./generated/contracts.js";
-import { validDiscoveryArgs, validDiscoveryPage } from "./discovery-contracts.js";
-import { validHistoryArgs, validHistoryPage } from "./history-contracts.js";
-import { validRexArgs, validOpenArgs } from "./rex-open-contracts.js";
-import { validViewArgs } from "./view-contracts.js";
+import { validDiscoveryPage } from "./discovery-contracts.js";
+import { validHistoryPage } from "./history-contracts.js";
+import { validOpenArgs } from "./rex-open-contracts.js";
 
 type ObjectValue = Record<string, unknown>;
 function object(value: unknown): ObjectValue {
@@ -84,28 +84,14 @@ async function main() {
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid port");
   const target = Object.keys(rexTarget).length ? rexTarget : undefined;
-  if (target && !validOpenArgs({ chatId: selected ?? "1", requestId: randomUUID(), port, target })) throw new Error("Rex target requires absolute --rex, unix --server, --host-id and --instance-id");
+  if (target && !validOpenArgs({ chatId: selected ?? "1", requestId: randomUUID(), port, target })) throw new Error("Invalid Rex override: --rex must be absolute, --server a local Unix URL, and optional host/instance IDs full UUIDs");
   if ((rexCommand && (!selected || login || message !== undefined || rexAllocationId)) || (target && (login || rexAllocationId))) throw new Error("Rex commands require --task and cannot combine login, input or startup");
   const requireHubGuard = expectedHubId !== undefined;
   const rexBlockId = process.env.REX_BLOCK;
   if (rexAllocationId && (!expectedHubId || !selected || login || message !== undefined || !validMutationArgs("rex_startup", { chatId: selected, allocationId: rexAllocationId, blockId: rexBlockId }))) throw new Error("Rex startup requires an explicit hub/task and native full REX_BLOCK; no input sent");
   const transport = new AbortController();
   let detached = false;
-  const command = async (name: string, args: ObjectValue = {}) => {
-    if (name === "list_chats" && !validDiscoveryArgs(args)) throw new Error("Invalid chat discovery arguments; no request sent");
-    if (name === "history" && !validHistoryArgs(args)) throw new Error("Invalid history arguments; no request sent");
-    if (!validRexArgs(name, args)) throw new Error("Invalid Rex arguments; no request sent");
-    if (!validViewArgs(name, args)) throw new Error("Invalid live view arguments; no request sent");
-    if (!validMutationArgs(name, args)) throw new Error("Invalid mutation arguments; no request sent");
-    const id = randomUUID();
-    const response = await fetch(`http://127.0.0.1:${port}/v1/command`, {
-      method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ version: 1, id, command: name, args, ...(expectedHubId ? { hubId: expectedHubId } : {}) }),
-      signal: AbortSignal.any([transport.signal, AbortSignal.timeout(10_000)]),
-    });
-    if (!response.ok) throw new Error(`Hub HTTP ${response.status}`);
-    return object(responseResult(await response.json(), id, { command: name, args, hubId: expectedHubId }));
-  };
+  const command = async (name: string, args: ObjectValue = {}) => object(await hubCommand(port, name, args, expectedHubId, transport.signal));
   const historyPage = async (args: ObjectValue, limit: number) => {
     for (;;) {
       try {
@@ -115,18 +101,18 @@ async function main() {
         return { page, limit };
       }
       catch (error) {
-        if (!(error instanceof HubError) || error.code !== "too_large" || limit === 1) throw error;
+        if (!(error instanceof HubError) || error.policy.action !== "reduce_page" || limit === 1) throw error;
         limit = Math.max(1, Math.floor(limit / 2));
       }
     }
   };
-  if (login) return loginClient(command);
-  const status = await command("status", selected ? { chatId: selected } : {});
+  const status = await command("status", !login && selected ? { chatId: selected } : {});
   selected ??= String(status.mainChatId);
   if (typeof status.hubId !== "string") throw new Error("Hub lacks draft identity; restart the updated hub");
   if (expectedHubId && (status.hubId !== expectedHubId || (requireHubGuard && status.hubGuard !== 1))) throw new Error("Expected hub identity/guard unavailable; no input sent");
   if (rexAllocationId && (status.rexStartup !== 1 || status.chatId !== selected)) throw new Error("Rex startup capability/selected chat unavailable; no input sent");
   expectedHubId = status.hubId;
+  if (login) return loginClient(command);
   const runRex = async (action: string) => {
     if (status.hubGuard !== 1 || status.rexOpen !== 1) throw new Error("Hub lacks public Rex capability; no terminal requested");
     if (!["open", "reopen", "status", "inspect"].includes(action)) throw new Error("Use /rex open, /rex reopen, /rex status or /rex inspect");

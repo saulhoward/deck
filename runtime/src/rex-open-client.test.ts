@@ -49,7 +49,7 @@ for (const mode of ["admitted", "reused", "lost", "wrong_chat", "wrong_request",
     let text = ""; for await (const chunk of req) text += String(chunk);
     const request = JSON.parse(text); calls.push(request);
     let result: Record<string, unknown>;
-    if (request.command === "status") result = { hubId, hubGuard: 1, rexOpen: mode === "no_capability" ? 0 : 1, chatId: "2", mainChatId: "1" };
+    if (request.command === "status") result = { hubId, hubGuard: 1, rexOpen: mode === "no_capability" ? 0 : 1, chatId: "2", mainChatId: "1", tools: "offline" };
     else {
       assert.equal(request.command, "rex_open"); assert.equal(request.hubId, hubId); assert.equal(request.args.chatId, "2");
       if (mode === "lost") { res.destroy(); return; }

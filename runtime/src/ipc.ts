@@ -1,6 +1,7 @@
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { Readable, Writable } from "node:stream";
 import { ChatDoc, DeckError, type DeckRuntime } from "./deck.js";
+import { validStatusLoginArgs } from "./status-login-contracts.js";
 import { validOpenArgs, validRexReadArgs } from "./rex-open-contracts.js";
 import type { Login } from "./login.js";
 import { encodeFrame, FrameDecoder, FrameSizeError, PROTOCOL_VERSION } from "./protocol.js";
@@ -26,6 +27,7 @@ async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, 
     if (request.hubId !== runtime.hubId) throw new DeckError("conflict", "Hub identity changed; reconnect to the intended hub. No command applied");
   }
   const args = object(request.args ?? {});
+  if (!validStatusLoginArgs(String(request.command), args)) throw new DeckError("invalid", "Invalid status/login arguments");
   switch (request.command) {
     case "login_start": if (!login) throw new DeckError("invalid", "ChatGPT login requires the hub's default ChatGPT mode"); return login.start(text(args.requestId, "requestId"));
     case "login_status": return login?.snapshot() ?? { status: "unsupported" };
@@ -39,7 +41,12 @@ async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, 
     }
     case "status": {
       const chat = args.chatId === undefined ? runtime.main : await runtime.chat(text(args.chatId, "chatId"));
-      return { implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, rexStartup: 1, rexOpen: runtime.rexClient && runtime.localFiles ? 1 : 0, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding: await runtime.harness.snapshot(ChatDoc, chat.id, context), activity: await runtime.harness.inspect(context), provider: (await chat.agent(context)).model?.provider, model: (await chat.agent(context)).model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
+      const saved = await runtime.harness.snapshot(ChatDoc, chat.id, context);
+      const model = (await chat.agent(context)).model;
+      // Project Deck metadata without rewriting retained documents. Pi model
+      // parameters and global inspection records remain compatible opaque data.
+      const binding = saved && { machineId: saved.machineId, cwd: saved.cwd, kind: saved.kind, title: saved.title, ...(saved.parentChatId === undefined ? {} : { parentChatId: saved.parentChatId }), ...(saved.ownerTaskId === undefined ? {} : { ownerTaskId: saved.ownerTaskId }) };
+      return { implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, rexStartup: 1, rexOpen: runtime.rexClient && runtime.localFiles ? 1 : 0, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding, activity: await runtime.harness.inspect(context), provider: model?.provider, model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
     }
     case "rex_open": {
       if (request.hubId !== runtime.hubId || !validOpenArgs(args)) throw new DeckError("invalid", "Rex open requires valid arguments and explicit hub identity");

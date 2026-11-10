@@ -1,15 +1,19 @@
 import { randomUUID } from "node:crypto";
-import type { AuthEvent, AuthPrompt, Models } from "@earendil-works/pi-ai";
+import type { Models } from "@earendil-works/pi-ai";
+import type { LoginEvent, LoginPrompt } from "./generated/contracts.js";
+import { validLoginArgs, validLoginSnapshot } from "./status-login-contracts.js";
+import { projectLoginEvent, projectLoginPrompt } from "./login-view.js";
 import { DeckError } from "./deck.js";
 
 // One transient provider interaction, not another durable conversation or inbox.
 export class Login {
   private controller: AbortController | undefined;
   private job: Promise<void> | undefined;
-  private state: { id: string; status: "pending" | "done" | "failed" | "cancelled"; events: AuthEvent[]; prompt?: { id: string; type: AuthPrompt["type"]; message: string; options?: readonly { id: string; label: string }[] } } | undefined;
+  private state: { id: string; status: "pending" | "done" | "failed" | "cancelled"; events: LoginEvent[]; prompt?: LoginPrompt } | undefined;
   private reply: ((answer: string) => void) | undefined;
   constructor(private readonly models: Models, private readonly machineId: string) {}
   start(requestId: string) {
+    if (!validLoginArgs("login_start", { requestId })) throw new DeckError("invalid", "Invalid login arguments");
     if (this.state?.id === requestId) return this.snapshot();
     if (this.state?.status === "pending") throw new DeckError("conflict", "Another login is in progress");
     const controller = this.controller = new AbortController();
@@ -17,10 +21,10 @@ export class Login {
     const timer = setTimeout(() => controller.abort(), 10 * 60_000);
     this.job = this.models.login("openai", "oauth", {
       signal: controller.signal,
-      notify: (event) => { state.events.push(event); if (state.events.length > 16) state.events.shift(); },
+      notify: (event) => { state.events.push(projectLoginEvent(event)); if (state.events.length > 16) state.events.shift(); },
       prompt: (prompt) => new Promise<string>((resolve, reject) => {
         const id = randomUUID();
-        state.prompt = { id, type: prompt.type, message: prompt.message, ...(prompt.type === "select" ? { options: prompt.options } : {}) };
+        state.prompt = projectLoginPrompt(id, prompt);
         const signal = prompt.signal ?? controller.signal;
         const cleanup = () => { signal.removeEventListener("abort", abort); if (state.prompt?.id === id) delete state.prompt; this.reply = undefined; };
         const abort = () => { cleanup(); reject(new Error("Login prompt cancelled")); };
@@ -32,13 +36,18 @@ export class Login {
     return this.snapshot();
   }
   snapshot() {
-    return this.state ? structuredClone(this.state) : { status: "idle" };
+    const state = this.state;
+    const view = state ? { id: state.id, status: state.status, events: state.events, ...(state.status === "pending" && state.prompt ? { prompt: state.prompt } : {}) } : { status: "idle" };
+    if (!validLoginSnapshot(view)) throw new DeckError("invalid_response", "Invalid login snapshot");
+    return structuredClone(view);
   }
   answer(loginId: string, promptId: string, answer: string) {
+    if (!validLoginArgs("login_reply", { loginId, promptId, answer })) throw new DeckError("invalid", "Invalid login arguments");
     if (this.state?.id !== loginId || this.state.prompt?.id !== promptId || !this.reply) throw new DeckError("conflict", "Login prompt is no longer active");
     this.reply(answer); return { accepted: true };
   }
   async cancel(loginId: string) {
+    if (!validLoginArgs("login_cancel", { loginId })) throw new DeckError("invalid", "Invalid login arguments");
     if (this.state?.id !== loginId) throw new DeckError("conflict", "Login interaction was replaced");
     await this.close(); return { cancelled: true };
   }

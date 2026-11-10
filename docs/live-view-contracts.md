@@ -1,6 +1,6 @@
 # Generated activity, progress and instruction read contracts
 
-The `activity`, `progress` and `instruction_status` commands and their optional `history` attachments now use generated JSON Schema contracts at every transport boundary. This completes the selected-chat live-view slice, **not** the remaining status/login/native-effect protocol migration. In particular, `status.activity` is a different, global Pi inspection shape and is not covered here.
+The `activity`, `progress` and `instruction_status` commands and their optional `history` attachments now use generated JSON Schema contracts at every transport boundary. This completes the selected-chat live-view slice, **not** the whole protocol migration. [Status/login](status-login-contracts.md) has since been migrated separately; native-effect envelopes and command-specific error policies remain. In particular, `status.activity` is a different, global Pi inspection shape and is not covered here.
 
 ## Wire shapes and scope
 

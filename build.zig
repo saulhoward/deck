@@ -7,11 +7,12 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true, // POSIX descriptor supervision on supported Unix hosts.
     });
     const exe = b.addExecutable(.{ .name = "deck", .root_module = module });
     b.installArtifact(exe);
     const run = b.addRunArtifact(exe);
-    if (b.args) |args| run.addArgs(args);
+    run.addPassthruArgs();
     b.step("run", "Run the bootstrap CLI").dependOn(&run.step);
     const tests = b.addTest(.{ .root_module = module });
     const run_tests = b.addRunArtifact(tests);

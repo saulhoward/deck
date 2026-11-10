@@ -2,7 +2,10 @@ import { randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { AgentDoc, type TaskId } from "@earendil-works/pi-durable";
 import { ChatDoc, DeckError, type DeckRuntime } from "./deck.js";
-import { REX_KIND, RexDoc, sameRexBinding, type RexInput, type RexBinding } from "./rex-allocation.js";
+import { validResolvedTarget, validTargetOptions } from "./rex-open-contracts.js";
+import { rexSocketPath } from "./rex-endpoint.js";
+import type { RexOpenTarget, RexTargetOptions } from "./generated/contracts.js";
+import { REX_KIND, RexDoc, sameRexBinding, rexCoherent, type RexInput, type RexBinding } from "./rex-allocation.js";
 import { validRexAllocationPlan, validRexInspectionQuery, validRexInspectionObservation, validRexInspectionSnapshot, type RexInspectionQuery, type RexInspectionObservation, type RexInspectionSnapshot } from "./generated/contracts.js";
 import type { HostFiles } from "./host-files.js";
 import { RECONCILE_KIND, reconciledBinding } from "./rex-reconciliation.js";
@@ -12,6 +15,29 @@ export class RexInspector {
   private readonly active = new Set<string>();
   private nextId = 1n << 63n; // Disjoint from Pi safe-integer operation/task IDs.
   constructor(private readonly runtime: DeckRuntime, private readonly host?: HostFiles) {}
+  private readId(): string {
+    if (this.nextId >= 1n << 64n) throw new DeckError("busy", "Rex read correlation exhausted; reconnect the native worker");
+    return String(this.nextId++);
+  }
+  async resolveTarget(id: string, options: RexTargetOptions): Promise<RexOpenTarget> {
+    if (!validTargetOptions(options)) throw new DeckError("invalid", "Invalid local Rex overrides");
+    const chat = await this.runtime.chat(id);
+    if (this.active.has(id) || this.active.size >= 4) throw new DeckError("busy", "Rex read capacity reached");
+    this.active.add(id);
+    try {
+      const binding = await chat.commit(async (tx) => {
+        if (!await rexCoherent(tx, chat.id)) throw new DeckError("invalid", "Rex open requires a managed ownerless task and coherent saved worker/cwd");
+        const saved = await tx.doc(ChatDoc, chat.id); return { machineId: saved.machineId, cwd: saved.cwd };
+      }, context);
+      if (!this.host) throw new DeckError("offline", "Rex discovery requires the assigned native worker");
+      const result = await this.host.call(binding, this.readId(), "rex_resolve", { plan: JSON.stringify(options) }).catch(() => undefined);
+      if (!result?.ok) throw new DeckError(result?.code === "busy" ? "busy" : "offline", "Local Rex unavailable: put rex on the hub's PATH and start its local server, or supply explicit target overrides; no terminal requested");
+      let target: unknown;
+      try { if (result.code === "rex_resolved" && !result.truncated && Buffer.byteLength(result.output) <= 16 * 1024) target = JSON.parse(result.output); } catch { /* Payload-free error below. */ }
+      if (!validResolvedTarget(target) || (options.executable !== undefined && target.executable !== options.executable) || (options.server !== undefined && rexSocketPath(options.server) !== rexSocketPath(target.server)) || (options.hostId !== undefined && target.hostId !== options.hostId) || (options.instanceId !== undefined && target.instanceId !== options.instanceId)) throw new DeckError("invalid_response", "Invalid Rex target discovery response; no terminal requested");
+      return target;
+    } finally { this.active.delete(id); }
+  }
   async inspect(id: string, signal?: AbortSignal): Promise<RexInspectionSnapshot> {
     const runtime = this.runtime; const chat = await runtime.chat(id);
     if (this.active.has(id) || this.active.size >= 4) throw new DeckError("busy", "Rex inspection capacity reached; retry the read later");
@@ -60,10 +86,10 @@ export class RexInspector {
       if (!validRexInspectionQuery(query) || Buffer.byteLength(JSON.stringify(query)) > 16 * 1024) return finish("conflict");
       if (signal?.aborted) return finish("cancelled");
       if (!this.host) return finish("unavailable");
-      if (this.nextId >= 1n << 64n) throw new DeckError("busy", "Rex inspection correlation exhausted; reconnect the native worker");
+      const readId = this.readId();
       let observation: RexInspectionObservation = { version: 1, scope, state: "inconclusive", exitCode: null, revision: null };
       try {
-        const result = await this.host.call(input.binding, String(this.nextId++), "rex_inspect", { plan: JSON.stringify(query) }, signal);
+        const result = await this.host.call(input.binding, readId, "rex_inspect", { plan: JSON.stringify(query) }, signal);
         if (result.ok && result.code === "rex_inspected" && !result.truncated && Buffer.byteLength(result.output) <= 16 * 1024) {
           const value: unknown = JSON.parse(result.output);
           if (validRexInspectionObservation(value) && Object.entries(scope).every(([key, expected]) => value.scope[key as keyof typeof scope] === expected) && ((value.state === "exited") === (value.exitCode !== null))) observation = value;

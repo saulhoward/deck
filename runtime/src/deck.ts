@@ -9,8 +9,8 @@ import { projectProgress } from "./progress.js";
 import { configurationIdle, importingInstructions, instructionHash, instructionImport, IMPORT_KIND, InstructionRequest, InstructionSourceDoc, type InstructionImportResult } from "./instruction-import.js";
 import { RexInspector } from "./rex-inspection.js";
 import { rexReconciliation, RexReconcileRequest, allocationRequest, type ReconcileResult } from "./rex-reconciliation.js";
-import { validOpenArgs } from "./rex-open-contracts.js";
-import { validRexAllocationPlan, validRexAllocationReceiptQuery, type RexOpenArgs, type RexOpenAck, type RexStatusSnapshot, type ChatListPage, type ActivitySnapshot } from "./generated/contracts.js";
+import { validOpenArgs, validResolvedTarget } from "./rex-open-contracts.js";
+import { validRexAllocationPlan, validRexAllocationReceiptQuery, type RexOpenArgs, type RexOpenAck, type RexStatusSnapshot, type ChatListPage, type ActivitySnapshot, type KnownCommandErrorCode } from "./generated/contracts.js";
 import { prefixUnits } from "./view-text.js";
 import { REX_KIND, rexAllocation, RexDoc, RexRequest, rexCoherent, rexTarget, rexUuid, rexBlock, rexStartup, type RexInput, type RexTarget, type RexResult } from "./rex-allocation.js";
 import { bindImplementation, checkCompatibility, defaultImplementation, stampImplementation } from "./compatibility.js";
@@ -39,7 +39,7 @@ const TaskRequest = defineDocFamily<{ hash: string; chatId: number }, string>({
 });
 const Identity = defineDoc<{ id: string }>({ kind: "deck.identity", version: 1, scope: "session", initial: () => ({ id: randomUUID() }), checkpointWhen: () => true });
 export class DeckError extends Error {
-  constructor(public readonly code: "conflict" | "offline" | "not_found" | "invalid" | "auth_required" | "busy" | "settings_changed" | "invalid_response", message: string) { super(message); }
+  constructor(public readonly code: KnownCommandErrorCode, message: string) { super(message); }
 }
 function positiveId(id: string, kind: string): number {
   const value = Number(id);
@@ -314,9 +314,10 @@ export class DeckRuntime {
     const doc = await this.harness.snapshot(RexDoc, chat.id, context);
     const prior = doc?.taskId ? await this.harness.getTask(doc.taskId as TaskId, context) : undefined;
     const original = prior?.input as RexInput | undefined;
-    const target = args.target ?? original?.plan;
-    if (!target) throw new DeckError("invalid", "First open requires explicit Rex executable, Unix server, host and instance IDs");
-    if (original && args.target && (["executable", "server", "hostId", "instanceId"] as const).some((key) => args.target![key] !== original.plan[key])) throw new DeckError("conflict", "Rex target differs from the saved attempt; server migration is not supported");
+    if (original && args.target && (["executable", "server", "hostId", "instanceId"] as const).some((key) => args.target![key] !== undefined && args.target![key] !== original.plan[key])) throw new DeckError("conflict", "Rex target differs from the saved attempt; server migration is not supported");
+    // Only first open resolves defaults. Never silently retarget saved attempts
+    // after PATH/default server changes, nor resolve on the client's computer.
+    const target = original?.plan ?? (validResolvedTarget(args.target) ? args.target : await this.inspector.resolveTarget(args.chatId, args.target ?? {}));
     const saved = rexTarget({ ...target, client: this.rexClient, port: args.port });
     const ack = (taskId: number, status: RexOpenAck["status"]): RexOpenAck => ({ version: 1, chatId: args.chatId, requestId: args.requestId, taskId: String(taskId), status, completion: "not_waited", bestEffort: true });
     // Retrieving an admitted request does not inspect/create or rewrite its plan.

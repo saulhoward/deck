@@ -35,6 +35,8 @@ Ask: “Write hello.txt containing hello, read it back, then change hello to goo
 
 ## Transport and ownership
 
+The [native schema/semantic boundary](client-foundations.md) now validates closed operation-specific requests before acceptance and bounded correlated results/progress before application. Invalid replies fence pending issued work as uncertain; explicit close refuses subsequent calls. Malformed new requests create no receipt or effect. Existing raw request hashes and retained receipt bytes are not normalized or migrated. There is no production environment RPC: Pi's hub-local environment fallback stays disabled.
+
 The supervisor creates a dedicated inherited request pipe and result pipe alongside the existing command pipes. The child dispatches bounded file requests independently of HTTP/command admission; a native operation never uses stdout or requires a client to keep polling. A Zig worker thread serializes local file operations, which also avoids interleaving Deck's own file-tool edits. Bash runs concurrently and can race with these edits, just like external processes. At most 16 native requests may be pending in TS; frames are bounded to 1 MiB. There is no new listener or task-local socket.
 
 Every tool resolves its saved ChatDoc binding. The worker independently verifies the machine ID against the initialized local machine before any file access. A task assigned elsewhere returns offline; it never runs against the local filesystem as a fallback. Connection loss fails outstanding issued operations as uncertain and rejects new requests as offline. Deck does not reconnect/resend effects automatically.

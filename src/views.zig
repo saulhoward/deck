@@ -29,6 +29,11 @@ fn instructionArgs(args: std.json.Value) bool {
     if (args.object.get("taskId")) |id| if (!safeId(id)) return false;
     return true;
 }
+pub fn validArgs(command: []const u8, args: std.json.Value) bool {
+    if (std.mem.eql(u8, command, "activity") or std.mem.eql(u8, command, "progress")) return liveArgs(args);
+    if (std.mem.eql(u8, command, "instruction_status")) return instructionArgs(args);
+    return true;
+}
 fn activity(value: std.json.Value, chat: ?std.json.Value) bool {
     if (!wire.validActivitySnapshot(value) or !same(value.object.get("chatId").?, chat)) return false;
     if (value.object.get("runTaskId")) |id| if (!safeId(id)) return false;
@@ -98,7 +103,7 @@ test "live view semantics and UTF-16 limits agree with TypeScript" {
             const count: usize = @intCast(repeat.object.get("count").?.integer);
             const repeated = try allocator.alloc(u8, text.len * count);
             for (0..count) |index| @memcpy(repeated[index * text.len ..][0..text.len], text);
-            try target.object.put(path[path.len - 1].string, .{ .string = repeated });
+            try target.object.put(allocator, path[path.len - 1].string, .{ .string = repeated });
         }
         const command = fixture.object.get("command").?.string;
         const args = fixture.object.get("args").?;

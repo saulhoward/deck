@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { encodeFrame, FrameDecoder } from "./protocol.js";
 import { RESTORE_MARKER } from "./backup.js";
+import { independentStdin } from "./native-stdin.test.support.js";
 const binary = process.env.DECK_TEST_BINARY;
 async function until(read: () => Promise<boolean>) {
   for (let index = 0; index < 500; index++) { if (await read()) return; await new Promise((resolve) => setTimeout(resolve, 10)); }
@@ -59,12 +60,13 @@ test("backup refuses a live Pi writer and its orphaned surviving child, without 
   assert.equal(invoke(["init", "--directory", state]).status, 0);
   const fixture = join(root, "main.mjs"); const pidPath = join(root, "writer.pid");
   await writeFile(fixture, `import {writeFileSync} from 'node:fs';writeFileSync(${JSON.stringify(pidPath)},String(process.pid));await import(${JSON.stringify(pathToFileURL(resolve("runtime/dist/main.js")).href)});`);
-  const supervisor = spawn(binary!, ["serve", "--stdio", "--mock", "--directory", state, "--runtime", fixture]); const closed = once(supervisor, "close");
-  let errors = ""; supervisor.stderr.on("data", (chunk) => { errors += String(chunk); });
-  const decoder = supervisor.stdout.pipe(new FrameDecoder()); const frames = decoder[Symbol.asyncIterator]();
+  const input = await independentStdin();
+  const supervisor = spawn(binary!, ["serve", "--stdio", "--mock", "--directory", state, "--runtime", fixture], { stdio: [input.reader, "pipe", "pipe"] }); const closed = once(supervisor, "close");
+  let errors = ""; supervisor.stderr!.on("data", (chunk) => { errors += String(chunk); });
+  const decoder = supervisor.stdout!.pipe(new FrameDecoder()); const frames = decoder[Symbol.asyncIterator]();
   try {
     await until(async () => { try { writer = Number(await readFile(pidPath, "utf8")); return !!writer; } catch { return false; } });
-    supervisor.stdin.write(encodeFrame({ version: 1, id: "ready", command: "status" }));
+    input.writer.write(encodeFrame({ version: 1, id: "ready", command: "status" }));
     let timer: ReturnType<typeof setTimeout> | undefined;
     try { assert.equal((await Promise.race([frames.next(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Writer readiness timed out")), 5000); })])).value.ok, true, errors); }
     finally { clearTimeout(timer); }
@@ -73,12 +75,12 @@ test("backup refuses a live Pi writer and its orphaned surviving child, without 
       const blocked = invoke(["backup", "--directory", state, "--output", join(root, "blocked")]);
       assert.notEqual(blocked.status, 0); assert.match(blocked.stderr, /running writer/); assert.ok(!(await readdir(root)).includes("blocked"));
     }
-    supervisor.stdin.end(); await closed; writer = undefined;
+    input.writer.end(); await closed; writer = undefined;
     const backed = invoke(["backup", "--directory", state, "--output", join(root, "complete")]); assert.equal(backed.status, 0, backed.stderr);
   } finally {
     if (writer) { try { process.kill(writer, "SIGKILL"); } catch { /* Already closed. */ } }
     if (supervisor.exitCode === null && supervisor.signalCode === null) supervisor.kill("SIGKILL");
-    decoder.destroy(); await closed; await rm(root, { recursive: true, force: true });
+    input.close(); decoder.destroy(); await closed; await rm(root, { recursive: true, force: true });
   }
 });
 

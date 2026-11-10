@@ -41,7 +41,7 @@
             npmDepsHash = "sha256-CE3g6O9SEi/7POrAepMoor5tqZ3IGZZlLmXR4AqAi+k=";
             npmFlags = [ "--ignore-scripts" ];
             nativeBuildInputs = [
-              pkgs.zig_0_15
+              pkgs.zig_0_17
               pkgs.makeWrapper
             ];
             buildPhase = ''
@@ -101,7 +101,7 @@
         {
           default = pkgs.mkShell {
             packages = [
-              pkgs.zig_0_15
+              pkgs.zig_0_17
               pkgs.nodejs_24
               pkgs.git
               pkgs.nixfmt

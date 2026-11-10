@@ -17,6 +17,52 @@
       "additionalProperties": true
     },
     "TransportId": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "HubCommand": { "enum": ["status", "login_start", "login_status", "login_reply", "login_cancel", "rex_open", "rex_status", "rex_inspect", "rex_startup", "activity", "progress", "list_chats", "create_task", "import_instructions", "instruction_status", "admit", "history", "stop"] },
+    "KnownCommandErrorCode": { "enum": ["conflict", "offline", "not_found", "invalid", "auth_required", "busy", "settings_changed", "invalid_response", "too_large", "runtime_failed"] },
+    "FailureSource": { "enum": ["local", "transport", "remote"] },
+    "FailurePolicy": {
+      "description": "Local client guidance, not a server receipt or proof of rollback. Unknown errors are conservative; no mutation is automatically retried.",
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "outcome": { "enum": ["not_sent", "read_only", "unconfirmed"] },
+        "action": { "enum": ["fix_request", "retry_read", "reduce_page", "retry_saved", "review_saved", "inspect_terminal", "observe_login", "poll_login", "explicit_action", "inspect_outcome"] },
+        "preserveDrafts": { "const": true }, "automaticMutationRetry": { "const": false }
+      }, "required": ["outcome", "action", "preserveDrafts", "automaticMutationRetry"]
+    },
+    "NativeOperation": { "enum": ["read", "write", "edit", "bash", "bash_progress", "rex_allocate", "rex_inspect", "rex_resolve", "rex_allocation_receipt"] },
+    "NativeCorrelationId": { "type": "string", "minLength": 1, "maxLength": 32 },
+    "NativePath": { "description": "Decoded UTF-8 byte limit and NUL refusal are additional semantic checks; paths are not a sandbox.", "type": "string", "maxLength": 4096 },
+    "NativeText": { "type": "string", "maxLength": 131072 },
+    "NativeArguments": {
+      "description": "Typed decoding view only. Each operation additionally requires its exact argument schema; never normalize this view for request hashing.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "path": { "$ref": "#/$defs/NativePath" }, "content": { "$ref": "#/$defs/NativeText" }, "oldText": { "$ref": "#/$defs/NativeText" }, "newText": { "$ref": "#/$defs/NativeText" }, "command": { "type": "string", "minLength": 1, "maxLength": 1048576 }, "timeout": { "type": "integer", "minimum": 1, "maximum": 300 }, "target": { "$ref": "#/$defs/PiId" }, "plan": { "type": "string", "minLength": 1, "maxLength": 262144 } }, "required": []
+    },
+    "NativeReadArgs": { "type": "object", "properties": { "path": { "$ref": "#/$defs/NativePath" } }, "required": ["path"], "additionalProperties": false },
+    "NativeWriteArgs": { "type": "object", "properties": { "path": { "$ref": "#/$defs/NativePath" }, "content": { "$ref": "#/$defs/NativeText" } }, "required": ["path", "content"], "additionalProperties": false },
+    "NativeEditArgs": { "type": "object", "properties": { "path": { "$ref": "#/$defs/NativePath" }, "oldText": { "$ref": "#/$defs/NativeText" }, "newText": { "$ref": "#/$defs/NativeText" } }, "required": ["path", "oldText", "newText"], "additionalProperties": false },
+    "NativeBashArgs": { "type": "object", "properties": { "command": { "type": "string", "minLength": 1, "maxLength": 1048576 }, "timeout": { "type": "integer", "minimum": 1, "maximum": 300 } }, "required": ["command"], "additionalProperties": false },
+    "NativeProgressArgs": { "type": "object", "properties": { "target": { "$ref": "#/$defs/PiId" } }, "required": ["target"], "additionalProperties": false },
+    "NativePlanArgs": { "type": "object", "properties": { "plan": { "type": "string", "minLength": 1, "maxLength": 262144 } }, "required": ["plan"], "additionalProperties": false },
+    "NativeRequest": {
+      "description": "Private local-worker v1 request. Safe Pi IDs, high-half ephemeral IDs, progress identities, operation-specific args and embedded Rex plans are semantic checks. Hash original bytes, not typed re-encoding.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/NativeCorrelationId" }, "machineId": { "$ref": "#/$defs/CommandString" }, "cwd": { "$ref": "#/$defs/NativePath" }, "operation": { "$ref": "#/$defs/NativeOperation" }, "args": { "$ref": "#/$defs/NativeArguments" } },
+      "required": ["version", "id", "machineId", "cwd", "operation", "args"]
+    },
+    "NativeResult": {
+      "description": "Compatible bounded native result projection. Optional metadata remains optional for retained results; unknown well-formed failure codes never establish absence or replay permission.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "ok": { "type": "boolean" }, "output": { "$ref": "#/$defs/NativeText" }, "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,79}$(?![\\s\\S])" }, "exitCode": { "anyOf": [{ "type": "integer", "minimum": 0, "maximum": 255 }, { "type": "null" }] }, "truncated": { "type": "boolean" } },
+      "required": ["ok", "output"]
+    },
+    "NativeProgress": { "type": "object", "properties": { "output": { "type": "string", "maxLength": 2048 }, "truncated": { "type": "boolean" }, "lossyUtf8": { "type": "boolean" } }, "required": ["output", "truncated", "lossyUtf8"], "additionalProperties": false },
+    "NativeResponse": {
+      "description": "Exactly one result/progress payload, matching the original request ID and operation, is required semantically without adding a new v1 discriminant.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/NativeCorrelationId" }, "result": { "$ref": "#/$defs/NativeResult" }, "progress": { "$ref": "#/$defs/NativeProgress" } }, "required": ["version", "id"]
+    },
+    "NativeReceipt": { "description": "Validation view of existing retained receipt bytes; never rewrite or normalize historical receipts through this codec.", "type": "object", "properties": { "hash": { "$ref": "#/$defs/Sha256" }, "result": { "anyOf": [{ "$ref": "#/$defs/NativeResult" }, { "type": "null" }] } }, "required": ["hash"], "additionalProperties": false },
     "CommandError": {
       "type": "object",
       "properties": {
@@ -54,6 +100,69 @@
       "description": "Nonempty well-formed wire string. Existing UTF-16 limits, nonblank text, absolute cwd and saved host authority remain semantic checks.",
       "type": "string", "minLength": 1, "maxLength": 200000
     },
+    "StatusArgs": {
+      "type": "object", "properties": { "chatId": { "$ref": "#/$defs/PiId" } }, "required": [], "additionalProperties": true
+    },
+    "StatusBinding": {
+      "description": "Read-only saved metadata projection; empty/offline bindings are not current worker authority. Older peers may omit display metadata.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "machineId": { "$ref": "#/$defs/ChatListLabel" }, "cwd": { "$ref": "#/$defs/ChatListLabel" }, "kind": { "$ref": "#/$defs/ChatListKind" }, "title": { "$ref": "#/$defs/ChatListLabel" }, "parentChatId": { "$ref": "#/$defs/PiId" }, "ownerTaskId": { "$ref": "#/$defs/PiId" } },
+      "required": ["machineId", "cwd"]
+    },
+    "StatusModel": {
+      "description": "Compatible Pi model reference, not a new persisted settings format. Provider-specific parameters stay opaque.",
+      "type": "object", "properties": { "provider": { "$ref": "#/$defs/ChatListLabel" }, "modelId": { "$ref": "#/$defs/ChatListLabel" } }, "required": [], "additionalProperties": true
+    },
+    "StatusInspection": {
+      "description": "Bounded outer Pi inspection view, NOT selected-chat ActivitySnapshot. Opaque Pi records/extensions are retained and never used as client lifecycle authority.",
+      "type": "object", "additionalProperties": true,
+      "properties": {
+        "scheduling": { "enum": ["paused", "running", "closing"] },
+        "tasks": { "type": "array", "maxItems": 4096, "items": { "type": "object", "properties": { "record": { "type": "object", "properties": {}, "required": [], "additionalProperties": true }, "state": { "type": "object", "properties": {}, "required": [], "additionalProperties": true } }, "required": ["record", "state"], "additionalProperties": true } },
+        "submissions": { "type": "array", "maxItems": 4096, "items": { "type": "object", "properties": {}, "required": [], "additionalProperties": true } }
+      }, "required": ["scheduling", "tasks", "submissions"]
+    },
+    "StatusSnapshot": {
+      "description": "Startup/selection identity. Optional capabilities are not inferred when missing on older peers; current producers emit all capabilities and implementation.",
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "implementation": { "$ref": "#/$defs/Sha256" }, "hubId": { "$ref": "#/$defs/TransportId" },
+        "hubGuard": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexStartup": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexOpen": { "type": "integer", "minimum": 0, "maximum": 1 },
+        "mainChatId": { "$ref": "#/$defs/PiId" }, "chatId": { "$ref": "#/$defs/PiId" }, "binding": { "$ref": "#/$defs/StatusBinding" },
+        "activity": { "$ref": "#/$defs/StatusInspection" }, "provider": { "$ref": "#/$defs/ChatListLabel" }, "model": { "$ref": "#/$defs/StatusModel" }, "tools": { "type": "string", "minLength": 1, "maxLength": 32 }
+      }, "required": ["hubId", "mainChatId", "chatId", "tools"]
+    },
+    "LoginId": { "description": "Opaque transient login/prompt identity. Legacy 200000 UTF-16-unit input limit remains semantic; not a durable mutation ID.", "$ref": "#/$defs/CommandString" },
+    "LoginText": { "type": "string", "maxLength": 200000 },
+    "LoginStartArgs": { "type": "object", "properties": { "requestId": { "$ref": "#/$defs/LoginId" } }, "required": ["requestId"], "additionalProperties": true },
+    "LoginStatusArgs": { "type": "object", "properties": {}, "required": [], "additionalProperties": true },
+    "LoginCancelArgs": { "type": "object", "properties": { "loginId": { "$ref": "#/$defs/LoginId" } }, "required": ["loginId"], "additionalProperties": true },
+    "LoginReplyArgs": { "type": "object", "properties": { "loginId": { "$ref": "#/$defs/LoginId" }, "promptId": { "$ref": "#/$defs/LoginId" }, "answer": { "$ref": "#/$defs/CommandString" } }, "required": ["loginId", "promptId", "answer"], "additionalProperties": true },
+    "LoginReplyAck": { "type": "object", "properties": { "accepted": { "const": true } }, "required": ["accepted"], "additionalProperties": false },
+    "LoginCancelAck": { "type": "object", "properties": { "cancelled": { "const": true } }, "required": ["cancelled"], "additionalProperties": false },
+    "LoginLinks": { "type": "array", "maxItems": 64, "items": { "type": "object", "properties": { "url": { "$ref": "#/$defs/CommandString" }, "label": { "$ref": "#/$defs/LoginText" } }, "required": ["url"], "additionalProperties": false } },
+    "LoginOptions": { "type": "array", "maxItems": 64, "items": { "type": "object", "properties": { "id": { "$ref": "#/$defs/LoginId" }, "label": { "$ref": "#/$defs/LoginText" }, "description": { "$ref": "#/$defs/LoginText" } }, "required": ["id", "label"], "additionalProperties": false } },
+    "LoginEvent": { "oneOf": [
+      { "type": "object", "properties": { "type": { "const": "info" }, "message": { "$ref": "#/$defs/LoginText" }, "links": { "$ref": "#/$defs/LoginLinks" } }, "required": ["type", "message"], "additionalProperties": false },
+      { "type": "object", "properties": { "type": { "const": "auth_url" }, "url": { "$ref": "#/$defs/CommandString" }, "instructions": { "$ref": "#/$defs/LoginText" } }, "required": ["type", "url"], "additionalProperties": false },
+      { "type": "object", "properties": { "type": { "const": "device_code" }, "userCode": { "$ref": "#/$defs/CommandString" }, "verificationUri": { "$ref": "#/$defs/CommandString" }, "intervalSeconds": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }, "expiresInSeconds": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 } }, "required": ["type", "userCode", "verificationUri"], "additionalProperties": false },
+      { "type": "object", "properties": { "type": { "const": "progress" }, "message": { "$ref": "#/$defs/LoginText" } }, "required": ["type", "message"], "additionalProperties": false }
+    ] },
+    "LoginEvents": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/LoginEvent" } },
+    "LoginPrompt": { "oneOf": [
+      { "type": "object", "properties": { "type": { "const": "text" }, "id": { "$ref": "#/$defs/LoginId" }, "message": { "$ref": "#/$defs/LoginText" } }, "required": ["type", "id", "message"], "additionalProperties": false },
+      { "type": "object", "properties": { "type": { "const": "secret" }, "id": { "$ref": "#/$defs/LoginId" }, "message": { "$ref": "#/$defs/LoginText" } }, "required": ["type", "id", "message"], "additionalProperties": false },
+      { "type": "object", "properties": { "type": { "const": "manual_code" }, "id": { "$ref": "#/$defs/LoginId" }, "message": { "$ref": "#/$defs/LoginText" } }, "required": ["type", "id", "message"], "additionalProperties": false },
+      { "type": "object", "properties": { "type": { "const": "select" }, "id": { "$ref": "#/$defs/LoginId" }, "message": { "$ref": "#/$defs/LoginText" }, "options": { "$ref": "#/$defs/LoginOptions" } }, "required": ["type", "id", "message", "options"], "additionalProperties": false }
+    ] },
+    "LoginSnapshot": { "oneOf": [
+      { "type": "object", "properties": { "status": { "const": "idle" } }, "required": ["status"], "additionalProperties": false },
+      { "type": "object", "properties": { "status": { "const": "unsupported" } }, "required": ["status"], "additionalProperties": false },
+      { "type": "object", "properties": { "status": { "const": "pending" }, "id": { "$ref": "#/$defs/LoginId" }, "events": { "$ref": "#/$defs/LoginEvents" }, "prompt": { "$ref": "#/$defs/LoginPrompt" } }, "required": ["status", "id", "events"], "additionalProperties": false },
+      { "type": "object", "properties": { "status": { "const": "done" }, "id": { "$ref": "#/$defs/LoginId" }, "events": { "$ref": "#/$defs/LoginEvents" } }, "required": ["status", "id", "events"], "additionalProperties": false },
+      { "type": "object", "properties": { "status": { "const": "failed" }, "id": { "$ref": "#/$defs/LoginId" }, "events": { "$ref": "#/$defs/LoginEvents" } }, "required": ["status", "id", "events"], "additionalProperties": false },
+      { "type": "object", "properties": { "status": { "const": "cancelled" }, "id": { "$ref": "#/$defs/LoginId" }, "events": { "$ref": "#/$defs/LoginEvents" } }, "required": ["status", "id", "events"], "additionalProperties": false }
+    ] },
     "AdmissionMode": { "enum": ["steer", "followUp"] },
     "AdmitArgs": {
       "description": "Legacy v1 extensions remain accepted but are not forwarded to Pi; origin cannot be supplied through this command.",
@@ -238,14 +347,21 @@
     "RexBlockId": { "type": "string", "pattern": "^block:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\\s\\S])" },
     "ChatId": { "type": "string", "pattern": "^[1-9][0-9]{0,15}$(?![\\s\\S])" },
     "NullableRexUuid": { "anyOf": [{ "$ref": "#/$defs/RexUuid" }, { "type": "null" }] },
+    "RexServer": { "type": "string", "minLength": 1, "maxLength": 307 },
+    "RexTargetOptions": {
+      "description": "Optional first-open overrides. Omitted fields resolve on the assigned native worker; saved targets are reused on subsequent opens.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "executable": { "type": "string", "minLength": 1, "maxLength": 4096 }, "server": { "$ref": "#/$defs/RexServer" }, "hostId": { "$ref": "#/$defs/RexUuid" }, "instanceId": { "$ref": "#/$defs/RexUuid" } },
+      "required": []
+    },
     "RexOpenTarget": {
       "type": "object", "additionalProperties": false,
-      "properties": { "executable": { "type": "string", "minLength": 1, "maxLength": 4096 }, "server": { "type": "string", "minLength": 1, "maxLength": 107 }, "hostId": { "$ref": "#/$defs/RexUuid" }, "instanceId": { "$ref": "#/$defs/RexUuid" } },
+      "properties": { "executable": { "type": "string", "minLength": 1, "maxLength": 4096 }, "server": { "$ref": "#/$defs/RexServer" }, "hostId": { "$ref": "#/$defs/RexUuid" }, "instanceId": { "$ref": "#/$defs/RexUuid" } },
       "required": ["executable", "server", "hostId", "instanceId"]
     },
     "RexOpenArgs": {
       "type": "object", "additionalProperties": false,
-      "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "requestId": { "$ref": "#/$defs/RexUuid" }, "port": { "type": "integer", "minimum": 1, "maximum": 65535 }, "target": { "$ref": "#/$defs/RexOpenTarget" } },
+      "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "requestId": { "$ref": "#/$defs/RexUuid" }, "port": { "type": "integer", "minimum": 1, "maximum": 65535 }, "target": { "$ref": "#/$defs/RexTargetOptions" } },
       "required": ["chatId", "requestId", "port"]
     },
     "RexReadArgs": {
@@ -262,7 +378,7 @@
       "type": "object", "additionalProperties": false,
       "properties": {
         "machineId": { "type": "string", "minLength": 1, "maxLength": 200000 }, "cwd": { "type": "string", "minLength": 1, "maxLength": 4096 },
-        "server": { "type": "string", "minLength": 1, "maxLength": 107 }, "hostId": { "$ref": "#/$defs/RexUuid" }, "instanceId": { "$ref": "#/$defs/RexUuid" },
+        "server": { "$ref": "#/$defs/RexServer" }, "hostId": { "$ref": "#/$defs/RexUuid" }, "instanceId": { "$ref": "#/$defs/RexUuid" },
         "sessionId": { "$ref": "#/$defs/RexSessionId" }, "windowId": { "$ref": "#/$defs/RexWindowId" }, "blockId": { "$ref": "#/$defs/RexBlockId" },
         "hubId": { "$ref": "#/$defs/RexUuid" }, "chatId": { "$ref": "#/$defs/PiId" }, "taskId": { "$ref": "#/$defs/PiId" }, "readiness": { "const": "not_checked" }
       },
@@ -279,7 +395,7 @@
       "type": "object",
       "properties": {
         "executable": { "type": "string", "minLength": 1, "maxLength": 4096 },
-        "server": { "type": "string", "minLength": 1, "maxLength": 107 },
+        "server": { "$ref": "#/$defs/RexServer" },
         "hostId": { "$ref": "#/$defs/RexUuid" },
         "instanceId": { "$ref": "#/$defs/RexUuid" },
         "client": { "type": "string", "minLength": 1, "maxLength": 4096 },
@@ -298,7 +414,7 @@
       "type": "object",
       "properties": {
         "version": { "const": 1 },
-        "server": { "type": "string", "minLength": 1, "maxLength": 107 },
+        "server": { "$ref": "#/$defs/RexServer" },
         "hostId": { "$ref": "#/$defs/RexUuid" },
         "instanceId": { "$ref": "#/$defs/RexUuid" },
         "sessionId": { "$ref": "#/$defs/RexSessionId" },
@@ -315,7 +431,7 @@
     "RexInspectionScope": {
       "type": "object",
       "properties": {
-        "server": { "type": "string", "minLength": 1, "maxLength": 107 },
+        "server": { "$ref": "#/$defs/RexServer" },
         "hostId": { "$ref": "#/$defs/RexUuid" },
         "instanceId": { "$ref": "#/$defs/RexUuid" },
         "sessionId": { "$ref": "#/$defs/RexSessionId" },

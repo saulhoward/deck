@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,10 +14,14 @@ async function until<T>(read: () => Promise<T>, accept: (value: T) => boolean): 
 }
 
 test("public Rex CLI/HTTP uses packaged native effects for new, reuse, replacement and explicit unknown retry", { skip: !binary, timeout: 25_000 }, async () => {
-  const root = await mkdtemp(join(tmpdir(), "deck-open-native-")); const rex = await fakeRex(root); await writeFile(join(root, "views"), "0");
+  const root = await mkdtemp(join(tmpdir(), "deck-open-native-")), server = "unix:///tmp/deck%20rex-fake.sock";
+  const rex = await fakeRex(root, "", server, true); await writeFile(join(root, "views"), "0");
+  const bin = join(root, "bin"); await mkdir(bin); await symlink(process.execPath, join(bin, "node"));
   const probe = createServer(); probe.listen(0, "127.0.0.1"); await once(probe, "listening"); const address = probe.address(); assert.ok(address && typeof address !== "string"); const port = address.port;
   await new Promise<void>((resolve) => probe.close(() => resolve()));
-  const env = { ...process.env, OPENAI_API_KEY: "PRIVATE", DECK_CLIENT_STATE_DIRECTORY: join(root, "drafts") };
+  // An isolated PATH cannot fall through to the user's installed Rex. Routing
+  // and focus env must not escape into the native discovery/allocation CLI.
+  const env = { ...process.env, PATH: bin, REX_SERVER: "https://wrong.example", REX_HOME: "https://wrong.example", REX_SESSION: "PRIVATE", REX_BLOCK: "PRIVATE", OPENAI_API_KEY: "PRIVATE", DECK_CLIENT_STATE_DIRECTORY: join(root, "drafts") };
   assert.equal(spawnSync(binary!, ["init", "--directory", root], { env }).status, 0);
   const hub = spawn(binary!, ["serve", "--mock", "--directory", root, "--workspace", root, "--port", String(port)], { env });
   const closed = once(hub, "close"); let errors = ""; hub.stderr.on("data", (chunk) => { errors += String(chunk); }); hub.stdout.resume();
@@ -30,14 +34,26 @@ test("public Rex CLI/HTTP uses packaged native effects for new, reuse, replaceme
     await until(async () => errors, (value) => value.includes("hub listening"));
     const status = await command("status"); hubId = status.hubId; assert.equal(status.rexOpen, 1);
     const chatId = (await command("create_task", { title: "Rex public", requestId: "task", ...status.binding })).chatId;
-    const cli = (action: string, extra: string[] = []) => {
-      const child = spawnSync(binary!, ["rex", action, "--task", chatId, "--port", String(port), ...extra], { env, encoding: "utf8", timeout: 8000 });
-      assert.equal(child.status, 0, child.stderr); assert.doesNotMatch(child.stdout + child.stderr, /PRIVATE/); return child.stdout;
+    const cli = (action: string, extra: string[] = [], task = chatId, success = true) => {
+      const child = spawnSync(binary!, ["rex", action, "--task", task, "--port", String(port), ...extra], { env, encoding: "utf8", timeout: 8000 });
+      assert.equal(child.status, success ? 0 : 1, child.stderr); assert.doesNotMatch(child.stdout + child.stderr, /PRIVATE/); return child.stdout + child.stderr;
     };
     assert.match(cli("status"), /unallocated/);
-    assert.match(cli("open", ["--rex", rex, "--server", "unix:///tmp/deck-rex-fake.sock", "--host-id", REX_UUID, "--instance-id", REX_UUID]), /admitted/);
+    assert.match(cli("open", [], chatId, false), /Local Rex unavailable/); // Missing PATH executable, no task admitted.
+    await symlink(rex, join(bin, "rex"));
+    for (const mode of ["api_mismatch", "wrong_server", "inspect-identity", "resolve-remote", "resolve-tcp", "resolve-malformed"]) {
+      await writeFile(join(root, "mode"), mode);
+      // Wrong-host protection is an optional override, not guessed authority.
+      const overrides = mode === "wrong_server" ? ["--host-id", REX_UUID] : mode === "inspect-identity" ? ["--instance-id", REX_UUID] : [];
+      assert.match(cli("open", overrides, chatId, false), /Local Rex unavailable/);
+      assert.match(cli("status"), /unallocated/);
+    }
+    await assert.rejects(readFile(join(root, "created")), { code: "ENOENT" });
+    assert.deepEqual(await readdir(join(root, "worker/operations")), []);
+    await writeFile(join(root, "mode"), "api10");
+    assert.match(cli("open"), /admitted/);
     const settled = () => until(() => command("rex_status", { chatId }), (value) => value.status !== "pending");
-    let state = await settled(); assert.equal(state.status, "allocated"); const first = state.taskId;
+    let state = await settled(); assert.equal(state.status, "allocated"); assert.equal(state.binding.server, server); const first = state.taskId;
     assert.match(cli("open"), /reused/); assert.equal((await readFile(join(root, "created"), "utf8")).trim().split("\n").length, 1);
     assert.match(cli("inspect"), /running/);
     for (const mode of ["inspect-exited", "inspect-missing-terminal", "inspect-missing-session"]) {
@@ -53,16 +69,23 @@ test("public Rex CLI/HTTP uses packaged native effects for new, reuse, replaceme
     // Separate task starts with a failed creation, then explicitly makes a new attempt.
     const other = (await command("create_task", { title: "Unknown", requestId: "other", ...status.binding })).chatId;
     await writeFile(join(root, "mode"), "failed");
-    const target = { executable: rex, server: "unix:///tmp/deck-rex-fake.sock", hostId: REX_UUID, instanceId: REX_UUID };
+    // A legacy raw-space endpoint and Rex's encoded status endpoint refer to
+    // the same socket. Keep the saved spelling rather than rewriting records.
+    const target = { executable: rex, server: decodeURIComponent(server), hostId: REX_UUID, instanceId: REX_UUID };
     const args = { chatId: other, port, requestId: "00000000-0000-4000-8000-000000000001", target };
     const uncertain = await command("rex_open", args);
     const unknown = await until(() => command("rex_status", { chatId: other }), (value) => value.status !== "pending"); assert.equal(unknown.status, "uncertain");
     assert.deepEqual(await command("rex_open", args), uncertain);
     await writeFile(join(root, "mode"), "api10");
     const retry = await command("rex_open", { chatId: other, port, requestId: "00000000-0000-4000-8000-000000000002" }); assert.notEqual(retry.taskId, uncertain.taskId);
-    assert.equal((await until(() => command("rex_status", { chatId: other }), (value) => value.status !== "pending")).status, "allocated");
+    const retried = await until(() => command("rex_status", { chatId: other }), (value) => value.status !== "pending");
+    assert.equal(retried.status, "allocated"); assert.equal(retried.binding.server, target.server);
+    assert.match(cli("inspect", [], other), /running/);
+    const partial = (await command("create_task", { title: "Partial overrides", requestId: "partial", ...status.binding })).chatId;
+    assert.match(cli("open", ["--server", server], partial), /admitted/);
+    assert.equal((await until(() => command("rex_status", { chatId: partial }), (value) => value.status !== "pending")).status, "allocated");
     assert.deepEqual((await command("history", { chatId })).items, []); assert.deepEqual((await command("history", { chatId: other })).items, []);
-    assert.equal((await command("list_chats")).items.length, 3);
+    assert.equal((await command("list_chats")).items.length, 4);
   } finally { hub.kill("SIGTERM"); await closed; await rm(root, { recursive: true, force: true }); }
 });
 

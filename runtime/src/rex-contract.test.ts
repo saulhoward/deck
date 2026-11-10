@@ -3,7 +3,7 @@ import { execFile, spawn, spawnSync, type ChildProcess } from "node:child_proces
 import { once } from "node:events";
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,8 +49,10 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
   const root = await mkdtemp("/tmp/deck-rex-contract-"); await mkdir(join(root, "work with spaces 🌍"));
   const work = await realpath(join(root, "work with spaces 🌍"));
   const emptyConfig = join(root, "empty.lua"); await writeFile(emptyConfig, "", { mode: 0o600 });
-  const endpoint = `unix://${root}/rex.sock`;
-  const env = { HOME: root, PATH: "/usr/bin:/bin", TMPDIR: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), TERM: "xterm-256color", LANG: "en_US.UTF-8",
+  const local = join(root, "local Rex"), socket = join(local, "server.sock"); await mkdir(local);
+  const endpoint = encodeURI(`unix://${socket}`);
+  const bin = join(root, "bin"); await mkdir(bin); await symlink(rexBinary!, join(bin, "rex"));
+  const env = { HOME: root, PATH: `${bin}:/usr/bin:/bin`, REX_RUNTIME_DIR: local, TMPDIR: root, XDG_CONFIG_HOME: join(root, "config"), XDG_STATE_HOME: join(root, "state"), TERM: "xterm-256color", LANG: "en_US.UTF-8",
     DECK_CLIENT_STATE_DIRECTORY: join(root, "client"), DECK_NODE: process.execPath, DECK_RUNTIME_ROOT: resolve("."),
   };
   const rex = async (...args: string[]): Promise<string> => new Promise((accept, reject) => {
@@ -77,11 +79,11 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
   const childPid = async (sid: string, bid: string) => { const { child } = await inspectProcess(sid, bid); assert.ok(child); return child.pid; };
   const exit = async (sid: string, bid: string) => { const value = await until(() => inspectProcess(sid, bid), (value) => !!value.last_exit); assert.ok(value.last_exit); return value.last_exit; };
   try {
-    await until(async () => { try { await access(join(root, "rex.sock")); return true; } catch { return false; } }, Boolean);
+    await until(async () => { try { await access(socket); return true; } catch { return false; } }, Boolean);
     await t.test("explicit Unix endpoint has no sessions/tailnet and caller schemas advertise no idempotency key", async () => {
       const status = await json<{ endpoint: string; session_count: number; tailscale: { state: string }; you: { transport: string }; api_revision: number; rex_version: string }>("server", "status", "--json");
       assert.equal(status.endpoint, endpoint); assert.equal(status.session_count, 0); assert.equal(status.tailscale.state, "disabled"); assert.equal(status.you.transport, "unix");
-      assert.equal((await stat(join(root, "rex.sock"))).mode & 0o077, 0);
+      assert.equal((await stat(socket)).mode & 0o077, 0);
       assert.ok([8, 10].includes(status.api_revision), `Unvalidated Rex API ${status.api_revision}`);
       await assert.rejects(rex("api", "call", "session.view", JSON.stringify({ session_id: "session:00000000-0000-4000-8000-000000000001" })), /status=404 code=session_not_found/);
       t.diagnostic(`Rex ${status.rex_version}; API revision ${status.api_revision}; isolated Unix server`);
@@ -290,7 +292,9 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
       const info = await json<{ host_id: string; instance_id: string }>("server", "status", "--json");
       const before = await command("history", { chatId: task.chatId });
       const publicStatus = () => command("rex_status", { chatId: task.chatId });
-      const opened = await command("rex_open", { chatId: task.chatId, requestId: randomUUID(), port, target: { executable: rexBinary, server: endpoint, hostId: info.host_id, instanceId: info.instance_id } });
+      // No target: real PATH lookup and Rex's local default endpoint discovery,
+      // isolated by HOME/REX_RUNTIME_DIR, with percent-encoded socket spaces.
+      const opened = await command("rex_open", { chatId: task.chatId, requestId: randomUUID(), port });
       assert.equal(opened.status, "admitted");
       const allocated = async () => {
         const value = await until(publicStatus, (s) => s.status !== "pending"); assert.equal(value.status, "allocated");
@@ -299,6 +303,7 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
         return binding;
       };
       const first = await allocated(); sessionIds.push(first.sessionId);
+      assert.equal(first.server, endpoint); assert.equal(first.hostId, info.host_id); assert.equal(first.instanceId, info.instance_id);
       const cli = spawnSync(deckBinary!, ["rex", "open", "--task", task.chatId, "--port", String(port)], { env, encoding: "utf8", timeout: 5000 });
       assert.equal(cli.status, 0, cli.stderr); assert.match(cli.stdout, /reused/);
       assert.deepEqual((await publicStatus()).binding, first);
