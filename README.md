@@ -23,14 +23,14 @@ Remote hosts, jobs, and subagent terminals still need implementation. Local task
 ## Current workflow
 
 1. Start one hub for your state directory and workspace.
-2. Open the main chat to plan work. Find an existing task before creating another task.
-3. Use a task chat for a separate piece of work. Each task keeps its conversation, model settings, and workspace binding.
-4. Send input from a Deck client. You can use a normal terminal or an optional Rex task terminal. Both connect to the same hub.
+2. Open the hub chat to plan work. Find an existing task before creating another task.
+3. Inspect task chats read-only from the hub. Each task keeps its conversation, model settings, and workspace binding.
+4. Participate in a task by opening/reopening its Rex session. Its allocation-verified TUI is locked to that task. There is no standalone/non-Rex task participation mode.
 5. Review answers, tool results, and changed files. An accepted request is not completed work.
 6. Detach when you do not need the client. The hub continues the work. Reopen the same chat later.
 7. Use an explicit stop command to cancel work. Wait for outstanding effects to finish before changing settings or upgrading the hub.
 
-Pi stores each chat separately. Task answers do not automatically become new input to main. Rex owns terminals, not agents. Closing a Rex window does not delete the chat or stop hub-owned inference.
+Pi stores each chat separately. Task answers do not automatically become new input to the hub chat. Rex owns terminals, not agents. Closing a Rex window does not delete the chat or stop hub-owned inference.
 
 ## Build and try offline
 
@@ -65,15 +65,17 @@ Use another unused port if 52801 is occupied. The mock provider makes no externa
 
 ## Use the TUI
 
-Interactive terminals use the TUI by default. Open a saved task with:
+Interactive terminals use the TUI by default. The hub has teal status bars; Rex task clients use slate-blue bars and show `task / Rex locked`. Inspect a saved task read-only with:
 
 ```sh
 deck agent --task CHAT_ID
 ```
 
-Use `/tasks` to open the task picker. Move with `j/k` or arrows and press Enter to select. Use `n` for the next page, `g` for the first page, and Esc to close.
+In the hub, `/tasks` opens the task picker. Move with `j/k` or arrows and press Enter to inspect. Use `n` for the next page, `g` for the first page, and Esc to close. `/hub` returns to the hub chat. Inspection cannot edit, send, retry/discard task drafts, stop, or change task settings. Saved task requests remain untouched. Use `/rex open` to participate in its Rex client.
 
-Use `/task TITLE` to create a task on the current chat's saved workspace binding. Creation does not submit input or switch chats. The receipt shows its ID; use `/select ID` or the picker to open it. `/main` returns to main. Switching or creation refuses unsent prompt text and unresolved requests, rather than losing them. Send or clear the prompt first.
+From the hub chat, `/task TITLE` creates a task on the hub's saved workspace binding and then requests its Rex terminal. It does not submit input or switch the hub view. Creation and terminal allocation are separate: if Rex opening fails or is unconfirmed, the task remains saved and read-only here. Inspect it and explicitly open/reopen; never repeat creation to recover a terminal. Rex capability is required, with no local participation fallback.
+
+Rex task clients cannot list/create/select other tasks or return to the hub. Hub navigation/creation still refuses unsent prompt text and unresolved requests, rather than losing them. Send or clear the prompt first.
 
 | Action | Keys or command |
 | --- | --- |
@@ -84,8 +86,8 @@ Use `/task TITLE` to create a task on the current chat's saved workspace binding
 | Switch between chat and prompt | Tab or `Ctrl-W w` |
 | Scroll chat | `j/k`, arrows, Page Up/Down, or mouse wheel |
 | Read older or latest history | `:older`, `:latest` |
-| List or switch tasks | `/tasks`, `/select ID`, `/main` |
-| Create a task | `/task TITLE` |
+| Inspect tasks / return to hub (hub client only) | `/tasks`, `/select ID`, `/hub` |
+| Create a task and request Rex (hub chat only) | `/task TITLE` |
 | Inspect the selected task's Rex state | `/rex`; `s` refreshes status, `i` inspects presence |
 | Open/reopen the selected task in Rex | `/rex open`, or `o` in the Rex view |
 | Select a model | Esc, `/model`, Enter; then arrows or `j/k`, Enter to select, Esc to cancel |
@@ -95,6 +97,8 @@ Use `/task TITLE` to create a task on the current chat's saved workspace binding
 | Detach | `:q` or `Ctrl-C` |
 | Detach and lose unsaved editor text | `:q!` |
 | Show full key help | `:help` or F1 |
+
+Editing, submission, settings changes, retry/discard, and stop are available only in the hub chat or the assigned Rex task client, not in read-only inspection.
 
 The editor supports a Vim-style subset: motions, counts, delete/change/yank, visual selection, paste, undo, and redo. It is not full Vim. Enter adds a line; it does not submit. Pasted text never runs a command or submits input.
 
@@ -114,9 +118,9 @@ deck agent --no-tui --task CHAT_ID
 | Command | Purpose |
 | --- | --- |
 | `/help` | List commands |
-| `/tasks`, `/tasks more` | List saved chats |
-| `/select CHAT_ID`, `/main` | Select an existing chat |
-| `/task TITLE` | Create and select an independent task |
+| `/tasks`, `/tasks more` | Hub only: list saved chats |
+| `/select CHAT_ID`, `/hub` | Hub only: inspect a task / return to hub |
+| `/task TITLE` | Hub chat only: create a task and request its Rex terminal |
 | `/status`, `/activity` | Inspect settings, bindings, or activity |
 | `/older` | Read an older history page |
 | `/instructions load` | Import the selected chat's `AGENTS.md` while idle |
@@ -129,9 +133,9 @@ deck agent --no-tui --task CHAT_ID
 | `/stop` | Request stop for the selected chat |
 | `/exit`, `Ctrl-C` | Detach without stopping work |
 
-Enter submits a line or steers current work. Selection does not start or stop an agent. An unresolved active draft blocks selection changes.
+The same role restrictions apply in plain mode. A direct `--task` launch is a read-only hub inspector, not an alternative participation path. A plain client within a verified allocation-bound Rex launch remains task-locked. `/main` is an unadvertised compatibility alias for `/hub`, not a way out of a task client. Enter submits only in a writable chat. Selection does not start or stop an agent. An unresolved active draft blocks selection changes.
 
-For one-shot input, use `deck agent --message 'TEXT'`. This returns an admission receipt and detaches; it does not wait for an answer. `--message` always sends model input. It does not run slash commands. Redirected input also uses plain mode.
+For one-shot input to the hub chat, use `deck agent --message 'TEXT'`. This returns an admission receipt and detaches; it does not wait for an answer. `--message` always sends model input. It does not run slash commands. Redirected input also uses plain mode.
 
 ### Tasks and subagents
 
@@ -209,7 +213,7 @@ First open finds `rex` on the hub/native worker's PATH and discovers its running
 
 **Rex creation is best-effort.** A lost reply or concurrent request can leave duplicate or orphaned terminals. Inspect the attempt and Rex before explicitly trying again. Cleanup is manual. No automatic retry submits model input or repeats a native operation.
 
-Rex allocation supports independent task chats, not main or owned children. Managed launches use the TUI. Before enabling input, the client verifies its hub, chat, initial history, and allocation-bound native terminal ID. A failed or lost startup reply disables the client; it does not trigger a retry or submit input. The plain client remains available through an explicit `deck agent --no-tui --task CHAT_ID` launch.
+Rex allocation supports independent task chats, not main or owned children. Managed launches use the TUI. Before enabling input, the client verifies its hub, chat, initial history, and allocation-bound native terminal ID. A failed or lost startup reply disables the client; it does not trigger a retry or submit input. A direct `deck agent --no-tui --task CHAT_ID` launch inspects read-only. Plain task participation requires the same pinned hub/task/allocation and native `REX_BLOCK` startup verification as the TUI; plain mode is not a bypass.
 
 From the TUI, use `/rex` for allocation status and `i` for a fresh presence sample. These are separate from agent activity. Use `o` or `/rex open` for an explicit open/reopen. Reads do not create terminals. The panel does not poll continuously; `s` and `i` refresh it.
 
@@ -245,6 +249,10 @@ deck restore --from /path/to/new-backup --directory /path/to/new-state
 Destination paths must not exist; their parents must exist. These commands do not stop or resume work. Backup includes Pi state, config, and native receipts. It excludes the workspace, runtime, client drafts, and Rex objects. Stored credentials are excluded unless you add `--include-credentials`; environment-only keys are never copied.
 
 Restore keeps identities and workspace bindings. Do not run source and restored copies as separate hubs. An old backup can forget later effects without undoing them. Reconcile that difference before serving or retrying drafts. See [recovery and backup details](docs/DEVELOPER.md#recovery-and-backup).
+
+## Remote verification groundwork
+
+Remote worker/client connections are not enabled yet. `deck remote-check` can compare a Tailscale peer observation against an explicit private registration file. It does not connect a worker or expose the hub. See [registration and verification](docs/DEVELOPER.md#remote-verification-foundation) for the file format and limits.
 
 ## Limits and trust
 

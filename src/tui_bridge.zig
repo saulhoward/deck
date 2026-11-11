@@ -21,6 +21,8 @@ after_buf: [20]u8 = undefined,
 failed: bool = false,
 hub_id: ?[]const u8 = null,
 chat_id: ?[]const u8 = null,
+hub_chat_id: ?[]const u8 = null,
+client_mode: wire.TuiClientMode = .hub,
 
 pub fn start(native: Native, a: std.mem.Allocator, args: []const []const u8) !Bridge {
     const node = try paths.node(native, a);
@@ -63,6 +65,7 @@ pub fn deinit(self: *Bridge) void {
     self.output.deinit(self.a);
     if (self.hub_id) |id| self.a.free(id);
     if (self.chat_id) |id| self.a.free(id);
+    if (self.hub_chat_id) |id| self.a.free(id);
 }
 pub fn request(self: *Bridge, action: @FieldType(wire.TuiRequest, "action"), text: ?[]const u8, hold: ?bool) !bool {
     return self.requestConfigured(action, text, hold, null, null, null);
@@ -78,6 +81,7 @@ pub fn tasks(self: *Bridge, after: ?[]const u8) !bool {
 }
 fn requestConfigured(self: *Bridge, action: @FieldType(wire.TuiRequest, "action"), text: ?[]const u8, hold: ?bool, configuration: ?wire.ModelSettingsChange, chat_id: ?[]const u8, after: ?[]const u8) !bool {
     if (self.failed or self.pending != null) return false;
+    if (self.client_mode == .task and (action == .select or action == .tasks or action == .create)) return error.TaskLocked;
     self.sequence += 1;
     const id = try std.fmt.bufPrint(&self.id_buf, "{d}", .{self.sequence});
     var request_value: wire.TuiRequest = .{ .version = 1, .id = id, .action = action, .text = text, .hold = hold, .configuration = configuration, .chatId = chat_id, .after = after };
@@ -128,7 +132,12 @@ pub fn validReply(value: std.json.Value, expected: []const u8, hub_id: ?[]const 
     const chat = s.object.get("chatId").?.string;
     if ((std.fmt.parseInt(u64, chat, 10) catch return false) > 9007199254740991) return false;
     if (chat_id) |id| if (!std.mem.eql(u8, id, chat)) return false;
-    if (s.object.get("mainChatId")) |main_id| if (!safeId(main_id)) return false;
+    const hub_chat = s.object.get("hubChatId").?;
+    if (!safeId(hub_chat)) return false;
+    const task_mode = std.mem.eql(u8, s.object.get("clientMode").?.string, "task");
+    const at_hub = std.mem.eql(u8, chat, hub_chat.string);
+    if (task_mode and (at_hub or s.object.contains("tasks"))) return false;
+    if (!task_mode and !at_hub and s.object.get("draft").? != .null) return false;
     if (s.object.get("tasks")) |page| {
         var previous: u64 = 0;
         if (page.object.get("after")) |after| {
@@ -211,6 +220,8 @@ fn receive(self: *Bridge) !?std.json.Parsed(wire.TuiResponse) {
     errdefer parsed.deinit();
     if (parsed.value == .case0) {
         const s = parsed.value.case0.snapshot;
+        if (s.clientMode != self.client_mode) return error.InvalidFrame;
+        if (self.hub_chat_id) |id| if (!std.mem.eql(u8, id, s.hubChatId)) return error.InvalidFrame;
         if ((pending.action == .models or pending.action == .configure) and s.modelSettings == null) return error.InvalidFrame;
         if (pending.action == .tasks) {
             const page = s.tasks orelse return error.InvalidFrame;
@@ -219,6 +230,7 @@ fn receive(self: *Bridge) !?std.json.Parsed(wire.TuiResponse) {
         if ((pending.action == .rexStatus or pending.action == .rexInspect) and s.rex == null) return error.InvalidFrame;
         if (pending.action == .rexInspect and s.rex.?.inspection == null) return error.InvalidFrame;
         if (self.hub_id == null) self.hub_id = try self.a.dupe(u8, s.hubId);
+        if (self.hub_chat_id == null) self.hub_chat_id = try self.a.dupe(u8, s.hubChatId);
         if (self.chat_id == null or pending.action == .select) {
             const next = try self.a.dupe(u8, s.chatId);
             if (self.chat_id) |old| self.a.free(old);
@@ -348,7 +360,7 @@ test "task selection pins only the requested chat and owns correlation bytes" {
     var target = [_]u8{'2'};
     try std.testing.expect(try fixture.bridge.selectChat(&target));
     target[0] = '3';
-    try fixture.reply("{\"version\":1,\"id\":\"1\",\"ok\":true,\"snapshot\":{\"hubId\":\"hub\",\"chatId\":\"2\",\"title\":\"Task\",\"model\":\"mock\",\"tools\":\"offline\",\"activityKnown\":false,\"busy\":false,\"queued\":0,\"entries\":[],\"hasOlder\":false,\"historical\":false,\"preview\":\"\",\"notice\":\"\",\"draft\":null}}");
+    try fixture.reply("{\"version\":1,\"id\":\"1\",\"ok\":true,\"snapshot\":{\"clientMode\":\"hub\",\"hubChatId\":\"1\",\"hubId\":\"hub\",\"chatId\":\"2\",\"title\":\"Task\",\"model\":\"mock\",\"tools\":\"offline\",\"activityKnown\":false,\"busy\":false,\"queued\":0,\"entries\":[],\"hasOlder\":false,\"historical\":false,\"preview\":\"\",\"notice\":\"\",\"draft\":null}}");
     const selected = (try fixture.bridge.poll()).?;
     selected.deinit();
     try std.testing.expectEqualStrings("2", fixture.bridge.chat_id.?);
@@ -358,10 +370,43 @@ test "task selection pins only the requested chat and owns correlation bytes" {
     refused.deinit();
     try std.testing.expectEqualStrings("2", fixture.bridge.chat_id.?);
     try std.testing.expect(try fixture.bridge.request(.poll, null, false));
-    try fixture.reply("{\"version\":1,\"id\":\"3\",\"ok\":true,\"snapshot\":{\"hubId\":\"hub\",\"chatId\":\"1\",\"title\":\"Old\",\"model\":\"mock\",\"tools\":\"offline\",\"activityKnown\":false,\"busy\":false,\"queued\":0,\"entries\":[],\"hasOlder\":false,\"historical\":false,\"preview\":\"\",\"notice\":\"\",\"draft\":null}}");
+    try fixture.reply("{\"version\":1,\"id\":\"3\",\"ok\":true,\"snapshot\":{\"clientMode\":\"hub\",\"hubChatId\":\"1\",\"hubId\":\"hub\",\"chatId\":\"1\",\"title\":\"Old\",\"model\":\"mock\",\"tools\":\"offline\",\"activityKnown\":false,\"busy\":false,\"queued\":0,\"entries\":[],\"hasOlder\":false,\"historical\":false,\"preview\":\"\",\"notice\":\"\",\"draft\":null}}");
     try std.testing.expectError(error.InvalidFrame, fixture.bridge.poll());
     try std.testing.expectEqualStrings("2", fixture.bridge.chat_id.?);
     try std.testing.expect(fixture.bridge.failed);
+}
+
+test "task bridge pins client mode and hub chat identity and refuses navigation" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]bool{ false, true }) |change_mode| {
+        var fixture = try TestPipe.init();
+        defer fixture.deinit();
+        fixture.bridge.client_mode = .task;
+        try std.testing.expectError(error.TaskLocked, fixture.bridge.selectChat("1"));
+        try std.testing.expectError(error.TaskLocked, fixture.bridge.tasks(null));
+        try std.testing.expectError(error.TaskLocked, fixture.bridge.request(.create, "no", null));
+        const bases = try std.json.parseFromSlice(std.json.Value, a, @embedFile("contracts.test.json"), .{});
+        var snapshot = bases.value.object.get("bases").?.object.get("TuiSnapshot").?;
+        try snapshot.object.put(a, "clientMode", .{ .string = "task" });
+        try snapshot.object.put(a, "chatId", .{ .string = "2" });
+        var response = (try std.json.parseFromSlice(std.json.Value, a, "{\"version\":1,\"id\":\"1\",\"ok\":true}", .{})).value;
+        try response.object.put(a, "snapshot", snapshot);
+        try std.testing.expect(try fixture.bridge.request(.poll, null, false));
+        try fixture.reply(try std.json.Stringify.valueAlloc(a, response, .{}));
+        const first = (try fixture.bridge.poll()).?;
+        first.deinit();
+        try std.testing.expectEqualStrings("1", fixture.bridge.hub_chat_id.?);
+        try snapshot.object.put(a, if (change_mode) "clientMode" else "hubChatId", .{ .string = if (change_mode) "hub" else "3" });
+        try response.object.put(a, "snapshot", snapshot);
+        try response.object.put(a, "id", .{ .string = "2" });
+        try std.testing.expect(try fixture.bridge.request(.poll, null, false));
+        try fixture.reply(try std.json.Stringify.valueAlloc(a, response, .{}));
+        try std.testing.expectError(error.InvalidFrame, fixture.bridge.poll());
+        try std.testing.expect(fixture.bridge.failed);
+        try std.testing.expectEqualStrings("2", fixture.bridge.chat_id.?);
+    }
 }
 
 test "renderer boundary correlates transport, chat, hub and canonical history before display" {

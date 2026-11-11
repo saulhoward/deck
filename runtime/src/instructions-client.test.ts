@@ -26,7 +26,9 @@ test("SIGKILL after real Pi application/lost ACK: frozen import draft survives p
   const local = await clientEnv(); const directory = await mkdtemp(join(tmpdir(), "deck-import-client-")); const { models, faux } = provider(); let reads = 0; let bytes = ORIGINAL;
   const binding = { machineId: "original-worker", cwd: directory };
   const runtime = await DeckRuntime.open(join(directory, "pi.sqlite"), { models, model, implementation: IMPLEMENTATION, binding, environment: () => { throw new Error("No fallback"); }, hostFiles: { call: async () => { reads++; return { ok: true, output: bytes }; } } });
-  const target = await runtime.createTask("Target", binding); const chatId = String(target.id); const store = new DraftStore(runtime.hubId, local.env.DECK_CLIENT_STATE_DIRECTORY);
+  // Exercise import recovery in the writable hub chat. Direct task clients are
+  // now read-only unless their allocation-bound Rex startup has succeeded.
+  const target = runtime.main; const chatId = String(target.id); const store = new DraftStore(runtime.hubId, local.env.DECK_CLIENT_STATE_DIRECTORY);
   let advertised = binding; let committed = false; let taskId = ""; const imports: Record<string, unknown>[] = []; const clients: ReturnType<typeof launch>[] = [];
   const server = createServer(async (request, response) => {
     let id: string | undefined;

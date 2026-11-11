@@ -12,8 +12,8 @@ These are target requirements, not current remote/job support. No delivery dates
 
 ## Next implementation sequence
 
-1. **Implemented:** TUI task picker, creation/switching commands, Rex status/inspection, and explicit local open/reopen. Unsent prompts block switching/creation; saved requests retain exact retries.
-2. **Implemented:** allocation-bound TUI startup and managed interactive Rex TUI launches. Explicit `--no-tui` remains available.
+1. **Implemented:** distinct hub presentation, read-only task inspection, hub creation followed by Rex opening, and explicit status/inspection/reopen. Unsent prompts block hub navigation/creation; saved requests retain exact retries.
+2. **Implemented:** allocation-bound TUI startup and task-locked Rex clients. No cross-task navigation or non-Rex task participation. Explicit `--no-tui` follows the same role restrictions.
 3. Add verified registered-host connections and a secure path from remote TUI clients to the same hub. Open interactive task sessions on their assigned execution machines.
 4. Add named subagent TUI terminals inside the parent interactive task's session. Preserve Pi ownership and define direct-input rules separately.
 5. Implement per-run file capture and Pi scheduling. Reuse each job's task/chat, give each run its own admission identity, and prove that jobs and their children create no Rex objects.
@@ -34,7 +34,8 @@ Acceptance: record the tested provider, mode, platform, and limits without expos
 ### Client workflow
 
 - [x] Update CLI help for current TUI task and Rex commands.
-- [x] Add task discovery, creation, and selection inside the TUI. Preserve unsent editor text and unresolved drafts. Reject stale replies after selection changes.
+- [x] Add task discovery, creation, and read-only selection inside the hub TUI. Preserve unsent editor text and unresolved drafts. Reject stale replies after selection changes.
+- [x] Distinguish hub/task colors and labels; require Rex for task participation and lock task clients. Apply the same policy to helper requests and plain clients.
 - [x] Show saved Rex allocation, fresh terminal presence, and agent activity as separate facts. Add explicit open/reopen for the selected interactive task.
 - [ ] Add Markdown and large-history navigation without unbounded display memory or terminal-control execution.
 - [ ] Add richer tool/activity detail with explicit clipping and sensitive-data limits.
@@ -68,6 +69,8 @@ Acceptance: no agent swapping around queued inputs, hook-only enforcement, secon
 ## 3. Add verified remote effects
 
 Do not expose a remote listener before verified identity exists. The existing loopback trust model is not remote authentication.
+
+**Foundation implemented:** schema-backed peer/host registration and worker hello claims, bounded native Tailscale verification, the read-only `remote-check` diagnostic, and a connection-generation gate. Native and TypeScript tests cover malformed identities, role/capability drift, duplicate registrations, and stale connection cleanup. Tailscale 1.98.2 self-node and operator-selected remote Rex peer checks passed. The selected Rex endpoint also passed HTTPS/status and disposable terminal-probe checks. This is not a two-machine Deck worker/client test; the endpoint reports Rex API 9, which is not yet enabled in Deck's allocation allowlist. No remote listener, worker routing, or remote client access is enabled yet.
 
 - [ ] Validate Tailscale peer verification on selected real test machines. Map actual verified peers to registration, not claimed headers or names.
 - [ ] Define schema-backed worker registration, capabilities, inventory, and connection generation.

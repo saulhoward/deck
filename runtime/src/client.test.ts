@@ -17,7 +17,7 @@ test("plain chat switching pins retries, blocks switching unacknowledged drafts 
     let result: unknown = {};
     let failed = false;
     switch (envelope.command) {
-      case "status": result = { chatId: args.chatId ?? "1", mainChatId: "1", hubId: "test-client", provider: "faux", model: {}, tools: "offline", binding: { machineId: "host", cwd: "/work" } }; break;
+      case "status": result = { chatId: args.chatId ?? "1", mainChatId: "1", hubId: "test-client", hubGuard: 1, rexOpen: 1, provider: "faux", model: {}, tools: "offline", binding: { machineId: "host", cwd: "/work" } }; break;
       case "history": result = { items: [] }; break;
       case "list_chats": {
         pages.push(args);
@@ -26,6 +26,7 @@ test("plain chat switching pins retries, blocks switching unacknowledged drafts 
       }
       case "admit": admissions.push(args); failed = admissions.length === 1; result = { submissionId: "1" }; break;
       case "create_task": creations.push(args); failed = creations.length === 1; result = { chatId: "2" }; break;
+      case "rex_open": assert.equal(args.chatId, "2"); result = { version: 1, chatId: "2", requestId: args.requestId, taskId: "9", status: "admitted", completion: "not_waited", bestEffort: true }; break;
       default: assert.fail(`Unexpected command ${envelope.command}`);
     }
     response.setHeader("content-type", "application/json");
@@ -42,7 +43,8 @@ test("plain chat switching pins retries, blocks switching unacknowledged drafts 
     const closed = once(client, "close");
     client.stdin.end("First input\n/select 2\n/main\n/tasks\n/tasks more\n/tasks more\n/retry\n/select 2\nTask input\n/main\nMain input\n/task New task\n/select 1\n/main\n/retry\n/main\n/exit\n");
     assert.equal((await closed)[0], 0, errors);
-    assert.deepEqual(admissions.map((args) => args.chatId), ["1", "1", "2", "1"]);
+    assert.deepEqual(admissions.map((args) => args.chatId), ["1", "1", "1"]);
+    assert.match(errors, /Read-only/);
     assert.deepEqual(admissions[0], admissions[1]);
     assert.deepEqual(creations[0], creations[1]);
     assert.equal(creations.length, 2);

@@ -1,0 +1,36 @@
+{
+  "bases": {
+    "peer": {"nodeId":"nTestPeer1","userId":"18446744073709551615"},
+    "registry": {"version":1,"hubId":"test-hub","hosts":[{"machineId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","peer":{"nodeId":"nTestPeer1","userId":"18446744073709551615"},"client":true,"implementation":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","capabilities":["files","bash","rex"]}]},
+    "hello": {"version":1,"hubId":"test-hub","machineId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","connectionId":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","implementation":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","capabilities":["files","bash","rex"]}
+  },
+  "cases": [
+    {"name":"full u64 peer identity stays a string","kind":"peer","valid":true},
+    {"name":"tagged zero owner remains explicit","kind":"peer","path":["userId"],"value":"0","valid":true},
+    {"name":"overflow user refused","kind":"peer","path":["userId"],"value":"18446744073709551616","valid":false},
+    {"name":"rounded numeric user refused","kind":"peer","path":["userId"],"value":9007199254740992,"valid":false},
+    {"name":"zero prefix refused","kind":"peer","path":["userId"],"value":"01","valid":false},
+    {"name":"name is not stable node ID","kind":"peer","path":["nodeId"],"value":"worker.example.ts.net","valid":false},
+    {"name":"public key is not stable node ID","kind":"peer","path":["nodeId"],"value":"nodekey:abcdef","valid":false},
+    {"name":"newline stable ID refused","kind":"peer","path":["nodeId"],"value":"nTestPeer1\n","valid":false},
+    {"name":"claimed verified flag refused","kind":"peer","path":["verified"],"value":true,"valid":false},
+    {"name":"explicit dual-role registration","kind":"registry","valid":true},
+    {"name":"empty registry authorizes nobody","kind":"registry","path":["hosts"],"value":[],"valid":true},
+    {"name":"no learned host metadata","kind":"registry","path":["hosts",0,"label"],"value":"trusted-worker","valid":false},
+    {"name":"implementation without capabilities refused","kind":"registry","path":["hosts",0,"capabilities"],"remove":true,"valid":false},
+    {"name":"capabilities without implementation refused","kind":"registry","path":["hosts",0,"implementation"],"remove":true,"valid":false},
+    {"name":"duplicate capability refused","kind":"registry","path":["hosts",0,"capabilities"],"value":["files","files"],"valid":false},
+    {"name":"capability order is canonical","kind":"registry","path":["hosts",0,"capabilities"],"value":["rex","files"],"valid":false},
+    {"name":"no role grants no access","kind":"registry","path":["hosts"],"value":[{"machineId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","peer":{"nodeId":"nTestPeer1","userId":"1"},"client":false}],"valid":false},
+    {"name":"client-only registration has no effects authority","kind":"registry","path":["hosts"],"value":[{"machineId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","peer":{"nodeId":"nTestPeer1","userId":"1"},"client":true}],"valid":true},
+    {"name":"duplicate machine binding refused","kind":"registry","path":["hosts"],"value":[{"machineId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","peer":{"nodeId":"nOne","userId":"1"},"client":true},{"machineId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","peer":{"nodeId":"nTwo","userId":"1"},"client":true}],"valid":false},
+    {"name":"one node cannot silently change machine binding","kind":"registry","path":["hosts"],"value":[{"machineId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","peer":{"nodeId":"nOne","userId":"1"},"client":true},{"machineId":"dddddddddddddddddddddddddddddddd","peer":{"nodeId":"nOne","userId":"1"},"client":true}],"valid":false},
+    {"name":"hello is only a claim","kind":"hello","valid":true},
+    {"name":"unknown protocol version refused","kind":"hello","path":["version"],"value":2,"valid":false},
+    {"name":"unknown capability refused","kind":"hello","path":["capabilities"],"value":["files","shell"],"valid":false},
+    {"name":"duplicate hello capabilities refused","kind":"hello","path":["capabilities"],"value":["bash","bash"],"valid":false},
+    {"name":"wrong hello capability order refused","kind":"hello","path":["capabilities"],"value":["rex","bash"],"valid":false},
+    {"name":"short generation refused","kind":"hello","path":["connectionId"],"value":"1234","valid":false},
+    {"name":"claimed client privilege refused","kind":"hello","path":["client"],"value":true,"valid":false}
+  ]
+}

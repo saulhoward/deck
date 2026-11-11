@@ -21,8 +21,9 @@ for (const kind of ["input", "task"] as const) test(`SIGKILL recovery preserves 
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const { id, command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { id: string; command: string; args: Record<string, unknown> };
     let result: unknown = {};
-    if (command === "status") result = { hubId: "durable-hub", chatId: args.chatId ?? "1", mainChatId: "1", model: {}, tools: "offline", binding };
+    if (command === "status") result = { hubId: "durable-hub", hubGuard: 1, rexOpen: 1, chatId: args.chatId ?? "2", mainChatId: "2", model: {}, tools: "offline", binding };
     else if (command === "history") result = { items: [] };
+    else if (command === "rex_open") result = { version: 1, chatId: "3", requestId: args.requestId, taskId: "9", status: "admitted", completion: "not_waited", bestEffort: true };
     else {
       assert.equal(command, kind === "input" ? "admit" : "create_task");
       calls.push(args); effects.add(String(args.requestId));
@@ -83,7 +84,11 @@ test("one-shot malformed ACK remains recoverable; new one-shot text cannot repla
     const child = spawn(process.execPath, [entry, "--port", String(address.port)], { env: local.env }); const closed = once(child, "close"); let output = ""; let errors = "";
     child.stdout.on("data", (chunk) => { output += String(chunk); }); child.stderr.on("data", (chunk) => { errors += String(chunk); });
     await waitFor(() => output.includes("Deck chat")); await chmod(local.env.DECK_CLIENT_STATE_DIRECTORY, 0o755);
-    child.stdin.end("Must not send\n/retry\n/exit\n"); assert.equal((await closed)[0], 0); assert.match(errors, /must be private/); assert.equal(admitted, 1);
-    await chmod(local.env.DECK_CLIENT_STATE_DIRECTORY, 0o700); assert.deepEqual(await store.list(), []);
+    child.stdin.write("Must not send\n/retry\n");
+    await waitFor(() => (errors.match(/must be private/g) ?? []).length === 2);
+    await chmod(local.env.DECK_CLIENT_STATE_DIRECTORY, 0o700);
+    child.stdin.end("/discard\n/exit\n"); assert.equal((await closed)[0], 0);
+    assert.equal(admitted, 1); assert.doesNotMatch(errors, /ENOENT|Detached with an unresolved draft/);
+    assert.deepEqual(await store.list(), []);
   } finally { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); await local.close(); }
 });

@@ -1,5 +1,7 @@
 // Client-only adapter: shared HTTP validation and existing local drafts, no Pi
 // session, store, execution or replay loop. The renderer owns presentation.
+import { canParticipate, requireParticipation, requireNavigation, requireCreation, inspectOnly } from "./client-access.js";
+import type { TuiClientMode } from "./generated/contracts.js";
 import { validAgentStatus } from "./view-contracts.js";
 import { validRexReply } from "./rex-open-contracts.js";
 import { sameSelection, validModelSettingsSnapshot } from "./model-settings-contracts.js";
@@ -27,7 +29,7 @@ export function validRequest(value: unknown): value is TuiRequest {
   if (value.action === "send" || value.action === "create") return typeof value.text === "string" && value.text.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "").length > 0 && Buffer.byteLength(value.text) <= (value.action === "send" ? 16384 : 200);
   return value.text === undefined;
 }
-export function validReply(value: unknown, id: string, hubId?: string, chatId?: string, action?: TuiRequest["action"], target?: string, after?: string): value is TuiResponse {
+export function validReply(value: unknown, id: string, hubId?: string, chatId?: string, action?: TuiRequest["action"], target?: string, after?: string, mode?: TuiClientMode, hubChatId?: string): value is TuiResponse {
   if (!validTuiResponse(value) || value.id !== id) return false;
   if (!value.ok) return true;
   const s = value.snapshot;
@@ -35,7 +37,9 @@ export function validReply(value: unknown, id: string, hubId?: string, chatId?: 
   const expectedChat = action === "select" ? target : chatId;
   if (action === "select" && !validSafePiId(target)) return false;
   if (!validSafePiId(s.chatId) || (hubId !== undefined && hubId !== s.hubId) || (expectedChat !== undefined && expectedChat !== s.chatId)) return false;
-  if (s.mainChatId !== undefined && !validSafePiId(s.mainChatId)) return false;
+  if (!validSafePiId(s.hubChatId) || (mode !== undefined && s.clientMode !== mode) || (hubChatId !== undefined && s.hubChatId !== hubChatId)) return false;
+  if (s.clientMode === "task" && (s.chatId === s.hubChatId || s.tasks !== undefined || action === "select" || action === "tasks" || action === "create")) return false;
+  if (!canParticipate(s.clientMode, s.chatId, s.hubChatId) && s.draft !== null) return false;
   if (action === "tasks" && (!s.tasks || s.tasks.after !== after)) return false;
   if (s.tasks) {
     let previous = Number(s.tasks.after ?? 0);
@@ -63,6 +67,9 @@ export class TuiSession {
   private supportsRex = false;
   private supportsStartup = false;
   private startupBlocked = false;
+  private mode: TuiClientMode = "hub";
+  private hubChatId?: string;
+  private participates() { return canParticipate(this.mode, this.chatId, this.hubChatId); }
   private binding?: { machineId: string; cwd: string };
   private settingsUncertain = false;
   constructor(private readonly command: Command, private readonly selected?: string, private readonly expectedHub?: string, private readonly draftRoot?: string, private readonly port = 52800) {}
@@ -71,7 +78,9 @@ export class TuiSession {
     this.startupBlocked = true;
     const args = { chatId: this.selected, allocationId, blockId };
     if (!this.expectedHub || !validMutationArgs("rex_startup", args)) throw new Error("Rex startup requires a pinned hub/task and native full REX_BLOCK");
+    this.mode = "task";
     await this.initialize();
+    if (this.chatId === this.hubChatId) throw new Error("Rex task startup cannot target the hub chat");
     if (!this.supportsStartup) throw new Error("Hub lacks Rex startup capability; no input enabled");
     const page = await this.history();
     this.state!.entries = this.renderEntries(page); this.before = page.next; this.state!.hasOlder = !!page.next;
@@ -81,22 +90,25 @@ export class TuiSession {
   }
   private async initialize() { if (!this.state) await this.selectChat(this.selected); }
   private async selectChat(target?: string) {
-    if (this.active || this.settingsUncertain) throw new Error("Resolve saved requests/settings before switching tasks");
+    if (this.state) requireNavigation(this.mode);
+    if (this.active || (this.participates() && this.settingsUncertain)) throw new Error("Resolve saved requests/settings before switching tasks");
     const status = await this.command("status", target ? { chatId: target } : {}, this.hubId ?? this.expectedHub);
     if (status.hubGuard !== 1 || (target && status.chatId !== target) || ((this.hubId ?? this.expectedHub) && status.hubId !== (this.hubId ?? this.expectedHub))) throw new Error("Hub/chat identity guard required; selection unchanged");
+    if (this.hubChatId !== undefined && status.mainChatId !== this.hubChatId) throw new Error("Hub chat identity changed; selection unchanged");
     const store = this.store ?? new DraftStore(status.hubId, this.draftRoot);
     const saved = (await store.list()).filter((draft) => draft.chatId === status.chatId);
-    const active = saved[0] ? (await store.load(saved[0].requestId)).request : undefined;
+    const writable = canParticipate(this.mode, status.chatId, status.mainChatId);
+    const active = writable && saved[0] ? (await store.load(saved[0].requestId)).request : undefined;
     // Commit the selection only after all fallible reads. No old page, sample,
     // cursor, binding or request can leak into the new chat on a failed switch.
-    this.hubId = status.hubId; this.chatId = status.chatId; this.store = store;
+    this.hubId = status.hubId; this.chatId = status.chatId; this.hubChatId = status.mainChatId; this.store = store;
     this.active = active; this.activeSaved = !!active; this.before = undefined;
     this.binding = status.binding && { machineId: status.binding.machineId, cwd: status.binding.cwd };
     this.supportsRex = status.rexOpen === 1;
     this.supportsStartup = status.rexStartup === 1;
     this.supportsSettings = status.modelSettings === 1; this.settingsUncertain = this.supportsSettings;
-    const notice = active ? `Saved ${active.kind} ${active.requestId}: :retry or :discard; instruction drafts use --no-tui.${saved.length > 1 ? " Other drafts: --no-tui /drafts." : ""}` : "";
-    this.state = { hubId: this.hubId!, chatId: this.chatId!, mainChatId: status.mainChatId, title: displayText(status.binding?.title || (this.chatId === status.mainChatId ? "Main" : `Chat ${this.chatId}`), 160), model: displayText(`${status.model?.provider ?? ""}/${status.model?.modelId ?? "unknown model"}`, 160), tools: status.tools, activityKnown: false, busy: false, queued: 0, entries: [], hasOlder: false, historical: false, preview: "", notice, draft: null };
+    const notice = !writable ? `${inspectOnly}${saved.length ? " Saved requests remain untouched; review them in the Rex client." : ""}` : active ? `Saved ${active.kind} ${active.requestId}: :retry or :discard; instruction drafts use --no-tui.${saved.length > 1 ? " Other drafts: --no-tui /drafts." : ""}` : "";
+    this.state = { clientMode: this.mode, hubChatId: this.hubChatId!, hubId: this.hubId!, chatId: this.chatId!, title: this.chatId === this.hubChatId ? "Hub" : displayText(status.binding?.title || `Task ${this.chatId}`, 160), model: displayText(`${status.model?.provider ?? ""}/${status.model?.modelId ?? "unknown model"}`, 160), tools: status.tools, activityKnown: false, busy: false, queued: 0, entries: [], hasOlder: false, historical: false, preview: "", notice, draft: null };
   }
   private async refreshSettings() {
     if (!this.supportsSettings) throw new Error("Hub does not advertise model settings; upgrade it only when idle");
@@ -140,7 +152,12 @@ export class TuiSession {
     if (page.progress) this.state!.preview = displayText([page.progress.generation?.text ?? "", ...(page.progress.tools ?? []).map((tool: any) => `[${tool.name}] ${tool.text}`)].filter(Boolean).join("\n"), 4096);
   }
   private async deliver() {
+    requireParticipation(this.mode, this.chatId, this.hubChatId);
     if (!this.active || this.active.kind === "instructions") throw new Error("Use --no-tui to retry saved instruction requests");
+    if (this.active.kind === "task") {
+      requireCreation(this.mode, this.chatId, this.hubChatId);
+      if (!this.supportsRex) throw new Error("Rex support is required to create a task; no request sent");
+    }
     this.activeSaved = false;
     await this.store!.save(this.active); // Must succeed before network; exact original fields.
     this.activeSaved = true;
@@ -148,22 +165,35 @@ export class TuiSession {
     const ack = await this.command(kind === "input" ? "admit" : "create_task", { requestId, ...args, ...(kind === "input" ? { chatId } : {}) }, this.hubId);
     this.activeSaved = false;
     await this.store!.remove(requestId); this.active = undefined;
-    this.state!.notice = kind === "input" ? "Input admitted; completion not yet confirmed" : `Task ${ack.chatId} created; /select ${ack.chatId} or /tasks to open it. No input submitted.`;
+    if (kind === "input") this.state!.notice = "Input admitted; completion not yet confirmed";
+    else {
+      // Creation is acknowledged and the exact draft is cleared before this
+      // separate best-effort terminal attempt. Losing its reply must not turn
+      // the acknowledged creation back into an input/task retry queue.
+      try {
+        const opened = await this.command("rex_open", { chatId: ack.chatId, requestId: randomUUID(), port: this.port }, this.hubId);
+        this.state!.notice = `Task ${ack.chatId} created. ${opened.status === "reused" ? "Rex client reused" : "Rex attempt admitted, not yet ready"}. /select ${ack.chatId} inspects only; participate in Rex.`;
+      } catch { this.state!.notice = `Task ${ack.chatId} created; Rex open unconfirmed. /select ${ack.chatId}, inspect Rex, then explicitly open/reopen if needed. No automatic retry.`; }
+    }
   }
   async handle(request: TuiRequest): Promise<TuiSnapshot> {
     if (!validRequest(request)) throw new Error("Invalid renderer request");
     if (this.startupBlocked) throw new Error("Rex startup unconfirmed; no input enabled");
     await this.initialize();
     let state = this.state!;
+    if (request.action === "select" || request.action === "tasks") requireNavigation(this.mode);
+    if (request.action === "create") requireCreation(this.mode, this.chatId, this.hubChatId);
+    if (["send", "retry", "discard", "stop", "configure"].includes(request.action)) requireParticipation(this.mode, this.chatId, this.hubChatId);
     switch (request.action) {
       case "select":
         await this.selectChat(request.chatId); state = this.state!; break;
       case "tasks": {
         const page = await this.command("list_chats", { limit: 25, ...(request.after ? { after: request.after } : {}) }, this.hubId);
-        state.tasks = { items: page.items.map((row: any) => ({ chatId: row.chatId, kind: row.kind, title: displayText(row.title, 160), machineId: displayText(row.machineId, 80), cwd: displayText(row.cwd, 256) })), ...(request.after ? { after: request.after } : {}), ...(page.next ? { next: page.next } : {}) };
+        state.tasks = { items: page.items.map((row: any) => ({ chatId: row.chatId, kind: row.kind, title: row.chatId === this.hubChatId ? "Hub" : displayText(row.title, 160), machineId: displayText(row.machineId, 80), cwd: displayText(row.cwd, 256) })), ...(request.after ? { after: request.after } : {}), ...(page.next ? { next: page.next } : {}) };
         break;
       }
       case "create":
+        if (!this.supportsRex) throw new Error("Rex support is required to create a task; no request sent");
         if (this.active || this.settingsUncertain) throw new Error("Resolve saved requests/settings before creating a task");
         if (!this.binding) throw new Error("Saved workspace binding unavailable; no task requested");
         this.active = { kind: "task", chatId: this.chatId!, requestId: randomUUID(), title: request.text!, ...this.binding }; this.activeSaved = false;

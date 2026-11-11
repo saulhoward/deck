@@ -106,6 +106,7 @@ Remote TUI clients need a verified path back to the hub. Rex connectivity alone 
 | `src/main.zig`, `src/state.zig` | CLI, private state, writer lock, supervision, and administrative launch |
 | `src/native.zig`, `src/runtime_paths.zig` | Explicit I/O/environment, process helpers, and runtime paths |
 | `src/hub.zig` | Loopback HTTP, private command bridge, and reply validation |
+| `src/tailscale.zig`, `src/remote*.zig`, `runtime/src/remote-contracts.ts` | Peer-check diagnostic, registration contracts, and native connection-generation gate; not an enabled remote transport |
 | `src/worker.zig`, `src/shell.zig` | Native effects, receipts, capacity, and cancellation |
 | `src/rex*.zig` | Rex discovery, endpoint validation, creation, and inspection |
 | `src/tui*.zig` | TUI widget, modal editor, client bridge, and terminal status |
@@ -249,6 +250,40 @@ The HTTP endpoint is `POST /v1/command` on `127.0.0.1:52800`, with an optional p
 The shared client rejects redirects and bounds streamed response bytes before JSON parsing, regardless of Content-Length. Its deadline is ten seconds. Detach aborts client HTTP, not Pi work. Private IPC permits 16 active commands; the native HTTP bridge handles round trips serially. Inference and native effects continue independently.
 
 `hubId` prevents silent redirection after port reuse; it is not authentication. Restored copies retain the same identity. Capabilities such as `hubGuard`, `rexStartup`, `rexOpen`, and `modelSettings` are advertised explicitly. Missing capability fields do not mean support.
+
+### Remote verification foundation
+
+This is implemented groundwork, **not remote connectivity**. No remote listener, worker link, proxy, or remote TUI routing is enabled. The running hub still binds only loopback.
+
+`RemoteRegistry` is an explicit local operator file for one hub. Up to 64 entries pin a Deck machine ID to a stable Tailscale node ID and exact decimal user ID. Node names, DNS names, tags, headers, public keys, and peer-supplied `verified` flags grant no authority. A worker registration additionally pins an implementation digest and ordered capabilities (`files`, `bash`, `rex`). A client-only registration omits both. Duplicate node/machine IDs and registrations without a role are refused. Tailscale ownership is machine-level authority, not an OS-user login; do not grant client access to an untrusted node.
+
+The native verifier calls an explicit absolute Tailscale executable. It first requires `status --json --peers=false` to report a running backend with a valid local identity, then calls `whois --json IP:PORT`. It accepts direct Tailscale IPv4/IPv6 literals only, strips ambient routing/auth/loader variables, and bounds each capture to 64 KiB and four seconds. It checks the exact host address, stable node ID, matching numeric node/profile owner, and key expiry. The legacy peer `MachineAuthorized` field is optional in Tailscale's API; an explicit false or malformed value is refused, but absence is not approval. Access still requires exact operator registration. User IDs remain exact unsigned 64-bit decimal strings. Private daemon fields and diagnostics are not returned. Unknown/malformed/lost evidence fails closed.
+
+A read-only diagnostic compares that observation with a private registry file:
+
+```sh
+deck remote-check --registry /absolute/private/registry.json \
+  --machine MACHINE_ID --tailscale /absolute/path/to/tailscale \
+  --peer TAILSCALE_IP:PORT
+```
+
+Example client-only registry (replace every identity with independently verified values):
+
+```json
+{
+  "version": 1,
+  "hubId": "EXPECTED_DECK_HUB_ID",
+  "hosts": [{
+    "machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "peer": { "nodeId": "nEXAMPLE", "userId": "123" },
+    "client": true
+  }]
+}
+```
+
+The file must be regular, at most 64 KiB, without group/other permissions; a final symlink is refused. This command does not edit registrations, start Tailscale, log in, create a Pi store, or send a worker effect. Success says `connection: "not_checked"`: the supplied address is a diagnostic target, not evidence of an authenticated incoming socket or a worker connection.
+
+The native connection gate is independently tested but not wired into a listener. Its boot nonce and monotonic sequence produce fresh challenges. A worker hello must match the verified peer, hub, machine, challenge, implementation, and capabilities. A live slot cannot be silently replaced. Invalid/duplicate handshakes fence that slot; stale replies and cleanup cannot affect a replacement or another host. The eventual transport must supply freshly verified identity from the actual socket, never the diagnostic result, a cached sample, or the hello itself. These slots are connection bookkeeping, not Pi task state, an execution queue, or receipt reconciliation.
 
 ### Commands
 
@@ -401,9 +436,13 @@ Global `status.activity` differs from selected-chat activity. Its outer view bou
 
 The TUI helper uses HTTP and `DraftStore`; it opens no Pi store. Its closed generated bridge uses 1 MiB frames, strict UTF-8, exact transport/hub/chat correlation, and owned strings. One request may be outstanding. Invalid, unsolicited, duplicate, or lost replies permanently fence it. There is no helper restart, action queue, or mutation replay.
 
-The client can select another chat only through an explicit request with an exact target ID. Both bridge endpoints check that target before changing their chat pin. A failed selection keeps the old chat. Selection reads status and saved drafts before replacing the page, samples, cursor, binding, and terminal-status baseline. It creates no input or stop request.
+The hub client can select another chat only through an explicit request with an exact target ID. Both bridge endpoints check that target before changing their chat pin. A failed selection keeps the old chat. Selection reads status and saved drafts before replacing the page, samples, cursor, binding, and terminal-status baseline. It creates no input or stop request.
 
-`/tasks` shows one bounded page of at most 25 chats. Labels are clipped display data, not routing bindings. Sparse pages can advance by last-scanned cursor. `/task TITLE` saves an ordinary task draft before creation and keeps the current chat after ACK. Retry reuses the original title, binding, and identity. Switching/creation refuses unsent editor text or unresolved requests; there is no extra per-chat editor store.
+`clientMode` (`hub` or `task`) is pinned from launch, not inferred from a display label or selected chat. `hubChatId` is pinned by the initial validated status; both bridge endpoints reject subsequent role/root identity drift. The durable/API name `main` is retained without migration; the UI calls it **hub**. Hub bars are teal, task bars slate-blue. Task mode requires successful allocation-bound startup and cannot select the hub, list other chats, or create tasks. Even forged renderer requests are refused by the helper. Mode changes cannot be obtained by selecting a chat.
+
+Hub-selected tasks are read-only. The editor/paste, send, retry/discard, stop, and configuration paths refuse; task drafts are not activated or removed. The hub can read task history/settings/Rex state and explicitly open/reopen Rex, but cannot participate without its verified task client. Direct `--task` launches and plain clients obey the same policy. This is a client interaction policy, **not authentication of the trusted-local HTTP API**; Pi-owned task tools and internal admission continue to use their existing authority.
+
+`/tasks` shows one bounded page of at most 25 chats. Labels are clipped display data, not routing bindings. Sparse pages can advance by last-scanned cursor. `/hub` returns to the hub chat (`/main` remains a compatibility alias, also forbidden in task mode). `/task TITLE` is hub-chat-only: save the exact ordinary task draft, obtain creation ACK, remove that draft, then issue a separate best-effort `rex_open` using the returned chat ID and client port. Stay on the hub and submit no input. If opening fails or loses its ACK, retain the created chat and report the uncertain terminal attempt; no automatic retry or standalone participation fallback. Creation itself still retries only by explicit original title/binding/identity. An unavailable Rex capability refuses before creating a draft. Switching/creation refuses unsent editor text or unresolved requests; there is no extra per-chat editor store.
 
 The editor has a 16 KiB UTF-8 limit and 32 snapshots per undo/redo stack. Paste applies atomically as literal text. Only new editor input normalizes CR/CRLF to LF and tabs to four spaces. Saved requests remain unchanged. System clipboard allocation is disabled before OSC 52 parsing.
 
@@ -432,7 +471,7 @@ Reports are change-only, with fixed messages and no invented percentages, prompt
 
 ## Rex integration
 
-Public open/reopen supports managed ownerless tasks. Main and owned children refuse. Pi saves the launch intent and administrative task before native creation. The launch uses trusted executable argv, `--shell=none`, exact hub/chat identity, and `--tui`, not typed shell text. The client-only helper verifies initial status, drafts, history, and `rex_startup` before returning any renderer snapshot. A refused, malformed, or lost startup ACK closes the helper and fences the UI; it does not replay registration or enable input. Explicit plain-client launches remain supported.
+Public open/reopen supports managed ownerless tasks. Main and owned children refuse. Pi saves the launch intent and administrative task before native creation. The launch uses trusted executable argv, `--shell=none`, exact hub/chat identity, and `--tui`, not typed shell text. The client-only helper verifies initial status, drafts, history, and `rex_startup` before returning any renderer snapshot. A refused, malformed, or lost startup ACK closes the helper and fences the UI; it does not replay registration or enable input. Allocation-bound plain-client launches remain supported with the same startup and task-lock rules; an ordinary direct task launch is read-only.
 
 First open resolves missing target fields on the assigned worker. PATH search uses absolute directories only. Bounded `rex --autostart=false --timeout 2s server status --json` discovers a local Unix endpoint plus host/instance UUIDs. Strip ambient remote/focus routing overrides; do not autostart or use TCP. Later opens use the saved target without discovery; supplied overrides must match it.
 

@@ -29,6 +29,32 @@
         "preserveDrafts": { "const": true }, "automaticMutationRetry": { "const": false }
       }, "required": ["outcome", "action", "preserveDrafts", "automaticMutationRetry"]
     },
+    "MachineIdentity": { "type": "string", "pattern": "^[a-f0-9]{32}$(?![\\s\\S])" },
+    "TailNodeId": { "type": "string", "pattern": "^n[a-zA-Z0-9]{1,127}$(?![\\s\\S])" },
+    "TailUserId": { "description": "Canonical unsigned 64-bit decimal, checked semantically without conversion through a JS number.", "type": "string", "pattern": "^[0-9]{1,20}$(?![\\s\\S])" },
+    "TailPeer": { "type": "object", "additionalProperties": false, "properties": { "nodeId": { "$ref": "#/$defs/TailNodeId" }, "userId": { "$ref": "#/$defs/TailUserId" } }, "required": ["nodeId", "userId"] },
+    "WorkerCapability": { "enum": ["files", "bash", "rex"] },
+    "WorkerCapabilities": { "type": "array", "minItems": 1, "maxItems": 3, "items": { "$ref": "#/$defs/WorkerCapability" } },
+    "RemoteHost": {
+      "description": "Local operator registration, not a peer claim. Worker implementation and capabilities must occur together; client-only registrations omit both.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "machineId": { "$ref": "#/$defs/MachineIdentity" }, "peer": { "$ref": "#/$defs/TailPeer" }, "client": { "type": "boolean" }, "implementation": { "$ref": "#/$defs/Sha256" }, "capabilities": { "$ref": "#/$defs/WorkerCapabilities" } }, "required": ["machineId", "peer", "client"]
+    },
+    "RemoteRegistry": {
+      "description": "Explicit pinned authority for one hub. Semantic validation rejects duplicate machine/node IDs, missing roles and noncanonical capabilities. Not network enrollment.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "version": { "const": 1 }, "hubId": { "$ref": "#/$defs/TransportId" }, "hosts": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/RemoteHost" } } }, "required": ["version", "hubId", "hosts"]
+    },
+    "RemoteCheckSnapshot": {
+      "description": "Read-only local registration check. Neither a transport connection nor native-effect or client readiness evidence.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "version": { "const": 1 }, "hubId": { "$ref": "#/$defs/TransportId" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "registered": { "const": true }, "client": { "type": "boolean" }, "worker": { "type": "boolean" }, "connection": { "const": "not_checked" } }, "required": ["version", "hubId", "machineId", "registered", "client", "worker", "connection"]
+    },
+    "RemoteWorkerHello": {
+      "description": "A claim on an already peer-verified connection; never proof of identity. connectionId must match a fresh hub-issued challenge.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "version": { "const": 1 }, "hubId": { "$ref": "#/$defs/TransportId" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "connectionId": { "$ref": "#/$defs/Sha256" }, "implementation": { "$ref": "#/$defs/Sha256" }, "capabilities": { "$ref": "#/$defs/WorkerCapabilities" } }, "required": ["version", "hubId", "machineId", "connectionId", "implementation", "capabilities"]
+    },
     "NativeOperation": { "enum": ["read", "write", "edit", "bash", "bash_progress", "rex_allocate", "rex_inspect", "rex_resolve", "rex_allocation_receipt"] },
     "NativeCorrelationId": { "type": "string", "minLength": 1, "maxLength": 32 },
     "NativePath": { "description": "Decoded UTF-8 byte limit and NUL refusal are additional semantic checks; paths are not a sandbox.", "type": "string", "maxLength": 4096 },
@@ -520,10 +546,11 @@
     "TuiChat": { "type": "object", "additionalProperties": false, "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "kind": { "$ref": "#/$defs/ChatListKind" }, "title": { "type": "string", "maxLength": 160 }, "machineId": { "type": "string", "maxLength": 80 }, "cwd": { "type": "string", "maxLength": 256 } }, "required": ["chatId", "kind", "title", "machineId", "cwd"] },
     "TuiTasks": { "description": "One bounded discovery page; labels are display-only, never routing authority.", "type": "object", "additionalProperties": false, "properties": { "items": { "type": "array", "maxItems": 25, "items": { "$ref": "#/$defs/TuiChat" } }, "after": { "$ref": "#/$defs/PiId" }, "next": { "$ref": "#/$defs/PiId" } }, "required": ["items"] },
     "TuiRex": { "description": "Selected-chat creation provenance and optional independent presence sample, not agent health.", "type": "object", "additionalProperties": false, "properties": { "status": { "$ref": "#/$defs/RexStatusSnapshot" }, "inspection": { "$ref": "#/$defs/RexInspectionSnapshot" } }, "required": ["status"] },
+    "TuiClientMode": { "enum": ["hub", "task"] },
     "TuiSnapshot": { "type": "object", "additionalProperties": false, "properties": {
-      "settingsPending": { "type": "boolean" }, "mainChatId": { "$ref": "#/$defs/PiId" }, "tasks": { "$ref": "#/$defs/TuiTasks" }, "rex": { "$ref": "#/$defs/TuiRex" }, "modelSettings": { "$ref": "#/$defs/ModelSettingsSnapshot" }, "hubId": { "$ref": "#/$defs/TransportId" }, "chatId": { "$ref": "#/$defs/PiId" }, "title": { "type": "string", "maxLength": 160 }, "model": { "type": "string", "maxLength": 160 }, "tools": { "type": "string", "maxLength": 80 },
+      "clientMode": { "$ref": "#/$defs/TuiClientMode" }, "hubChatId": { "$ref": "#/$defs/PiId" }, "settingsPending": { "type": "boolean" }, "tasks": { "$ref": "#/$defs/TuiTasks" }, "rex": { "$ref": "#/$defs/TuiRex" }, "modelSettings": { "$ref": "#/$defs/ModelSettingsSnapshot" }, "hubId": { "$ref": "#/$defs/TransportId" }, "chatId": { "$ref": "#/$defs/PiId" }, "title": { "type": "string", "maxLength": 160 }, "model": { "type": "string", "maxLength": 160 }, "tools": { "type": "string", "maxLength": 80 },
       "agentStatus": { "$ref": "#/$defs/AgentStatus" }, "activityKnown": { "type": "boolean" }, "busy": { "type": "boolean" }, "queued": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }, "entries": { "type": "array", "maxItems": 80, "items": { "$ref": "#/$defs/TuiEntry" } }, "hasOlder": { "type": "boolean" }, "historical": { "type": "boolean" }, "preview": { "type": "string", "maxLength": 4096 }, "notice": { "type": "string", "maxLength": 1024 }, "draft": { "anyOf": [{ "$ref": "#/$defs/TuiDraft" }, { "type": "null" }] }
-    }, "required": ["hubId", "chatId", "title", "model", "tools", "activityKnown", "busy", "queued", "entries", "hasOlder", "historical", "preview", "notice", "draft"] },
+    }, "required": ["clientMode", "hubChatId", "hubId", "chatId", "title", "model", "tools", "activityKnown", "busy", "queued", "entries", "hasOlder", "historical", "preview", "notice", "draft"] },
     "TuiResponse": { "oneOf": [
       { "type": "object", "additionalProperties": false, "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "ok": { "const": true }, "snapshot": { "$ref": "#/$defs/TuiSnapshot" } }, "required": ["version", "id", "ok", "snapshot"] },
       { "type": "object", "additionalProperties": false, "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "ok": { "const": false }, "error": { "type": "string", "minLength": 1, "maxLength": 1024 } }, "required": ["version", "id", "ok", "error"] }

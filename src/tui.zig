@@ -30,8 +30,10 @@ const help =
     \\v V, u, Ctrl-R        visual selection, undo / redo
     \\Insert Enter          newline (never submit); Ctrl-W/U edit
     \\
-    \\/tasks                task picker; j/k, Enter select, n next, g first
-    \\/task TITLE           create task; /select ID or /main switches
+    \\/tasks                hub only: inspect tasks read-only
+    \\/task TITLE           hub only: create task and open Rex
+    \\/select ID /hub       hub only: inspect task / return to hub
+    \\Task clients are Rex-bound and locked; use /rex open to participate.
     \\/rex                  selected task Rex status; i inspect, o open
     \\/rex open             explicit best-effort open; no automatic retry
     \\/model or :model      hub model picker; j/k/arrows, Enter, Esc
@@ -52,6 +54,7 @@ const base: vaxis.Style = .{ .fg = .{ .rgb = .{ 218, 224, 234 } }, .bg = .{ .rgb
 const dim: vaxis.Style = .{ .fg = .{ .rgb = .{ 135, 149, 170 } }, .bg = base.bg };
 const accent: vaxis.Style = .{ .fg = .{ .rgb = .{ 116, 206, 188 } }, .bg = base.bg, .bold = true };
 const bar: vaxis.Style = .{ .fg = base.fg, .bg = .{ .rgb = .{ 35, 44, 60 } } };
+const hub_bar: vaxis.Style = .{ .fg = base.fg, .bg = .{ .rgb = .{ 27, 77, 70 } } };
 const Row = struct { text: []const u8, style: vaxis.Style, offset: usize };
 
 const TransportStatus = enum {
@@ -203,10 +206,24 @@ const Model = struct {
     fn transportStatus(self: *Model, now: std.Io.Timestamp) TransportStatus {
         return TransportStatus.observe(if (self.bridge.pending) |p| p.action else null, self.pending_since.durationTo(now), self.command_mode or self.snapshot == null, self.bridge.failed);
     }
+    fn readOnly(self: *Model) bool {
+        return if (self.state()) |s| s.clientMode == .hub and !std.mem.eql(u8, s.chatId, s.hubChatId) else false;
+    }
+    fn canWrite(self: *Model) bool {
+        if (!self.readOnly()) return true;
+        self.note("Read-only task inspection. /rex open to participate in its Rex session.");
+        return false;
+    }
+    fn canList(self: *Model) bool {
+        if (self.bridge.client_mode != .task) return true;
+        self.note("Rex task client locked to this task. Use the hub TUI for other tasks.");
+        return false;
+    }
     fn settings(self: *Model) ?wire.ModelSettingsSnapshot {
         return if (self.state()) |s| s.modelSettings else null;
     }
     fn configure(self: *Model, selection: wire.ModelSelection) !void {
+        if (!self.canWrite()) return;
         const current = self.settings() orelse {
             self.note("Model settings unavailable; open /model (requires an updated hub).");
             return;
@@ -221,6 +238,7 @@ const Model = struct {
         } else self.note("Client request in flight; settings action not queued. Try again after its reply.");
     }
     fn cycleThinking(self: *Model) !void {
+        if (!self.canWrite()) return;
         const current = self.settings() orelse {
             self.note("Open /model to read available settings first.");
             return;
@@ -244,7 +262,8 @@ const Model = struct {
         self.note("Selected model no longer in the hub catalog; choose /model.");
     }
     fn canNavigate(self: *Model) bool {
-        if (self.locked() or self.settings_uncertain) {
+        if (!self.canList()) return false;
+        if (self.locked() or (self.settings_uncertain and !self.readOnly())) {
             self.note("Resolve saved requests/settings before switching or creating tasks.");
             return false;
         }
@@ -259,10 +278,15 @@ const Model = struct {
         if (try self.bridge.selectChat(id)) self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake) else self.note("Client request in flight; selection not queued.");
     }
     fn taskPage(self: *Model, after: ?[]const u8) !void {
+        if (!self.canList()) return;
         if (try self.bridge.tasks(after)) self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake) else self.note("Client request in flight; task read not queued.");
     }
     fn createTask(self: *Model, title: []const u8) !void {
         if (!self.canNavigate()) return;
+        if (self.readOnly()) {
+            self.note("Return to /hub to create and open a Rex task.");
+            return;
+        }
         if (title.len == 0 or title.len > 200) {
             self.note("Task title must be 1 to 200 UTF-8 bytes.");
             return;
@@ -270,6 +294,7 @@ const Model = struct {
         if (try self.bridge.request(.create, title, null)) self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake) else self.note("Client request in flight; task creation not queued.");
     }
     fn issue(self: *Model, action: Action) !void {
+        if ((action == .send or action == .retry or action == .discard or action == .stop or action == .configure) and !self.canWrite()) return;
         if (self.settings_uncertain and (action == .send or action == .retry)) {
             self.note("Settings outcome unconfirmed; wait for a fresh observation before input.");
             return;
@@ -305,9 +330,9 @@ const Model = struct {
             const id = std.mem.trim(u8, cmd[7..], " ");
             const n = std.fmt.parseInt(u64, id, 10) catch 0;
             if (n == 0 or n > 9007199254740991 or id[0] == '0' or !std.ascii.isDigit(id[0])) self.note("Use /select with a positive chat ID from /tasks.") else try self.selectChat(id);
-        } else if (std.mem.eql(u8, cmd, "main")) {
-            if (self.state()) |s| if (s.mainChatId) |id| try self.selectChat(id);
-        } else if (std.mem.eql(u8, cmd, "rex") or std.mem.eql(u8, cmd, "rex status")) try self.issue(.rexStatus) else if (std.mem.eql(u8, cmd, "rex inspect")) try self.issue(.rexInspect) else if (std.mem.eql(u8, cmd, "rex open") or std.mem.eql(u8, cmd, "rex reopen")) try self.issue(.rexOpen) else if (std.mem.eql(u8, cmd, "model")) try self.issue(.models) else if (self.command_prefix == '/') self.note("Use /tasks, /task TITLE, /select ID, /main, /rex or /model.") else if (std.mem.eql(u8, cmd, "q") or std.mem.eql(u8, cmd, "quit")) self.quit(ctx, false) else if (std.mem.eql(u8, cmd, "q!")) self.quit(ctx, true) else if (std.mem.eql(u8, cmd, "help")) self.help_visible = true else {
+        } else if (std.mem.eql(u8, cmd, "hub") or std.mem.eql(u8, cmd, "main")) {
+            if (self.state()) |s| try self.selectChat(s.hubChatId);
+        } else if (std.mem.eql(u8, cmd, "rex") or std.mem.eql(u8, cmd, "rex status")) try self.issue(.rexStatus) else if (std.mem.eql(u8, cmd, "rex inspect")) try self.issue(.rexInspect) else if (std.mem.eql(u8, cmd, "rex open") or std.mem.eql(u8, cmd, "rex reopen")) try self.issue(.rexOpen) else if (std.mem.eql(u8, cmd, "model")) try self.issue(.models) else if (self.command_prefix == '/') self.note(if (self.bridge.client_mode == .task) "Task locked: /rex or /model; :help for chat commands." else "Use /tasks, /task TITLE, /select ID, /hub, /rex or /model.") else if (std.mem.eql(u8, cmd, "q") or std.mem.eql(u8, cmd, "quit")) self.quit(ctx, false) else if (std.mem.eql(u8, cmd, "q!")) self.quit(ctx, true) else if (std.mem.eql(u8, cmd, "help")) self.help_visible = true else {
             const action: ?Action = if (std.mem.eql(u8, cmd, "send")) .send else if (std.mem.eql(u8, cmd, "retry")) .retry else if (std.mem.eql(u8, cmd, "discard")) .discard else if (std.mem.eql(u8, cmd, "stop")) .stop else if (std.mem.eql(u8, cmd, "older")) .older else if (std.mem.eql(u8, cmd, "latest")) .latest else null;
             if (action) |a| try self.issue(a) else self.note("Unknown command. :help shows the supported Vim and client commands.");
         }
@@ -393,7 +418,7 @@ const Model = struct {
             try self.issue(.send);
             return;
         }
-        const normal = self.focus == .chat or self.editor.mode != .insert or self.locked();
+        const normal = self.focus == .chat or self.editor.mode != .insert or self.locked() or self.readOnly();
         if ((normal and key.matches(':', .{})) or ((normal or self.editor.text.items.len == 0) and key.matches('/', .{}))) {
             self.command_mode = true;
             self.command_prefix = if (key.matches('/', .{})) '/' else ':';
@@ -436,12 +461,12 @@ const Model = struct {
                 return;
             } else if (key.matches('i', .{})) {
                 self.focus = .prompt;
-                if (!self.locked()) try self.editor.key(key);
+                if (!self.locked() and !self.readOnly()) try self.editor.key(key);
             }
             self.chat_g = false;
             return;
         }
-        if (!self.locked()) try self.editor.key(key) else if (key.matches(vaxis.Key.escape, .{})) self.editor.mode = .normal;
+        if (!self.locked() and !self.readOnly()) try self.editor.key(key) else if (key.matches(vaxis.Key.escape, .{})) self.editor.mode = .normal;
     }
     fn event(ptr: *anyopaque, ctx: *fw.EventContext, ev: fw.Event) !void {
         const self: *Model = @ptrCast(@alignCast(ptr));
@@ -551,12 +576,12 @@ const Model = struct {
             .paste_start => {
                 if (self.terminal_status) |status| status.presentation.acknowledge();
                 self.paste_mode = true;
-                self.reject_paste = self.command_mode or self.help_visible or self.model_picker or self.task_picker or self.rex_view or self.locked();
+                self.reject_paste = self.command_mode or self.help_visible or self.model_picker or self.task_picker or self.rex_view or self.locked() or self.readOnly();
                 self.paste_overflow = false;
                 self.paste_buffer.clearRetainingCapacity();
             },
             .paste_end => {
-                if (self.paste_overflow) self.note("Paste exceeds 16 KiB; entire paste refused, prompt unchanged.") else if (!self.reject_paste and !self.locked()) {
+                if (self.paste_overflow) self.note("Paste exceeds 16 KiB; entire paste refused, prompt unchanged.") else if (!self.reject_paste and !self.locked() and !self.readOnly()) {
                     self.editor.paste(self.paste_buffer.items) catch |err| {
                         if (err == error.PromptTooLarge or err == error.InvalidUtf8) self.note("Invalid or oversized paste refused in full; prompt unchanged.") else return err;
                     };
@@ -587,16 +612,17 @@ const Model = struct {
             return surface;
         }
         const s = self.state();
-        const title = try std.fmt.allocPrint(ctx.arena, " deck / {s}  ·  chat {s}  ·  {s} [{s}]", .{ if (s) |v| v.title else "connecting", if (s) |v| v.chatId else "?", if (s) |v| v.model else "", if (self.settings()) |settings_value| @tagName(settings_value.selection.thinkingLevel) else "thinking unavailable" });
-        for (0..w) |x| surface.writeCell(@intCast(x), 0, .{ .style = bar });
-        line(ctx, surface, 0, 0, title, bar, null, 0);
+        const status_bar = if (self.bridge.client_mode == .hub) hub_bar else bar;
+        const title = try std.fmt.allocPrint(ctx.arena, " deck / {s} · {s} · chat {s} · {s} [{s}]", .{ if (self.bridge.client_mode == .hub) "hub" else "task / Rex locked", if (s) |v| v.title else "connecting", if (s) |v| v.chatId else "?", if (s) |v| v.model else "", if (self.settings()) |settings_value| @tagName(settings_value.selection.thinkingLevel) else "thinking unavailable" });
+        for (0..w) |x| surface.writeCell(@intCast(x), 0, .{ .style = status_bar });
+        line(ctx, surface, 0, 0, title, status_bar, null, 0);
         if (self.task_picker) {
             line(ctx, surface, 1, 2, "TASKS · saved chats (labels are not host availability)", accent, null, 0);
             if (s) |snap| if (snap.tasks) |page| {
                 const count = @as(usize, h - 7);
                 const start = (self.task_index + 1) -| count;
                 for (page.items[start..@min(page.items.len, start + count)], start..) |task, index| {
-                    const text = try std.fmt.allocPrint(ctx.arena, "{s} {s} [{s}] {s} · {s}", .{ if (index == self.task_index) ">" else " ", task.chatId, @tagName(task.kind), task.title, task.cwd });
+                    const text = try std.fmt.allocPrint(ctx.arena, "{s} {s} [{s}] {s} · {s}", .{ if (index == self.task_index) ">" else " ", task.chatId, if (task.kind == .main) "hub" else @tagName(task.kind), task.title, task.cwd });
                     var style = base;
                     style.reverse = index == self.task_index;
                     line(ctx, surface, 1, @intCast(3 + index - start), text, style, null, 0);
@@ -605,7 +631,7 @@ const Model = struct {
                 line(ctx, surface, 1, h - 3, if (page.next != null) "More pages: n · first page: g" else "Last page · first page: g", dim, null, 0);
             };
             line(ctx, surface, 1, h - 2, self.notice[0..self.notice_len], dim, null, 0);
-            line(ctx, surface, 1, h - 1, "j/k · Enter select · Esc cancel · /task TITLE creates", accent, null, 0);
+            line(ctx, surface, 1, h - 1, "j/k · Enter inspect · Esc cancel · /task TITLE creates + opens Rex", accent, null, 0);
             return surface;
         }
         if (self.rex_view) {
@@ -641,7 +667,7 @@ const Model = struct {
                 }
             }
             line(ctx, surface, 1, h - 2, self.notice[0..self.notice_len], dim, null, 0);
-            line(ctx, surface, 1, h - 1, "j/k or arrows · Enter select · Esc cancel · idle chats only", accent, null, 0);
+            line(ctx, surface, 1, h - 1, if (self.readOnly()) "Read-only settings · Esc close · /rex open to participate" else "j/k or arrows · Enter select · Esc cancel · idle chats only", accent, null, 0);
             return surface;
         }
         if (self.help_visible) {
@@ -666,7 +692,7 @@ const Model = struct {
             try rows(ctx, &chat, entry.text, w - 4, if (entry.role == .note or entry.role == .tool) dim else base);
             try rows(ctx, &chat, "", w - 4, base);
         };
-        if (chat.items.len == 0) try rows(ctx, &chat, if (s == null) "Connecting to the local hub…" else "No retained messages. Press i to write; Ctrl-S to submit.", w - 4, dim);
+        if (chat.items.len == 0) try rows(ctx, &chat, if (s == null) "Connecting to the local hub…" else if (self.readOnly()) "No retained messages. Read-only; /rex open to participate." else "No retained messages. Press i to write; Ctrl-S to submit.", w - 4, dim);
         self.scroll_max = chat.items.len -| chat_h;
         self.scroll = @min(self.scroll, self.scroll_max);
         const first = self.scroll_max - self.scroll;
@@ -674,7 +700,7 @@ const Model = struct {
         const preview = if (s) |snap| snap.preview else "";
         const live = if (preview.len > 0) try std.fmt.allocPrint(ctx.arena, " live sample · {s}", .{preview[0 .. std.mem.indexOfScalar(u8, preview, '\n') orelse preview.len]}) else "";
         line(ctx, surface, 1, chat_h + 1, live, dim, null, 0);
-        const mode = if (s != null and s.?.draft != null and !s.?.draft.?.saved) "LOCKED UNSAVED" else if (s != null and s.?.draft != null and s.?.draft.?.clipped) "SAVED PREVIEW" else if (s != null and s.?.draft != null and s.?.draft.?.saved) "SAVED LOCKED" else if (self.locked()) "LOCKED" else switch (self.editor.mode) {
+        const mode = if (self.readOnly()) "READ ONLY" else if (s != null and s.?.draft != null and !s.?.draft.?.saved) "LOCKED UNSAVED" else if (s != null and s.?.draft != null and s.?.draft.?.clipped) "SAVED PREVIEW" else if (s != null and s.?.draft != null and s.?.draft.?.saved) "SAVED LOCKED" else if (self.locked()) "LOCKED" else switch (self.editor.mode) {
             .normal => "NORMAL",
             .insert => "INSERT",
             .visual => "VISUAL",
@@ -690,7 +716,7 @@ const Model = struct {
         };
         const start = (cursor_row + 1) -| prompt_h;
         for (prompt.items[start..@min(prompt.items.len, start + prompt_h)], 0..) |row, y| line(ctx, surface, 2, @intCast(chat_h + 3 + y), row.text, row.style, self.editor.selection(), row.offset);
-        if (self.focus == .prompt and !self.command_mode and !self.locked()) {
+        if (self.focus == .prompt and !self.command_mode and !self.locked() and !self.readOnly()) {
             const row = prompt.items[cursor_row];
             const end = @min(self.editor.cursor - row.offset, row.text.len);
             const col = @min(w - 3, 2 + displayWidth(ctx, row.text[0..end]));
@@ -701,12 +727,12 @@ const Model = struct {
             line(ctx, surface, 1, h - 2, command_line, accent, null, 0);
             surface.cursor = .{ .row = h - 2, .col = @intCast(@min(w - 1, displayWidth(ctx, self.command.items) + 2)), .shape = .beam };
         } else line(ctx, surface, 1, h - 2, self.notice[0..self.notice_len], dim, null, 0);
-        for (0..w) |x| surface.writeCell(@intCast(x), h - 1, .{ .style = bar });
+        for (0..w) |x| surface.writeCell(@intCast(x), h - 1, .{ .style = status_bar });
         const queued = if (s != null and s.?.activityKnown) try std.fmt.allocPrint(ctx.arena, "{d}", .{s.?.queued}) else "?";
         const status = try std.fmt.allocPrint(ctx.arena, " {s} · {s} / {s} · {s}{s} · queued {s} · {s} · {s}", .{ self.shown_transport.text(), if (self.focus == .chat) "CHAT" else "PROMPT", mode, if (self.online) "" else "STALE / ", if (s) |snap| (if (!snap.activityKnown) "activity unavailable" else if (snap.busy) "busy sample" else "idle sample") else "connecting", queued, if (s) |snap| snap.tools else "", if (s) |snap| (if (snap.historical) "older / :latest" else if (self.scroll > 0) "scroll held" else "latest") else "" });
-        line(ctx, surface, 0, h - 1, status, bar, null, 0);
-        const hints = "  ^S send  :help  :q ";
-        if (w >= 60) line(ctx, surface, @intCast(w - hints.len), h - 1, hints, bar, null, 0);
+        line(ctx, surface, 0, h - 1, status, status_bar, null, 0);
+        const hints: []const u8 = if (self.readOnly()) " /rex open  /hub  :q " else "  ^S send  :help  :q ";
+        if (w >= 60) line(ctx, surface, @intCast(w - hints.len), h - 1, hints, status_bar, null, 0);
         return surface;
     }
 };
@@ -763,6 +789,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     if (allocation_id != null and (hub_id == null or chat_id == null)) return error.InvalidAllocation;
     var bridge = try Bridge.start(.{ .io = init.io, .environ = init.minimal.environ }, init.gpa, forwarded.items);
     defer bridge.deinit();
+    bridge.client_mode = if (allocation_id != null) .task else .hub;
     if (hub_id) |id| bridge.hub_id = try init.gpa.dupe(u8, id);
     if (chat_id) |id| bridge.chat_id = try init.gpa.dupe(u8, id);
     var model: Model = .{ .a = init.gpa, .bridge = &bridge, .editor = Editor.init(init.gpa) };
@@ -809,7 +836,9 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
         .value = .{ .case0 = .{ .version = 1, .id = "1", .ok = true, .snapshot = .{
             .hubId = "hub",
             .chatId = "1",
-            .title = "Main",
+            .clientMode = .hub,
+            .hubChatId = "1",
+            .title = "Hub",
             .model = "mock",
             .tools = "offline",
             .activityKnown = false,
@@ -879,6 +908,37 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     model.snapshot.?.value.case0.snapshot.draft.?.saved = true;
     model.quit(&ctx, false);
     try std.testing.expect(ctx.quit);
+
+    // Hub inspection keeps the hub color but cannot edit or mutate a task.
+    model.snapshot.?.value.case0.snapshot.draft = null;
+    model.snapshot.?.value.case0.snapshot.chatId = "2";
+    try model.editor.set("");
+    try std.testing.expect(model.readOnly());
+    try model.press(&ctx, .{ .codepoint = 'i', .text = "i" });
+    try Model.event(&model, &ctx, .paste_start);
+    try model.press(&ctx, .{ .codepoint = 'x', .text = "must not edit" });
+    try Model.event(&model, &ctx, .paste_end);
+    try std.testing.expectEqualStrings("", model.editor.text.items);
+    for ([_]Action{ .send, .retry, .discard, .stop }) |action| try model.issue(action);
+    try std.testing.expect(bridge.pending == null);
+    const inspect_surface = try Model.draw(&model, draw_ctx);
+    try std.testing.expectEqualDeep(hub_bar.bg, inspect_surface.buffer[0].style.bg);
+    try std.testing.expectEqualDeep(hub_bar.bg, inspect_surface.buffer[3999].style.bg);
+    try std.testing.expect(inspect_surface.cursor == null);
+
+    // Task clients use a different color and cannot navigate, including /main.
+    bridge.client_mode = .task;
+    model.snapshot.?.value.case0.snapshot.clientMode = .task;
+    try std.testing.expect(!model.readOnly());
+    for ([_][]const u8{ "tasks", "hub", "main", "select 1", "task no" }) |cmd| {
+        try model.command.appendSlice(a, cmd);
+        try model.ex(&ctx);
+        try std.testing.expect(bridge.pending == null);
+    }
+    const task_surface = try Model.draw(&model, draw_ctx);
+    try std.testing.expectEqualDeep(bar.bg, task_surface.buffer[0].style.bg);
+    try std.testing.expectEqualDeep(bar.bg, task_surface.buffer[3999].style.bg);
+    try std.testing.expect(!std.meta.eql(hub_bar.bg, bar.bg));
 }
 
 test "transport display suppresses quick polls but shows slow reads and explicit actions" {

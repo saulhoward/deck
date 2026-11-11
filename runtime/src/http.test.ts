@@ -137,11 +137,14 @@ test("loopback hub and plain detached client: admission, security checks, task i
     const main = JSON.stringify(await command("history", { chatId: status.mainChatId }));
     const taskHistory = JSON.stringify(await command("history", { chatId: task.chatId }));
     assert.doesNotMatch(main, /Task-only message|Task selected input/);
-    assert.match(main, /Main selected input/); assert.match(taskHistory, /Task selected input/);
+    assert.match(main, /Main selected input/); assert.doesNotMatch(taskHistory, /Task selected input/);
+    assert.match(switched.stderr, /Read-only task inspection/);
     assert.doesNotMatch(taskHistory, /Main selected input/);
     // Public client -> real HTTP/IPC -> Pi admin task -> Zig read, with no inference.
     await writeFile(join(directory, "AGENTS.md"), "NATIVE_IMPORTED_INSTRUCTIONS");
-    const importedChat = await command("create_task", { ...taskArgs, requestId: "import-target", title: "Import target" });
+    const importedChat = { chatId: status.mainChatId };
+    for (let i = 0; i < 100 && (await command("activity", importedChat)).busy; i++) await new Promise(resolve => setTimeout(resolve, 20));
+    const beforeImport = (await command("history", importedChat)).items;
     const importing = spawnSync(binary!, ["agent", "--no-tui", "--port", String(port), "--task", String(importedChat.chatId)], { env, input: "/instructions\n/instructions load\n/instructions\n/exit\n", encoding: "utf8", timeout: 5000 });
     assert.equal(importing.status, 0, importing.stderr); assert.match(importing.stdout, /Application not yet confirmed/); assert.doesNotMatch(importing.stdout, /NATIVE_IMPORTED_INSTRUCTIONS/);
     const importId = /Instruction import admitted: task ([1-9]\d*)\./.exec(importing.stdout)?.[1]; assert.ok(importId);
@@ -153,7 +156,7 @@ test("loopback hub and plain detached client: admission, security checks, task i
     }
     assert.equal(((imported.import as Record<string, unknown>).result as Record<string, unknown>).status, "applied");
     assert.equal((await command("history", { chatId: importedChat.chatId })).items instanceof Array, true);
-    assert.equal(((await command("history", { chatId: importedChat.chatId })).items as unknown[]).length, 0);
+    assert.deepEqual((await command("history", { chatId: importedChat.chatId })).items, beforeImport);
     const operations = await readdir(join(directory, "worker", "operations"));
     await writeFile(join(directory, "AGENTS.md"), "CHANGED_NOT_RELOADED");
     assert.deepEqual(await command("instruction_status", { chatId: importedChat.chatId }), imported);

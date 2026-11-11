@@ -263,7 +263,9 @@ test("real PTY: real isolated mock hub retains input and answer after TUI detach
   const initialize = spawn(resolve(testBinary), ["init", "--directory", directory], { env: local.env }); initialize.stdout.resume(); initialize.stderr.resume();
   const initialized = (await once(initialize, "close"))[0];
   if (initialized !== 0) { await local.close(); assert.fail("Scratch hub initialization failed"); }
-  const hub = spawn(resolve(testBinary), ["serve", "--mock", "--port", String(port), "--directory", directory, "--workspace", local.env.DECK_CLIENT_STATE_DIRECTORY], { env: local.env });
+  // Task creation now opens Rex. Keep worker discovery away from any live
+  // operator server; real Rex tests use their own isolated private servers.
+  const hub = spawn(resolve(testBinary), ["serve", "--mock", "--port", String(port), "--directory", directory, "--workspace", local.env.DECK_CLIENT_STATE_DIRECTORY], { env: { ...local.env, DECK_NODE: process.execPath, PATH: directory } });
   const closed = once(hub, "close"); let errors = ""; hub.stdout.resume(); hub.stderr.on("data", (chunk) => { errors += chunk; });
   try {
     let status: any;
@@ -281,17 +283,17 @@ test("real PTY: real isolated mock hub retains input and answer after TUI detach
     const settings: any = await hubCommand(port, "model_settings", { chatId: status.chatId }, status.hubId);
     await pty(port, local.env, [
       { wait: `${status.model.provider}/${status.model.modelId}` },
-      { keys: "/task TUI created task" }, { wait: "client idle" }, { keys: "\r" }, { wait: "created; /select" },
+      { keys: "/task TUI created task" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Rex open unconfirmed" },
       { keys: "/tasks" }, { wait: "client idle" }, { keys: "\r" }, { wait: "TASKS" }, { keys: "j\r" },
-      { wait: "deck / TUI created task" }, { wait: `[${settings.selection.thinkingLevel}]` },
+      { wait: "deck / hub · TUI created task" }, { wait: `[${settings.selection.thinkingLevel}]` }, { wait: "READ ONLY" },
       { keys: "itask-only input" }, { keys: "\x1b" }, { keys: ":send" }, { wait: "client idle" }, { keys: "\r" },
-      { wait: "Input admitted" }, { wait: "Deck prototype response" }, { keys: ":q\r" },
+      { wait: "Read-only task inspection" }, { wait: "0/16384 bytes" }, { keys: ":q\r" },
     ]);
     const chats: any = await hubCommand(port, "list_chats", {}, status.hubId);
     const task = chats.items.find((c: any) => c.title === "TUI created task"); assert.ok(task);
     const taskHistory: any = await hubCommand(port, "history", { chatId: task.chatId }, status.hubId);
-    assert.equal(taskHistory.items.filter((e: any) => e.kind === "deck.input").length, 1);
-    assert.ok(taskHistory.items.some((e: any) => e.kind === "deck.input" && e.data.text === "task-only input"));
+    assert.equal(taskHistory.items.filter((e: any) => e.kind === "deck.input").length, 0);
+    assert.ok(!taskHistory.items.some((e: any) => e.kind === "pi.assistant"));
     assert.deepEqual((await hubCommand(port, "history", { chatId: status.chatId, limit: 80 }, status.hubId) as any).items, history.items);
     const after: any = await hubCommand(port, "status", {}, status.hubId); assert.equal(after.hubId, status.hubId);
   } finally {

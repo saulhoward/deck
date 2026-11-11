@@ -30,7 +30,7 @@ const runtime = await DeckRuntime.open(args[0]!, { models, model: { provider: fa
   rexClient: basename(args[9]!) === ".deck-wrapped" ? join(dirname(args[9]!), "deck") : args[9]!,
   binding: { machineId: args[1]!, cwd: args[2]! }, hostFiles: { call: async (...request) => {
     const result = await files.call(...request);
-    if (request[2] === "rex_allocate" && result.ok && process.env.DECK_REX_ALLOC_REQUEST) {
+    if (request[2] === "rex_allocate" && result.ok && process.env.DECK_REX_ALLOC_REQUEST && await exists(process.env.DECK_REX_ALLOC_REQUEST)) {
       // Test gate: force registration to beat native-result apply. Production
       // allocation does not wait for client startup or change its effect result.
       const plan = JSON.parse(String(request[3].plan)) as { chatId: string };

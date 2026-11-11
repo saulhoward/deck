@@ -15,7 +15,7 @@ for (const mode of ["false", "truthy", "extra", "lost"] as const) test(`plain st
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const { id, command, args, hubId } = JSON.parse(Buffer.concat(chunks).toString());
     const reply = (result: unknown) => response.end(JSON.stringify({ version: 1, id, ok: true, result }));
-    if (command === "status") return void reply({ hubId: "admin-hub", mainChatId: "1", chatId: "2", model: {}, tools: "offline" });
+    if (command === "status") return void reply({ hubId: "admin-hub", mainChatId: "2", chatId: "2", model: {}, tools: "offline" });
     if (command === "history") return void reply({ items: [] });
     assert.equal(command, "stop"); assert.equal(hubId, "admin-hub"); stops.push(args);
     if (!repaired && mode === "lost") return response.destroy();
@@ -41,7 +41,7 @@ test("acknowledged stop leaves an existing unacknowledged input draft intact and
   await store.save({ kind: "input", chatId: "2", requestId, text: "UNACKNOWLEDGED_INPUT", mode: "steer" }); const before = await store.load(requestId); let stops = 0;
   const server = createServer(async (request, response) => {
     const chunks = []; for await (const chunk of request) chunks.push(chunk); const { id, command, args } = JSON.parse(Buffer.concat(chunks).toString()); let result: unknown;
-    if (command === "status") result = { hubId: "admin-hub", mainChatId: "1", chatId: "2", model: {}, tools: "offline" };
+    if (command === "status") result = { hubId: "admin-hub", mainChatId: "2", chatId: "2", model: {}, tools: "offline" };
     else if (command === "history") result = { items: [] };
     else { assert.equal(command, "stop"); assert.deepEqual(args, { chatId: "2" }); stops++; result = { requested: true }; }
     response.end(JSON.stringify({ version: 1, id, ok: true, result }));

@@ -10,7 +10,7 @@ import { encodeFrame, FrameDecoder } from "./protocol.js";
 
 const allocation = "12345678-1234-4234-8234-123456789abc";
 const block = `block:${allocation}`;
-for (const mode of ["matched", "unbound", "old_hub", "wrong_hub", "wrong_chat", "bad_history", "lost_ack", "wrong_block", "unsafe_task", "live_claim", "private_ack"]) {
+for (const mode of ["matched", "unbound", "hub_chat", "old_hub", "wrong_hub", "wrong_chat", "bad_history", "lost_ack", "wrong_block", "unsafe_task", "live_claim", "private_ack"]) {
   test(`TUI allocation-bound startup ${mode}: input follows verified registration, never retries startup`, { timeout: 10_000 }, async () => {
     const local = await clientEnv(); const calls: string[] = []; let registered = false;
     const server = createServer(async (request, response) => {
@@ -18,7 +18,7 @@ for (const mode of ["matched", "unbound", "old_hub", "wrong_hub", "wrong_chat", 
       const value = JSON.parse(Buffer.concat(chunks).toString()); calls.push(value.command);
       assert.equal(value.hubId, "expected-hub");
       const reply = (result: object) => response.end(JSON.stringify({ version: 1, id: value.id, ok: true, result }));
-      if (value.command === "status") reply({ hubId: mode === "wrong_hub" ? "another-hub" : "expected-hub", hubGuard: 1, ...(mode === "old_hub" ? {} : { rexStartup: 1 }), mainChatId: "1", chatId: mode === "wrong_chat" ? "3" : "2", tools: "offline" });
+      if (value.command === "status") reply({ hubId: mode === "wrong_hub" ? "another-hub" : "expected-hub", hubGuard: 1, ...(mode === "old_hub" ? {} : { rexStartup: 1 }), mainChatId: mode === "hub_chat" ? "2" : "1", chatId: mode === "wrong_chat" ? "3" : "2", tools: "offline" });
       else if (value.command === "history") reply(mode === "bad_history" ? { items: [{ id: "1" }] } : { items: [] });
       else if (value.command === "rex_startup") {
         assert.deepEqual(calls, ["status", "history", "rex_startup"]);
@@ -42,7 +42,7 @@ for (const mode of ["matched", "unbound", "old_hub", "wrong_hub", "wrong_chat", 
       await closed;
       const success = mode === "matched" || mode === "unbound";
       assert.equal(replies.length, success ? 2 : 0); assert.equal(calls.filter((c) => c === "admit").length, success ? 1 : 0);
-      assert.equal(calls.filter((c) => c === "rex_startup").length, ["old_hub", "wrong_hub", "wrong_chat", "bad_history"].includes(mode) ? 0 : 1);
+      assert.equal(calls.filter((c) => c === "rex_startup").length, ["hub_chat", "old_hub", "wrong_hub", "wrong_chat", "bad_history"].includes(mode) ? 0 : 1);
       if (success) { assert.equal(replies[0].ok, true); assert.match(replies[0].snapshot.notice, /Rex startup registered/); }
       assert.doesNotMatch(errors + JSON.stringify(replies), /PRIVATE_ACK/);
       assert.deepEqual(await new DraftStore("expected-hub", local.env.DECK_CLIENT_STATE_DIRECTORY).list(), []);

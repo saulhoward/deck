@@ -26,14 +26,17 @@ const help =
     \\  deck agent [--tui | --no-tui] [--port 52800] [--task CHAT_ID] [--message TEXT]
     \\    TTYs default to the Zig TUI; --message and redirected input use the plain client.
     \\    TUI: i insert, Esc normal, Tab chat/prompt, Ctrl-S send, :help, :q detach.
+    \\  deck remote-check --registry /private/registry.json --machine MACHINE_ID
+    \\    --tailscale /absolute/path/to/tailscale --peer TAILSCALE_IP:PORT
+    \\    Read-only peer/registration diagnostic; does not connect a worker or expose the hub.
     \\  deck --help | --version
     \\
     \\serve binds only 127.0.0.1. --stdio selects private framed IPC instead.
-    \\--workspace PATH sets the initial main workspace (saved chats keep their binding).
+    \\--workspace PATH sets the initial hub workspace (saved chats keep their binding).
     \\Native read/write/exact-edit/bash tools run as your user, without a sandbox.
     \\The mock provider does not perform inference.
     \\Nix installs the runtime and Node privately. Checkout builds need npm run build.
-    \\The plain client supports /tasks, /select CHAT_ID, /main, /task TITLE,
+    \\The plain hub client supports /tasks, /select CHAT_ID, /hub, /task TITLE,
     \\/older, /activity, /stop, /status and /exit.
     \\/instructions load imports saved-worker AGENTS.md only while idle, replacing
     \\explicit instructions. /instructions [TASK_ID] reads source/import status.
@@ -58,8 +61,11 @@ const help =
     \\Rex open/reopen is best-effort, ownerless-task-only, with no automatic retry.
     \\Duplicates after races/lost replies need manual cleanup. No GUI focus/attach.
     \\Plain /rex open|reopen|status|inspect uses the selected task and defaults/saved target.
-    \\TUI /tasks, /task TITLE, /select CHAT_ID and /main manage task chats.
+    \\Hub TUI /tasks and /select CHAT_ID inspect read-only; /hub returns to hub.
+    \\Hub /task TITLE creates and requests Rex; no non-Rex task participation.
     \\TUI /rex shows selected-task status; i inspects, o explicitly opens/reopens.
+    \\Rex task clients are allocation-verified and locked to one task.
+    \\Direct --task launches are read-only, including plain and one-shot paths.
     \\Remote workers and scheduled jobs are not yet available.
     \\
 ;
@@ -281,6 +287,13 @@ pub fn main(init: std.process.Init) void {
     const allocator = init.gpa;
     const native: Native = .{ .io = init.io, .environ = init.minimal.environ };
     const args = init.minimal.args.toSlice(init.arena.allocator()) catch std.process.exit(1);
+    if (args.len > 1 and std.mem.eql(u8, args[1], "remote-check")) {
+        @import("remote_check.zig").run(native, allocator, args[2..]) catch |err| {
+            std.debug.print("deck: remote peer unconfirmed ({s}); no connection enabled\n", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        return;
+    }
     if (args.len > 1 and std.mem.eql(u8, args[1], "agent")) {
         const interactive = tui.selected(args[2..], std.c.isatty(0) == 1 and std.c.isatty(1) == 1) catch {
             std.debug.print("--tui cannot be combined with --no-tui or --message\n", .{});
@@ -352,4 +365,5 @@ test {
     _ = tui;
     _ = @import("tui_editor.zig");
     _ = @import("tui_bridge.zig");
+    _ = @import("remote_test.zig");
 }

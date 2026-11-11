@@ -15,7 +15,7 @@ import type { TuiRequest } from "./generated/contracts.js";
 const hub = "12345678-1234-4234-8234-123456789abc";
 async function fixture() {
   const local = await clientEnv(); const requests: any[] = [];
-  const flags = { loseCreate: false, loseOpen: false, badSelect: false, badList: false, sparse: false, badRex: false };
+  const flags = { noRex: false, loseCreate: false, loseOpen: false, badSelect: false, badList: false, sparse: false, badRex: false };
   const chats = [
     { chatId: "1", kind: "main", title: "Main", machineId: "saved-worker", cwd: "/saved/main" },
     { chatId: "2", kind: "task", title: "Existing task", machineId: "other-worker", cwd: "/saved/task" },
@@ -25,7 +25,7 @@ async function fixture() {
     const value = JSON.parse(Buffer.concat(chunks).toString()); requests.push(value);
     const { command, args, id } = value; const chat = chats.find((c) => c.chatId === (args.chatId ?? "1"))!;
     let result: any;
-    if (command === "status") result = { hubId: hub, hubGuard: 1, rexOpen: 1, mainChatId: "1", chatId: flags.badSelect ? "1" : chat.chatId, binding: chat, tools: "offline" };
+    if (command === "status") result = { hubId: hub, hubGuard: 1, ...(flags.noRex ? {} : { rexOpen: 1 }), rexStartup: 1, mainChatId: "1", chatId: flags.badSelect ? "1" : chat.chatId, binding: chat, tools: "offline", activity: { scheduling: "running", tasks: [{ record: { otherTaskText: "OTHER_TASK_CONTENT" }, state: {} }], submissions: [] } };
     else if (command === "history") result = { items: [{ id: Number(chat.chatId) * 100, kind: "deck.input", data: { text: `history for ${chat.chatId}` } }], next: String(Number(chat.chatId) * 100) };
     else if (command === "list_chats") result = flags.badList ? { items: [chats[1], chats[0]] } : flags.sparse && !args.after ? { items: [], next: "1" } : { items: chats.filter((c) => Number(c.chatId) > Number(args.after ?? 0)) };
     else if (command === "create_task") {
@@ -37,7 +37,9 @@ async function fixture() {
     else if (command === "rex_open") {
       if (flags.loseOpen) { response.destroy(); return; }
       result = { version: 1, chatId: args.chatId, requestId: args.requestId, taskId: "9", status: "admitted", completion: "not_waited", bestEffort: true };
-    } else if (command === "admit") result = { submissionId: "9" };
+    } else if (command === "rex_startup") result = { version: 1, taskId: "8", chatId: args.chatId, allocationId: args.allocationId, blockId: args.blockId, registered: true, observation: "matched", historical: true, live: "not_checked" };
+    else if (command === "activity") result = { chatId: args.chatId, busy: false, queued: 0, tools: [], omittedTools: 0, compactions: 0, compactionFailed: false };
+    else if (command === "admit") result = { submissionId: "9" };
     else assert.fail(`Unexpected command ${command}`);
     // Binding projections do not contain their enclosing chat identity.
     if (result?.binding) { result.binding = { ...result.binding }; delete result.binding.chatId; }
@@ -47,7 +49,8 @@ async function fixture() {
   const session = new TuiSession((name, args, pin) => hubCommand(address.port, name, args, pin), undefined, undefined, local.env.DECK_CLIENT_STATE_DIRECTORY, address.port);
   let id = 0;
   const act = (action: TuiRequest["action"], args: Partial<TuiRequest> = {}) => session.handle({ version: 1, id: String(++id), action, ...args });
-  return { local, requests, flags, chats, port: address.port, act, close: async () => { server.closeAllConnections(); await new Promise<void>((r) => server.close(() => r())); await local.close(); } };
+  const taskSession = () => new TuiSession((name, args, pin) => hubCommand(address.port, name, args, pin), "2", hub, local.env.DECK_CLIENT_STATE_DIRECTORY, address.port);
+  return { local, requests, flags, chats, port: address.port, act, taskSession, close: async () => { server.closeAllConnections(); await new Promise<void>((r) => server.close(() => r())); await local.close(); } };
 }
 
 test("TUI task pages and selection keep identity, old reads, and target drafts isolated", async () => {
@@ -64,12 +67,16 @@ test("TUI task pages and selection keep identity, old reads, and target drafts i
     const store = new DraftStore(hub, f.local.env.DECK_CLIENT_STATE_DIRECTORY);
     await store.save({ kind: "input", chatId: "2", requestId: "11111111-1111-4111-8111-111111111111", text: "original target input", mode: "steer" });
     const selected = await f.act("select", { chatId: "2" });
-    assert.equal(selected.chatId, "2"); assert.equal(selected.mainChatId, "1"); assert.equal(selected.draft!.text, "original target input");
+    assert.equal(selected.chatId, "2"); assert.equal(selected.hubChatId, "1"); assert.equal(selected.clientMode, "hub"); assert.equal(selected.draft, null);
+    assert.match(selected.notice, /Read-only/);
     assert.deepEqual(selected.entries, []); assert.equal(selected.preview, ""); assert.equal(selected.tasks, undefined); assert.equal(selected.rex, undefined);
-    await assert.rejects(f.act("select", { chatId: "1" }), /Resolve saved/);
+    for (const action of ["send", "retry", "discard", "stop", "configure"] as const) {
+      const change = { provider: "mock", modelId: "echo", thinkingLevel: "off" as const };
+      await assert.rejects(f.act(action, action === "send" ? { text: "must not send" } : action === "configure" ? { configuration: { expected: change, selection: change } } : {}), /Read-only/);
+    }
     assert.notDeepEqual((await f.act("poll")).entries, initial.entries);
     assert.ok(!f.requests.some((r) => ["admit", "stop", "create_task", "rex_open"].includes(r.command)));
-    await f.act("retry"); assert.equal(f.requests.at(-1).args.chatId, "2");
+    assert.equal((await store.load("11111111-1111-4111-8111-111111111111")).request.kind, "input");
     await f.act("select", { chatId: "1" }); assert.equal((await f.act("poll")).chatId, "1");
     assert.ok(f.requests.slice(1).every((r) => r.hubId === hub));
   } finally { await f.close(); }
@@ -128,8 +135,106 @@ test("TUI task boundary rejects mixed actions, cursor drift and unauthorized cha
   } finally { await f.close(); }
 });
 
+test("direct task selection never grants participation; registered Rex clients cannot escape their task", async () => {
+  const f = await fixture();
+  try {
+    const direct = f.taskSession();
+    assert.equal((await direct.handle({ version: 1, id: "1", action: "poll" })).clientMode, "hub");
+    await assert.rejects(direct.handle({ version: 1, id: "2", action: "send", text: "no direct input" }), /Read-only/);
+    const store = new DraftStore(hub, f.local.env.DECK_CLIENT_STATE_DIRECTORY);
+    const draft = { kind: "input" as const, chatId: "2", requestId: "11111111-1111-4111-8111-111111111111", text: "exact saved bytes", mode: "steer" as const };
+    await store.save(draft);
+    const task = f.taskSession();
+    await task.registerStartup(hub, `block:${hub}`);
+    const state = await task.handle({ version: 1, id: "1", action: "poll" });
+    assert.equal(state.clientMode, "task"); assert.equal(state.draft!.text, draft.text);
+    const before = f.requests.length;
+    for (const request of [{ action: "tasks" }, { action: "select", chatId: "1" }, { action: "select", chatId: "3" }, { action: "create", text: "no child UI" }] as const) {
+      await assert.rejects(task.handle({ version: 1, id: "2", ...request }), /locked/);
+    }
+    assert.equal(f.requests.length, before);
+    await task.handle({ version: 1, id: "3", action: "retry" });
+    assert.equal(f.requests.at(-1).command, "admit"); assert.equal(f.requests.at(-1).args.chatId, "2");
+    assert.equal(f.requests.at(-1).args.text, draft.text);
+    const reply = { version: 1, id: "r", ok: true, snapshot: state };
+    assert.equal(validReply(reply, "r", hub, "2", "poll", undefined, undefined, "hub", "1"), false);
+    assert.equal(validReply(reply, "r", hub, "2", "poll", undefined, undefined, "task", "3"), false);
+    assert.equal(validReply({ ...reply, snapshot: { ...state, chatId: "1" } }, "r"), false);
+    assert.equal(validReply({ ...reply, snapshot: { ...state, tasks: { items: [] } } }, "r"), false);
+    assert.equal(validReply({ ...reply, snapshot: { ...state, clientMode: "hub" } }, "r"), false); // inspection cannot expose a writable draft
+  } finally { await f.close(); }
+});
+
+test("task creation without Rex capability refuses before a draft or mutation", async () => {
+  const f = await fixture();
+  try {
+    f.flags.noRex = true;
+    await assert.rejects(f.act("create", { text: "not a local task" }), /Rex support is required/);
+    assert.equal((await f.act("poll")).draft, null);
+    assert.ok(!f.requests.some(r => ["create_task", "rex_open", "admit"].includes(r.command)));
+    assert.deepEqual(await new DraftStore(hub, f.local.env.DECK_CLIENT_STATE_DIRECTORY).list(), []);
+  } finally { await f.close(); }
+});
+
+test("acknowledged task creation plus lost Rex open never replays either mutation", async () => {
+  const f = await fixture();
+  try {
+    await f.act("poll"); f.flags.loseOpen = true;
+    const created = await f.act("create", { text: "Rex required" });
+    assert.match(created.notice, /Task 3 created; Rex open unconfirmed/); assert.equal(created.draft, null);
+    await f.act("poll"); await assert.rejects(f.act("retry"));
+    assert.equal(f.requests.filter(r => r.command === "create_task").length, 1);
+    assert.equal(f.requests.filter(r => r.command === "rex_open").length, 1);
+    assert.deepEqual(await new DraftStore(hub, f.local.env.DECK_CLIENT_STATE_DIRECTORY).list(), []);
+  } finally { await f.close(); }
+});
+
+for (const rex of [false, true]) test(`plain client ${rex ? "Rex task locked" : "direct task read-only"} cannot bypass client roles`, async () => {
+  const f = await fixture();
+  try {
+    const child = spawn(process.execPath, [fileURLToPath(new URL("./client.js", import.meta.url)), "--port", String(f.port), "--task", "2", ...(rex ? ["--hub-id", hub, "--rex-allocation", hub] : [])], { env: { ...f.local.env, REX_BLOCK: `block:${hub}` } });
+    const closed = once(child, "close"); let out = "", errors = "";
+    child.stdout.on("data", c => { out += c; }); child.stderr.on("data", c => { errors += c; });
+    child.stdin.end(rex ? "/tasks\n/select 1\n/hub\n/main\n/task forbidden\n/status\nallowed task input\n/exit\n" : "forbidden input\n/stop\n/instructions load\n/retry\n/discard\n/exit\n");
+    assert.equal((await closed)[0], 0, errors);
+    assert.match(errors, rex ? /locked/ : /Read-only/);
+    assert.doesNotMatch(out, /OTHER_TASK_CONTENT/);
+    assert.equal(f.requests.filter(r => r.command === "admit").length, rex ? 1 : 0);
+    assert.ok(!f.requests.some(r => ["list_chats", "create_task", "stop", "import_instructions"].includes(r.command)));
+    assert.ok(f.requests.every(r => r.args.chatId === "2"));
+    assert.deepEqual(await new DraftStore(hub, f.local.env.DECK_CLIENT_STATE_DIRECTORY).list(), []);
+  } finally { await f.close(); }
+});
+
+test("one-shot direct task input refuses without saving or sending; REX_BLOCK alone grants nothing", async () => {
+  const f = await fixture();
+  try {
+    const child = spawn(process.execPath, [fileURLToPath(new URL("./client.js", import.meta.url)), "--port", String(f.port), "--task", "2", "--message", "must not send"], { env: { ...f.local.env, REX_BLOCK: `block:${hub}` } });
+    const closed = once(child, "close"); child.stdin.end(); child.stdout.resume(); let errors = ""; child.stderr.on("data", c => { errors += c; });
+    assert.equal((await closed)[0], 1); assert.match(errors, /Read-only/);
+    assert.deepEqual(f.requests.map(r => r.command), ["status"]);
+    assert.deepEqual(await new DraftStore(hub, f.local.env.DECK_CLIENT_STATE_DIRECTORY).list(), []);
+  } finally { await f.close(); }
+});
+
 const binary = process.env.DECK_TEST_BINARY;
-test("real PTY: task picker, protected prompt, create/select, Rex read/open and main return", { skip: !binary, timeout: 30_000 }, async () => {
+test("real PTY: allocation-registered Rex TUI participates but refuses every task-navigation path", { skip: !binary, timeout: 30_000 }, async () => {
+  const f = await fixture();
+  try {
+    const steps: object[] = [{ wait: "history for 2" }, { wait: "task / Rex locked" }];
+    for (const cmd of ["/tasks", "/hub", "/main", "/select 1", "/task forbidden"]) steps.push({ keys: cmd }, { wait: "client idle" }, { keys: "\r" }, { wait: "Rex task client locked" });
+    steps.push({ keys: "iallowed in Rex" }, { keys: "\x13" }, { wait: "Input admitted" }, { keys: ":q\r" });
+    const child = spawn("python3", [fileURLToPath(new URL("../../scripts/tui-pty-test.py", import.meta.url)), resolve(binary!), "agent", "--tui", "--port", String(f.port), "--task", "2", "--hub-id", hub, "--rex-allocation", hub], { env: { ...f.local.env, DECK_NODE: process.execPath, REX_BLOCK: `block:${hub}` } });
+    const closed = once(child, "close"); child.stdout.resume(); let errors = ""; child.stderr.on("data", c => { errors += c; }); child.stdin.end(JSON.stringify(steps));
+    assert.equal((await closed)[0], 0, errors);
+    assert.equal(f.requests.filter(r => r.command === "admit").length, 1);
+    assert.equal(f.requests.find(r => r.command === "admit").args.text, "allowed in Rex");
+    assert.ok(f.requests.every(r => r.args.chatId === "2"));
+    assert.ok(!f.requests.some(r => ["list_chats", "create_task"].includes(r.command)));
+  } finally { await f.close(); }
+});
+
+test("real PTY: hub inspection is read-only, creation opens Rex, and /hub returns", { skip: !binary, timeout: 30_000 }, async () => {
   const f = await fixture();
   try {
     const command = (text: string) => [{ keys: text }, { wait: text }, { wait: "client idle" }, { keys: "\r" }];
@@ -137,8 +242,8 @@ test("real PTY: task picker, protected prompt, create/select, Rex read/open and 
       { wait: "history for 1" }, { keys: "ikeep this" }, { keys: "\x1b" }, ...command("/tasks"), { wait: "TASKS" },
       { keys: "j\r" }, { wait: "Unsent prompt preserved" }, { keys: "\x1b" }, { wait: "keep this" }, { keys: "dd" }, { wait: "0/16384 bytes" },
       ...command("/task New task 🧪"), { wait: "Task 3 created" }, ...command("/tasks"), { wait: "New task" }, { keys: "jj\r" },
-      { wait: "history for 3" }, ...command("/rex"), { wait: "Allocation: unallocated" }, { keys: "i" }, { wait: "Presence: unbound" },
-      { keys: "o" }, { wait: "Rex attempt admitted" }, { keys: "\x1b" }, ...command("/main"), { wait: "history for 1" }, { keys: ":q\r" },
+      { wait: "history for 3" }, { wait: "READ ONLY" }, { keys: "imust not edit" }, { keys: "\x1b[200~pasted input\x1b[201~" }, { keys: "\x13" }, { wait: "Read-only task inspection" }, { wait: "0/16384 bytes" }, ...command("/rex"), { wait: "Allocation: unallocated" }, { keys: "i" }, { wait: "Presence: unbound" },
+      { keys: "o" }, { wait: "Rex attempt admitted" }, { keys: "\x1b" }, ...command("/hub"), { wait: "history for 1" }, { keys: ":q\r" },
     ];
     const driver = fileURLToPath(new URL("../../scripts/tui-pty-test.py", import.meta.url));
     const child = spawn("python3", [driver, resolve(binary!), "agent", "--tui", "--port", String(f.port)], { env: { ...f.local.env, DECK_NODE: process.execPath } });
@@ -147,8 +252,8 @@ test("real PTY: task picker, protected prompt, create/select, Rex read/open and 
     assert.equal((await closed)[0], 0, errors); assert.equal(JSON.parse(output).restored, true);
     assert.equal(f.requests.filter((r) => r.command === "create_task").length, 1);
     assert.equal(f.requests.find((r) => r.command === "create_task").args.title, "New task 🧪");
-    assert.equal(f.requests.filter((r) => r.command === "rex_open").length, 1);
-    assert.equal(f.requests.find((r) => r.command === "rex_open").args.chatId, "3");
+    assert.equal(f.requests.filter((r) => r.command === "rex_open").length, 2);
+    assert.ok(f.requests.filter((r) => r.command === "rex_open").every(r => r.args.chatId === "3"));
     assert.ok(!f.requests.some((r) => ["admit", "stop"].includes(r.command)));
   } finally { await f.close(); }
 });

@@ -23,6 +23,8 @@ const decoder = process.stdin.pipe(new FrameDecoder());
 const stop = () => { abort.abort(); decoder.destroy(); };
 process.stdin.on("end", stop); process.stdin.on("error", stop); process.stdout.on("error", stop);
 const session = localSession(port, chatId, hubId, abort.signal);
+const mode = allocationId ? "task" : "hub";
+let hubChatId: string | undefined;
 try {
   // Before any renderer snapshot or input: exact allocation-bound historical
   // registration. Failure closes this helper; there is no startup retry loop.
@@ -34,8 +36,8 @@ try {
     catch (error) { response = { version: 1, id: request.id, ok: false, error: displayText(error instanceof Error ? error.message : "Client request failed; outcome unconfirmed", 1024) || "Client request failed" }; }
     if (abort.signal.aborted) break;
     const frame = encodeFrame(response);
-    if (!validReply(JSON.parse(frame.subarray(4).toString("utf8")), request.id, hubId, chatId, request.action, request.chatId, request.after)) break;
-    if (response.ok) { hubId = response.snapshot!.hubId; chatId = response.snapshot!.chatId; }
+    if (!validReply(JSON.parse(frame.subarray(4).toString("utf8")), request.id, hubId, chatId, request.action, request.chatId, request.after, mode, hubChatId)) break;
+    if (response.ok) { hubId = response.snapshot!.hubId; chatId = response.snapshot!.chatId; hubChatId = response.snapshot!.hubChatId; }
     if (!process.stdout.write(frame)) await once(process.stdout, "drain", { signal: abort.signal });
   }
 } catch { /* No payload diagnostics or mutation replay on renderer loss. */ }

@@ -177,24 +177,31 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
     const status = (await startHub())!; expectedHubId = status.hubId;
     const task = await command("create_task", { requestId: "rex-task", title: "Rex scratch task", ...status.binding });
     const clientArgv = [deckBinary!, "agent", "--no-tui", "--port", String(port), "--task", String(task.chatId)];
-    let clientAllocation!: Allocation; let clientBlock = ""; let clientPid = 0;
+    let clientAllocation!: { session_id: string }; let clientBlock = ""; let clientPid = 0;
     const capture = () => rex("capture", "--session", clientAllocation.session_id, "--block", clientBlock, "--trim", "--unwrap");
-    await t.test("Rex hosts a normal ownerless chat client; typed input reaches only the saved hub conversation", async () => {
-      clientAllocation = await newSession("deck-client-proof", clientArgv); clientBlock = clientAllocation.initial_windows[0]!.block_ids[0]!;
-      await until(capture, (text) => text.includes(`Deck chat ${task.chatId}`));
+    const openManaged = async () => {
+      const info = await json<{ host_id: string; instance_id: string }>("server", "status", "--json");
+      await command("rex_open", { chatId: task.chatId, requestId: randomUUID(), port, target: { executable: rexBinary, server: endpoint, hostId: info.host_id, instanceId: info.instance_id } });
+      const value = await until(() => command("rex_status", { chatId: task.chatId }), s => s.status !== "pending");
+      assert.equal(value.status, "allocated"); return value.binding as RexBinding;
+    };
+    await t.test("Rex hosts an allocation-verified task-locked TUI; typed input reaches only the saved hub conversation", async () => {
+      const binding = await openManaged();
+      clientAllocation = { session_id: binding.sessionId }; clientBlock = binding.blockId; sessionIds.push(binding.sessionId);
+      await until(capture, (text) => text.includes("Rex startup registered"));
       clientPid = await childPid(clientAllocation.session_id, clientBlock);
       // Test-only simulation of a human typing, not model orchestration via rex send.
-      await rex("send", "--session", clientAllocation.session_id, "--block", clientBlock, "TERMINAL_TYPED_INPUT\n");
+      await rex("send", "--session", clientAllocation.session_id, "--block", clientBlock, "iTERMINAL_TYPED_INPUT\x13");
       await until(() => command("history", { chatId: task.chatId }), (value) => JSON.stringify(value).includes("no inference performed"));
       assert.match(JSON.stringify(await command("history", { chatId: task.chatId })), /TERMINAL_TYPED_INPUT/);
       assert.doesNotMatch(JSON.stringify(await command("history", { chatId: status.mainChatId })), /TERMINAL_TYPED_INPUT/);
-      await until(capture, (text) => text.includes("assistant: Deck prototype response"));
+      await until(capture, (text) => text.includes("Deck prototype response"));
       assert.equal((await command("list_chats")).items.length, 2);
     });
     await t.test("hub restart reconnects the same Rex client without another conversation or terminal", async () => {
       await until(() => command("status"), (value) => value.activity.tasks.length === 0 && value.activity.submissions.length === 0);
       await stop(hub); hub = undefined;
-      await until(capture, (text) => text.includes("Hub unavailable"));
+      await until(capture, (text) => text.includes("STALE"));
       assert.equal(await childPid(clientAllocation.session_id, clientBlock), clientPid);
       // Creation success is not client readiness: a brand-new client currently
       // exits if its initial status request cannot reach the hub.
@@ -203,21 +210,21 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
       assert.equal((await exit(clientAllocation.session_id, coldBlock)).exit_code, 1);
       const replacement = (await startHub())!;
       assert.equal(replacement.hubId, status.hubId); assert.equal(replacement.mainChatId, status.mainChatId);
-      await until(capture, (text) => text.includes("Hub reconnected"));
+      await until(capture, (text) => !text.includes("STALE") && text.includes("task / Rex locked"));
       assert.equal((await exit(clientAllocation.session_id, coldBlock)).exit_code, 1);
       assert.equal(await childPid(clientAllocation.session_id, clientBlock), clientPid);
       await rex("block", "close", coldBlock, "--session", clientAllocation.session_id);
       assert.equal((await command("list_chats")).items.length, 2);
     });
     await t.test("exiting/replacing a client preserves identity; destroying Rex does not stop in-flight hub work", async () => {
-      await rex("send", "--session", clientAllocation.session_id, "--block", clientBlock, "/exit\n");
+      await rex("send", "--session", clientAllocation.session_id, "--block", clientBlock, ":q\r");
       assert.equal((await exit(clientAllocation.session_id, clientBlock)).exit_code, 0);
       const before = await command("history", { chatId: task.chatId });
-      const run = await json<Run>("run", "--session", clientAllocation.session_id, "--label", "replacement client", "--focus=false", "--keep-open", "--cwd", work, "--shell=none", "--json", "--", ...clientArgv);
-      // Shape deliberately asserted by the probe; replacements are NEW block IDs,
-      // not a restart-in-place or revival of Pi ownership.
-      assert.equal(run.block_ids.length, 1); const replacementBlock = run.block_ids[0]!;
-      fullId(replacementBlock, "block"); fullId(run.window_id, "window"); assert.notEqual(replacementBlock, clientBlock);
+      const replacement = await openManaged();
+      // Reopening uses a fresh allocation-bound startup and NEW block IDs,
+      // not a direct unregistered client or revival of Pi ownership.
+      assert.equal(replacement.sessionId, clientAllocation.session_id); const replacementBlock = replacement.blockId;
+      fullId(replacementBlock, "block"); fullId(replacement.windowId, "window"); assert.notEqual(replacementBlock, clientBlock);
       await until(() => rex("capture", "--session", clientAllocation.session_id, "--block", replacementBlock, "--trim", "--unwrap"), (text) => text.includes("TERMINAL_TYPED_INPUT"));
       assert.deepEqual(await command("history", { chatId: task.chatId }), before);
       assert.equal((await command("list_chats")).items.length, 2);

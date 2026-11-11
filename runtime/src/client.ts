@@ -13,6 +13,7 @@ import { validRexUuid } from "./generated/contracts.js";
 import { validDiscoveryPage } from "./discovery-contracts.js";
 import { validHistoryPage } from "./history-contracts.js";
 import { validOpenArgs } from "./rex-open-contracts.js";
+import { canParticipate, requireParticipation, requireNavigation, requireCreation, inspectOnly } from "./client-access.js";
 
 type ObjectValue = Record<string, unknown>;
 function object(value: unknown): ObjectValue {
@@ -110,28 +111,36 @@ async function main() {
   selected ??= String(status.mainChatId);
   if (typeof status.hubId !== "string") throw new Error("Hub lacks draft identity; restart the updated hub");
   if (expectedHubId && (status.hubId !== expectedHubId || (requireHubGuard && status.hubGuard !== 1))) throw new Error("Expected hub identity/guard unavailable; no input sent");
-  if (rexAllocationId && (status.rexStartup !== 1 || status.chatId !== selected)) throw new Error("Rex startup capability/selected chat unavailable; no input sent");
+  if (rexAllocationId && (status.rexStartup !== 1 || status.chatId !== selected || selected === status.mainChatId)) throw new Error("Rex startup capability/selected chat unavailable; no input sent");
   expectedHubId = status.hubId;
   if (login) return loginClient(command);
-  const runRex = async (action: string) => {
+  const mode = rexAllocationId ? "task" : "hub";
+  const hubChatId = String(status.mainChatId);
+  const participate = () => requireParticipation(mode, selected, hubChatId);
+  const create = () => {
+    requireCreation(mode, selected, hubChatId);
+    if (status.hubGuard !== 1 || status.rexOpen !== 1) throw new Error("Rex support is required to create a task; no request sent");
+  };
+  const runRex = async (action: string, chatId = selected) => {
     if (status.hubGuard !== 1 || status.rexOpen !== 1) throw new Error("Hub lacks public Rex capability; no terminal requested");
     if (!["open", "reopen", "status", "inspect"].includes(action)) throw new Error("Use /rex open, /rex reopen, /rex status or /rex inspect");
     const opening = action === "open" || action === "reopen";
     if (opening) stdout.write("Rex open is best-effort: a lost reply or concurrent open may leave duplicates. No automatic retry; inspect Rex before repeating.\n");
     let result: ObjectValue;
-    try { result = await command(opening ? "rex_open" : `rex_${action}`, { chatId: selected, ...(opening ? { requestId: randomUUID(), port, ...(target ? { target } : {}) } : {}) }); }
+    try { result = await command(opening ? "rex_open" : `rex_${action}`, { chatId, ...(opening ? { requestId: randomUUID(), port, ...(target ? { target } : {}) } : {}) }); }
     catch (error) {
       if (opening && !detached) process.stderr.write("Rex open not acknowledged; an attempt may still have been admitted or created a terminal. Explicitly opening again may duplicate it. Existing chat drafts are unchanged.\n");
       throw error;
     }
     if (detached) return;
     stdout.write(`${plain(JSON.stringify(result))}\n`);
-    if (opening) stdout.write(result.status === "reused" ? "Saved client observed running; no new terminal requested. This does not focus a GUI or prove client responsiveness.\n" : `Rex attempt admitted, not yet allocated/ready. Use /rex status or deck rex status --task ${selected} --port ${port}.\n`);
+    if (opening) stdout.write(result.status === "reused" ? "Saved client observed running; no new terminal requested. This does not focus a GUI or prove client responsiveness.\n" : `Rex attempt admitted, not yet allocated/ready. Use /rex status or deck rex status --task ${chatId} --port ${port}.\n`);
   };
   if (rexCommand) return runRex(rexCommand);
   const drafts = new DraftStore(status.hubId);
   let active: Draft | undefined;
   const restore = async () => {
+    if (!canParticipate(mode, selected, hubChatId)) { stdout.write(`${inspectOnly} Saved drafts remain untouched.\n`); return; }
     for (const saved of (await drafts.list()).filter((draft) => draft.chatId === selected)) {
       try { active = (await drafts.load(saved.requestId)).request; break; }
       catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
@@ -139,6 +148,9 @@ async function main() {
     if (active && !detached) stdout.write(`Recovered ${active.kind} draft ${active.requestId} for chat ${active.chatId}. /retry resends the original request; /discard forgets it locally. /drafts lists saved drafts.\n`);
   };
   const deliver = async (draft: Draft) => {
+    participate();
+    if (draft.chatId !== selected) throw new Error("Draft belongs to another chat");
+    if (draft.kind === "task") create();
     await drafts.save(draft); // Never send until the complete private record is published.
     const { kind, chatId, ...args } = draft;
     const ack = await command(kind === "input" ? "admit" : kind === "task" ? "create_task" : "import_instructions", kind === "task" ? args : { chatId, ...args });
@@ -149,13 +161,14 @@ async function main() {
   };
   await restore();
   if (message !== undefined) {
+    participate();
     if (active) throw new Error("Saved draft exists for this chat; reconnect interactively and /retry or /discard first");
     active = { kind: "input", chatId: selected, requestId: randomUUID(), text: message, mode: "steer" };
     try { const ack = await deliver(active); active = undefined; stdout.write(`${JSON.stringify(ack)}\n`); }
     catch (error) { process.stderr.write("Request not acknowledged or local cleanup incomplete. Reconnect to recover the saved request; nothing is sent if saving fails.\n"); throw error; }
     return; // Detach after durable admission, never wait/abort on behalf of the client.
   }
-  stdout.write(`Deck chat ${selected} — ${plain(String(status.provider))} ${plain(JSON.stringify(status.model))}, ${plain(String(status.tools))}. /help for commands.\n`);
+  stdout.write(`Deck chat ${selected} — ${mode === "task" ? "Rex task (locked)" : selected === hubChatId ? "hub" : "hub / read-only task"} · ${plain(String(status.provider))} ${plain(JSON.stringify(status.model ?? {}))}, ${plain(String(status.tools))}. /help for commands.\n`);
   let newerAfter = "0";
   let selection = 0;
   let lastActivity: string | undefined;
@@ -224,18 +237,21 @@ async function main() {
   }, 500);
   let chatCursor: string | undefined;
   const select = async (id: string) => {
+    requireNavigation(mode);
     selected = id; selection++; lastActivity = undefined; previews.reset(); instructions.reset(); newerAfter = "0"; olderBefore = undefined; historyLoaded = false; recentLimit = 100; olderLimit = 100;
-    stdout.write(`Selected chat ${plain(id)}.\n`);
+    stdout.write(`Selected chat ${plain(id)} (${id === hubChatId ? "hub" : "read-only task"}).\n`);
     await restore();
   };
   const requireAcknowledged = () => {
     if (active) throw new Error("Retry or discard your unacknowledged request first");
   };
   const createTask = async () => {
+    create();
     const task = await deliver(active!);
     active = undefined;
     if (detached) return;
-    await select(String(task.chatId)); await loadSelectedHistory();
+    stdout.write(`Task ${task.chatId} created. /select ${task.chatId} inspects read-only; participate in Rex.\n`);
+    await runRex("open", String(task.chatId));
   };
   const importInstructions = async () => {
     const draft = active!;
@@ -275,14 +291,15 @@ async function main() {
       if (!text) continue;
       try {
         if (text === "/exit") break;
-        if (text === "/help") { stdout.write("/status /activity /stop /older /tasks [more] /select CHAT_ID /main /task TITLE /instructions [load|TASK_ID] /rex [open|reopen|status|inspect] /draft /drafts /recover REQUEST_ID /retry /discard [REQUEST_ID] /exit\nEnter submits or steers. /instructions load replaces stored explicit instructions with saved-worker AGENTS.md, only while idle; admission is not application. /instructions reads source/task status without loading. Switching detaches without stopping other chats. Ctrl+C detaches. Answer previews are sampled/provisional; retained history is authoritative. This is plain line mode, not TUI.\n"); continue; }
+        if (text === "/help") { stdout.write("/status /activity /stop /older /tasks [more] /select CHAT_ID /hub /task TITLE /instructions [load|TASK_ID] /rex [open|reopen|status|inspect] /draft /drafts /recover REQUEST_ID /retry /discard [REQUEST_ID] /exit\nEnter submits or steers. /instructions load replaces stored explicit instructions with saved-worker AGENTS.md, only while idle; admission is not application. /instructions reads source/task status without loading. Hub task inspection is read-only; /task creates and opens Rex. Rex task clients cannot list, create or switch tasks. Ctrl+C detaches. Answer previews are sampled/provisional; retained history is authoritative. This is plain line mode, not TUI.\n"); continue; }
         if (text === "/draft") {
           if (!active) throw new Error("No active unacknowledged draft");
           const preview = plain(JSON.stringify(active));
           stdout.write(`${preview.slice(0, 8192)}${preview.length > 8192 ? " [display clipped; saved request is unchanged]" : ""}\n`); continue;
         }
-        if (text === "/drafts") { for (const saved of await drafts.list()) stdout.write(`${plain(JSON.stringify(saved))}\n`); continue; }
+        if (text === "/drafts") { for (const saved of (await drafts.list()).filter(d => d.chatId === selected)) stdout.write(`${plain(JSON.stringify(saved))}\n`); continue; }
         if (text.startsWith("/recover ")) {
+          participate();
           const recovered = (await drafts.load(text.slice(9).trim())).request;
           if (recovered.chatId !== selected) throw new Error(`Draft belongs to chat ${recovered.chatId}; open that chat first`);
           if (active) await drafts.save(active);
@@ -302,33 +319,48 @@ async function main() {
           stdout.write(olderBefore ? "More retained history: /older\n" : "Beginning of retained history.\n"); continue;
         }
         if (text === "/tasks" || text === "/tasks more") {
+          requireNavigation(mode);
           if (text === "/tasks more" && !chatCursor) { stdout.write("No more chats; /tasks refreshes the list.\n"); continue; }
           const args = { limit: 25, ...(text === "/tasks more" ? { after: chatCursor } : {}) };
           const page = await command("list_chats", args);
           // Validate/narrow the entire page before rendering or cursor advancement.
           if (!validDiscoveryPage(page, args)) throw new Error("Invalid chat discovery response; cursor unchanged");
           for (const item of page.items) {
-            stdout.write(`${item.chatId === selected ? "*" : " "} ${plain(JSON.stringify(item))}\n`);
+            stdout.write(`${item.chatId === selected ? "*" : " "} ${plain(JSON.stringify(item.kind === "main" ? { ...item, kind: "hub", title: "Hub" } : item))}\n`);
           }
           chatCursor = page.next;
           stdout.write(chatCursor ? "More chats: /tasks more\n" : "End of chat list.\n"); continue;
         }
-        if (text === "/main" || text.startsWith("/select ")) {
+        if (text === "/hub" || text === "/main" || text.startsWith("/select ")) {
+          requireNavigation(mode);
           requireAcknowledged();
-          const id = text === "/main" ? String(status.mainChatId) : text.slice(8).trim();
+          const id = text === "/hub" || text === "/main" ? hubChatId : text.slice(8).trim();
           const next = await command("status", { chatId: id });
+          if (next.mainChatId !== hubChatId) throw new Error("Hub chat identity changed; selection unchanged");
           await select(String(next.chatId)); await loadSelectedHistory(); continue;
         }
         if (text === "/rex" || text.startsWith("/rex ")) { await runRex(text === "/rex" ? "status" : text.slice(5).trim()); continue; }
         if (text === "/activity") { stdout.write(`activity: ${plain(JSON.stringify(await command("activity", { chatId: selected })))}\n`); continue; }
-        if (text === "/status") { stdout.write(`${plain(JSON.stringify(await command("status", { chatId: selected })))}\n`); continue; }
-        if (text === "/stop") { await command("stop", { chatId: selected }); stdout.write("Stop requested for selected work; /status shows whether effects are still draining.\n"); continue; }
+        if (text === "/status") {
+          const current = await command("status", { chatId: selected });
+          // The status API contains global Pi inspection. A task client must not
+          // render other tasks through that otherwise innocuous read path.
+          if (mode === "task") current.activity = await command("activity", { chatId: selected });
+          stdout.write(`${plain(JSON.stringify(current))}\n`); continue;
+        }
+        if (text === "/stop") { participate(); await command("stop", { chatId: selected }); stdout.write("Stop requested for selected work; /status shows whether effects are still draining.\n"); continue; }
         if (text === "/discard" || text.startsWith("/discard ")) {
+          participate();
           const id = text === "/discard" ? active?.requestId : text.slice(9).trim();
-          if (id) { await drafts.remove(id); if (active?.requestId === id) active = undefined; }
+          if (id) {
+            const owner = active?.requestId === id ? active.chatId : (await drafts.load(id)).request.chatId;
+            if (owner !== selected) throw new Error("Draft belongs to another chat");
+            await drafts.remove(id); if (active?.requestId === id) active = undefined;
+          }
           continue;
         }
         if (text === "/instructions load") {
+          participate();
           requireAcknowledged();
           const binding = object((await command("status", { chatId: selected })).binding);
           active = { kind: "instructions", chatId: selected, requestId: randomUUID(), machineId: String(binding.machineId), cwd: String(binding.cwd) };
@@ -349,12 +381,14 @@ async function main() {
         if (text === "/retry" && active?.kind === "instructions") { await importInstructions(); continue; }
         if (text === "/retry" && active?.kind === "task") { await createTask(); continue; }
         if (text.startsWith("/task ")) {
+          create();
           requireAcknowledged();
           const binding = object((await command("status", { chatId: selected })).binding);
           active = { kind: "task", chatId: selected, requestId: randomUUID(), title: text.slice(6), machineId: String(binding.machineId), cwd: String(binding.cwd) };
           await createTask(); continue;
         }
         if (text.startsWith("/") && text !== "/retry") throw new Error("Unknown command; use /help");
+        participate();
         if (text !== "/retry") {
           if (active) throw new Error("Unacknowledged request retained: /retry or /discard before sending new text");
           active = { kind: "input", chatId: selected, requestId: randomUUID(), text, mode: "steer" };

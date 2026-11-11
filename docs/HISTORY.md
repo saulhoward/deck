@@ -8,6 +8,26 @@ Test counts below are **recorded evidence for the named implementation stage**. 
 
 The work below follows `17c2ff9`. It includes the documentation consolidation and subsequent task-navigation work:
 
+### Hub inspection and Rex-only task participation
+
+- Gave the hub teal bars and hub labels; allocation-verified Rex task clients use slate-blue bars and a task-locked label. Retained canonical `main` IDs/metadata without migration.
+- Hub task selection is read-only: no editor/paste, send, retry/discard, stop, instruction import, or settings mutation. Existing task drafts remain intact. `/hub` returns to the hub; `/main` is only a compatibility alias.
+- Locked Rex clients against task discovery, creation, switching, and hub return at both the renderer and helper. Pinned client mode and hub-chat identity across private bridge replies. Plain and one-shot paths cannot grant non-Rex task participation; plain task status omits global task inspection.
+- Hub `/task` saves/acknowledges creation before a separate Rex-opening request. A lost open reply never recreates the task or retries allocation automatically. Failed allocation leaves a saved task needing explicit recovery, not a standalone task mode.
+- Updated native draw/color, draft/role/bridge-fencing, startup, and PTY tests. Updated isolated Rex integration to use actual managed startup for input and replacement rather than unregistered direct clients.
+- During validation, the old real-hub creation test exposed live PATH discovery and created one local test Rex session. Removed only that verified test session by full ID and changed the test worker to an isolated PATH. Existing sessions and the live hub were left unchanged. Subsequent integration tests use a private isolated Rex server.
+- Built and tested without upgrading the live hub.
+
+### Remote peer and connection-generation foundation
+
+After `82d149b`, added schema-backed explicit peer/host registration, a bounded native Tailscale verifier, and a read-only `remote-check` diagnostic. Added a native gate for fresh connection challenges, exact worker hello matching, and stale cleanup isolation. These do not enable remote transport, route effects, or implement jobs/subagent terminals.
+
+Initial read-only checks against the installed Tailscale 1.98.2 macOS app validated self-node `whois` projection and refusal of a changed node pin. That initial check contacted no other machine and did not validate a two-machine link.
+
+After the operator supplied a remote Rex endpoint, HTTPS certificate verification and explicit Rex server status succeeded over Tailscale. The endpoint reported API 9. A uniquely named disposable session ran only OS/tool-path checks: Darwin arm64, with Rex available but Deck, Tailscale, and Nix absent from the terminal's PATH. The probe session was removed by its returned full ID; existing sessions were not changed and no software was installed.
+
+The real peer response omitted Tailscale's legacy `MachineAuthorized` field. Updated verification to require a running local backend and accept that documented omission without treating it as approval; explicit denial, malformed values, identity drift, and expired keys still refuse. Added regression tests and verified correct/wrong pins against the selected peer. The Rex peer is not yet a registered Deck worker, and API 9 remains outside Deck's allocation allowlist pending the remaining contract tests. No Tailscale settings or live hub changed.
+
 ### Zig TUI
 
 - Added a scrolling chat view, multiline Vim-style editor, bounded history, help, and status bars.
@@ -57,6 +77,7 @@ Dates and IDs refer to the repository history, not release tags.
 
 | Date | Commit | Main changes |
 | --- | --- | --- |
+| 2026-11-10 | `82d149b` | Added Zig TUI, model/thinking controls, terminal status, task navigation, managed Rex TUI startup, and consolidated guides |
 | 2026-11-10 | `17c2ff9` | Completed local native/client contracts, bounded HTTP, and shared failure policy; added local Rex defaults and status/login contracts; migrated to Zig 0.17.1 |
 | 2026-11-09 | `7a74d74` | Added validated history/live views and public best-effort Rex open/reopen |
 | 2026-11-09 | `18a8d8b` | Extended mutation/administrative ACK and chat-discovery contracts, generated arrays, and client fault tests |
@@ -136,10 +157,13 @@ All rows below describe prior scratch-state validation on **aarch64-darwin**, us
 | Model settings | 38/38 | 400 total: 398 passed, 2 skipped | TUI + package 13/13; isolated Rex API 10 11/11 |
 | Terminal status | 40/40 | 402 total: 400 passed, 2 skipped | TUI + package 14/14; isolated Rex API 10 11/11 |
 | Task navigation and Rex TUI startup | 42/42 | 422 total: 420 passed, 2 skipped | TUI/startup + package 34/34; isolated Rex API 10 11/11 |
+| Remote verification foundation | 46/46 | 439 total: 437 passed, 2 skipped | Remote/TUI/startup + package 51/51; isolated Rex API 10 11/11 |
+| Selected remote Rex peer verification | 47/47 | 448 total: 446 passed, 2 skipped | Remote/TUI/startup + package 60/60; isolated local Rex API 10 11/11; separate remote API 9 probe as described above |
+| Hub inspection and Rex task lock | 48/48 | 456 total: 454 passed, 2 skipped | Installed remote/TUI/startup + package 68/68; isolated Rex API 10 11/11; three cross-builds |
 
 The recorded stages passed their generated/TypeScript checks and Nix package/flake gates. The separate polling-debounce check passed 37/37 Zig tests and 10/10 targeted TUI tests before model settings were added.
 
-Cross-builds passed for x86_64 macOS, x86_64 Linux, and aarch64 Linux at the migration, completed-foundation, TUI, model-settings, terminal-status, and task-navigation stages. These are compilation results, not runtime support claims.
+Cross-builds passed for x86_64 macOS, x86_64 Linux, and aarch64 Linux at the migration, completed-foundation, TUI, model-settings, terminal-status, task-navigation, remote-verification-foundation, and selected-remote-peer stages. These are compilation results, not runtime support claims.
 
 Important validation details:
 
@@ -150,6 +174,8 @@ Important validation details:
 - Installed Rex API 10 was `0.0.1793645657-gd018d2`. API 8 has earlier installed evidence; newer public-workflow API 8 coverage was fake-native/historical, not a new installed run.
 - The terminal-status package was `/nix/store/y4r6hhjl9g5ki3gj0gzp5sgwcn64i4xm-deck-0.1.0-dev`.
 - The task-navigation package is `/nix/store/d606fqp6yyr8l4f9yr1ka46zc7g5xsnf-deck-0.1.0-dev`. The prior build was retained at `/tmp/deck-before-task-navigation-result`. These identify development builds, not published releases or permanent GC-root guarantees.
+- The remote-verification foundation package is `/nix/store/v3yspah0j4hm81mc0bk0gik59n64hfb8-deck-0.1.0-dev`; the prior task-navigation build was retained at `/tmp/deck-before-remote-boundary-result`. This package does not enable remote connectivity.
+- The selected-peer verifier update is `/nix/store/64wbmzbkhy5vygw0ldskib3k5pw2q8ja-deck-0.1.0-dev`. Its predecessor was retained at `/tmp/deck-before-remote-peer-result`. It still does not enable remote Deck links or Rex API 9 allocation.
 
 ## Manual evidence
 

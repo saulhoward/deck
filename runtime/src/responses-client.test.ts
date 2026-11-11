@@ -20,8 +20,9 @@ for (const kind of ["input", "task", "instructions"] as const) test(`${kind} dra
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const { id, command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { id: string; command: string; args: Record<string, unknown> };
     const reply = (result: unknown) => response.end(JSON.stringify({ version: 1, id, ok: true, result }));
-    if (command === "status") return void reply({ hubId: "response-hub", chatId: args.chatId ?? "1", mainChatId: "1", model: {}, tools: "native-files + bash", binding: { machineId: "saved-worker", cwd: "/saved" } });
+    if (command === "status") return void reply({ hubId: "response-hub", hubGuard: 1, rexOpen: 1, chatId: args.chatId ?? "1", mainChatId: "1", model: {}, tools: "native-files + bash", binding: { machineId: "saved-worker", cwd: "/saved" } });
     if (command === "history") return void reply({ items: [] });
+    if (command === "rex_open") return void reply({ version: 1, chatId: "2", requestId: args.requestId, taskId: "9", status: "admitted", completion: "not_waited", bestEffort: true });
     if (command === "instruction_status") return void reply({ version: 1, chatId: "1", source: null, import: { taskId: "9", state: "running" } });
     assert.equal(command, kind === "input" ? "admit" : kind === "task" ? "create_task" : "import_instructions");
     // Simulate a committed effect with a damaged/lost response. Its saved identity
@@ -91,7 +92,7 @@ for (const kind of ["input", "task", "instructions"] as const) test(`${kind} leg
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const { id, command } = JSON.parse(Buffer.concat(chunks).toString());
     if (!["status", "history"].includes(command)) mutations++;
-    response.end(JSON.stringify({ version: 1, id, ok: true, result: command === "status" ? { hubId: "legacy-wire-hub", chatId: "1", mainChatId: "1", model: {}, tools: "native-files + bash", binding: { machineId: "saved-host", cwd: "/saved" } } : { items: [] } }));
+    response.end(JSON.stringify({ version: 1, id, ok: true, result: command === "status" ? { hubId: "legacy-wire-hub", hubGuard: 1, rexOpen: 1, chatId: "1", mainChatId: "1", model: {}, tools: "native-files + bash", binding: { machineId: "saved-host", cwd: "/saved" } } : { items: [] } }));
   });
   server.listen(0, "127.0.0.1"); await once(server, "listening"); const address = server.address(); assert.ok(address && typeof address !== "string");
   const client = spawn(process.execPath, [fileURLToPath(new URL("./client.js", import.meta.url)), "--port", String(address.port)], { env: local.env }); const closed = once(client, "close"); let errors = "";
