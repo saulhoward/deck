@@ -1,0 +1,126 @@
+# Roadmap
+
+This file contains planned work, not implemented commands or support claims. Read the [README](../README.md) for the current workflow and the [Developer guide](DEVELOPER.md) for design rules. Completed work and earlier test results are in [History](HISTORY.md).
+
+## Current position
+
+The local prototype has one Pi writer, durable main/task chats, native file/bash tools, saved request drafts, explicit instruction import, and foreground subagents. Local Rex open/reopen, TUI task navigation, Rex-managed TUI startup, chat-scoped model/thinking controls, and terminal status are implemented.
+
+The [target architecture](DEVELOPER.md#target-interactive-and-scheduled-architecture) keeps all Pi execution and history at the hub. Interactive tasks get named Rex sessions on their execution machines, with named TUI terminals for their subagents. Scheduled jobs and their children use registered hosts without Rex. Jobs reuse their task/chat across runs; each run has its own admission identity and captured file settings.
+
+These are target requirements, not current remote/job support. No delivery dates are set.
+
+## Next implementation sequence
+
+1. **Implemented:** TUI task picker, creation/switching commands, Rex status/inspection, and explicit local open/reopen. Unsent prompts block switching/creation; saved requests retain exact retries.
+2. **Implemented:** allocation-bound TUI startup and managed interactive Rex TUI launches. Explicit `--no-tui` remains available.
+3. Add verified registered-host connections and a secure path from remote TUI clients to the same hub. Open interactive task sessions on their assigned execution machines.
+4. Add named subagent TUI terminals inside the parent interactive task's session. Preserve Pi ownership and define direct-input rules separately.
+5. Implement per-run file capture and Pi scheduling. Reuse each job's task/chat, give each run its own admission identity, and prove that jobs and their children create no Rex objects.
+
+The sections below define these requirements and the remaining validation work. They are work areas, not a requirement to finish every optional UI improvement before remote support.
+
+## 1. Finish local validation and usability
+
+### Provider access
+
+- [ ] Validate live ChatGPT login, refresh, account access, and inference in a separately approved test account/state directory.
+- [ ] Verify failure behavior for revoked grants and unavailable models. Do not fall back to paid keys.
+- [ ] Validate live model task inspection, independent task messaging, foreground delegation, and output previews.
+- [ ] Keep user-reported API-key results separate from automated and OAuth evidence.
+
+Acceptance: record the tested provider, mode, platform, and limits without exposing credentials. Keep automated tests offline. Live tests require explicit authorization; this plan does not authorize account access.
+
+### Client workflow
+
+- [x] Update CLI help for current TUI task and Rex commands.
+- [x] Add task discovery, creation, and selection inside the TUI. Preserve unsent editor text and unresolved drafts. Reject stale replies after selection changes.
+- [x] Show saved Rex allocation, fresh terminal presence, and agent activity as separate facts. Add explicit open/reopen for the selected interactive task.
+- [ ] Add Markdown and large-history navigation without unbounded display memory or terminal-control execution.
+- [ ] Add richer tool/activity detail with explicit clipping and sensitive-data limits.
+- [x] Integrate allocation-bound Rex startup with the TUI and use it for managed interactive task terminals. Keep the plain client as an explicit fallback.
+- [ ] Validate actual Rex GUI status display, terminal fonts, tmux, SSH, and nested terminal behavior.
+- [ ] Test native runtime/terminal behavior on more macOS/Linux architectures. Cross-compilation alone is not enough.
+
+Acceptance: preserve exact retries, prompt text, safe detach, restored terminal modes, fixed identity checks, and bounded memory. Keep the plain client. Do not create hidden terminals or start inference while browsing.
+
+### Reads and reconnect
+
+- [ ] Design incremental/SSE delivery only with bounded buffers and a clear history watermark. Keep retained history separate from replaceable samples.
+- [ ] Define full shell-output artifacts and arbitrary tool partials before claiming lossless output.
+- [ ] Add per-request transport cancellation only when a real long-running command needs it.
+- [ ] Extend client reconnect and Rex daemon-restoration tests as separate contracts. A client surviving a same-hub restart does not prove server migration or daemon recovery.
+
+Acceptance: disconnect means unavailable/unknown, not idle, absence, or permission to replay. Reconnect restores observation; it does not submit drafts, recreate terminals, or move assignments.
+
+## 2. Define settings and recovery extensions
+
+- [ ] Specify full per-input settings and instruction capture: exact contents, path precedence, required-file failures, timing, retention, and provider coverage.
+- [ ] Prove capture for queued input, steering, tool continuation, retry, compaction, child work, and process recovery before general or busy-time configuration.
+- [ ] Design automatic project-file discovery separately from the existing explicit `AGENTS.md` import.
+- [ ] Define compatible migrations, downgrade refusal, original-build retention, and recovery when the original runtime is unavailable.
+- [ ] Add online backup or general repair only with a tested storage and external-effect reconciliation policy.
+- [ ] Define retention/cleanup for sensitive transcripts, receipts, drafts, and backups.
+- [ ] Investigate provider fast-mode and quota APIs. Show requested/effective settings and unknown/stale quota; do not invent support or percentages.
+
+Acceptance: no agent swapping around queued inputs, hook-only enforcement, second scheduler, or rewritten old captures. Do not turn a settings observation into a claim that files or code were frozen. Preserve expected-selection checks for model changes and idle-only instruction imports.
+
+## 3. Add verified remote effects
+
+Do not expose a remote listener before verified identity exists. The existing loopback trust model is not remote authentication.
+
+- [ ] Validate Tailscale peer verification on selected real test machines. Map actual verified peers to registration, not claimed headers or names.
+- [ ] Define schema-backed worker registration, capabilities, inventory, and connection generation.
+- [ ] Add outbound worker links with bounded effects/results and independent control capacity.
+- [ ] Fence replies and disconnect cleanup by generation. An old connection must not affect its replacement.
+- [ ] Preserve host/cwd assignments while a worker is offline. Never execute its effects elsewhere as fallback.
+- [ ] Reconcile original operation IDs and retained receipts after reconnect without repeating accepted effects.
+- [ ] Test disconnect before/after acceptance, lost results, duplicate/stale replies, identity drift, hub/worker restart, and reconnect backoff.
+- [ ] Prove that unavailable work on one host does not block independent work on another.
+- [ ] Package worker-only mode without a Pi runtime or provider credentials.
+- [ ] Route Rex creation/inspection through the assigned execution host and verify its saved server identity. Do not treat a remote server option as permission to move a task.
+- [ ] Provide verified remote client access to the hub. Rex's connection does not secure Deck's separate chat transport.
+- [ ] Test remote task TUI startup, session closure, and explicit reopen of the same conversation without duplicate input or generation.
+
+Acceptance: use verified identity and explicit bindings for every effect. Keep unknown accepted effects uncertain. Worker liveness is not effect completion. Do not add worker Pi stores, transcript replication, or cross-host failover.
+
+## 4. Improve task coordination
+
+- [ ] Add metadata and full-text search over retained conversations. Keep any index derived and rebuildable.
+- [ ] Add dispatch-linked answers or background delegation using Pi ownership and tasks, not a new reporting lifecycle.
+- [ ] Give interactive subagents named TUI terminals inside their parent task's named Rex session. Store full IDs and preserve Pi child ownership across terminal close/reopen.
+- [ ] Define owned-child input and lifetime rules before allowing direct interaction or independent configuration. A terminal view must not revive a finished owner or start another executor.
+- [ ] Keep scheduled-job children headless. Child creation must not allocate Rex objects merely because interactive children have terminals.
+- [ ] Define delegation duration/cost limits if needed. Do not imply current calls have such budgets.
+- [ ] Add timestamped machine capacity/load views after remote registration is trustworthy.
+
+Acceptance: search and inspection do not become model input automatically. Main and task contexts stay separate. A completed assistant turn does not prove a project is complete. A new tool call is not a safe retry of an ambiguous old call.
+
+## 5. Add jobs and monitoring
+
+- [ ] Use Pi durable tasks/sleeps in the hub runtime for scheduling and recovery. Zig can calculate calendar instants. Do not launch a Pi process per job.
+- [ ] Reuse each job's persistent Deck task and Pi conversation across runs. Give each occurrence a unique `(job ID, scheduled UTC instant)` admission identity.
+- [ ] Capture each run's specified file settings through its assigned host. Define capture timing and failure rules; current admission observations are not file snapshots.
+- [ ] Retain each run's captured contents and reuse them on same-run retry/recovery. Later runs can capture newer contents.
+- [ ] Commit occurrence metadata, captured-settings references, and admission atomically through a supported Pi path. Do not assume the current input reservation is already that transaction.
+- [ ] Run job and child effects through registered host connections. Prove that scheduling, child creation, retries, recovery, and inspection open no Rex sessions or terminals.
+- [ ] Define timezone/DST behavior, serialized overlap, coalesced misfires, and bounded catch-up.
+- [ ] Keep manual input separate from recurring deadlines. Disabling a job must not pretend to undo accepted work.
+- [ ] Add HTTP/web monitoring only after transport identity, same-origin/CSRF rules, and bounded read views are defined.
+- [ ] Consider explicit user-service installation and optional runtime secret references as separate operational features. Builds must not install services or sign in.
+
+Acceptance: use one execution owner and one canonical history. An offline worker keeps its assignment. Schedules must not create a parallel queue or bypass settings/effect safety.
+
+## Scope limits
+
+Rex terminal creation remains **best-effort**. Race-free replacement, duplicate-free creation, and recovery of every lost creation reply are not release gates for the local workflow. Preserve exact-object checks and manual cleanup warnings. This exception does not weaken input, file, or shell safety.
+
+The current plan does not include source polling/triage, task-outcome reporting, managed worktrees, browser automation, mobile/push, historical transcript import, embeddings, learning, or automatic cross-host recovery.
+
+For every stage:
+
+1. State the behavior and refusal cases before coding.
+2. Extend schemas and semantic tests at the actual boundary.
+3. Use scratch state, fake providers, and isolated native services.
+4. Record runtime evidence separately from compilation or source review.
+5. Deploy only after all hub work has settled, with the prior immutable build retained.

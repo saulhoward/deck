@@ -1,7 +1,10 @@
 // Pi 1.4.0 compatibility boundary. Native effects are supplied by the hub, never inferred here.
 import { createHash, randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import type { Models } from "@earendil-works/pi-ai/models";
+import { clampThinkingLevel, getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai/models";
+import { agentStatus } from "./agent-status.js";
+import { sameSelection } from "./model-settings-contracts.js";
+import { validSetModelSettingsArgs, type ModelRef, type ModelSelection, type ModelSettingsSnapshot, type ModelSettingsAck, type SetModelSettingsArgs } from "./generated/contracts.js";
 import { AgentDoc, createRegistry, configure as configureAgent, defineDoc, defineDocFamily, Harness, LiveDoc, InboxDoc, type ConversationId, type Conversation, type AgentChange, type Cursor, type TaskId } from "@earendil-works/pi-durable";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { instructionSnapshot, projectInstructionTask } from "./instructions-view.js";
@@ -66,7 +69,7 @@ export type RuntimeOptions = {
 export class DeckRuntime {
   private tail: Promise<unknown> = Promise.resolve();
   private readonly inspector: RexInspector;
-  private constructor(readonly harness: Harness, readonly main: Conversation, private readonly guard: () => Promise<void>, readonly localFiles: boolean, readonly hubId: string, readonly implementation: string, private readonly instructionTask: ReturnType<typeof instructionImport>["task"], private readonly rexTask: ReturnType<typeof rexAllocation>["task"], private readonly reconcileTask: ReturnType<typeof rexReconciliation>["task"], host?: HostFiles, readonly rexClient?: string) { this.inspector = new RexInspector(this, host); }
+  private constructor(readonly harness: Harness, readonly main: Conversation, private readonly guard: () => Promise<void>, readonly localFiles: boolean, readonly hubId: string, readonly implementation: string, private readonly instructionTask: ReturnType<typeof instructionImport>["task"], private readonly rexTask: ReturnType<typeof rexAllocation>["task"], private readonly reconcileTask: ReturnType<typeof rexReconciliation>["task"], private readonly models: Models, private readonly defaultModel: ModelRef, host?: HostFiles, readonly rexClient?: string) { this.inspector = new RexInspector(this, host); }
 
   static async open(path: string, options: RuntimeOptions): Promise<DeckRuntime> {
     let runtime: DeckRuntime | undefined;
@@ -102,8 +105,9 @@ export class DeckRuntime {
     }, context);
     try {
       await stampImplementation(harness, implementation);
+      const initialModel = options.models.getModel(options.model.provider, options.model.modelId);
       const main = await harness.root(context, {
-        agent: { model: options.model, cwd: options.binding.cwd },
+        agent: { model: options.model, thinkingLevel: initialModel ? clampThinkingLevel(initialModel, "medium") : "medium", cwd: options.binding.cwd },
         init: async (tx, id) => { Object.assign(await tx.doc(ChatDoc, id), options.binding); },
       });
       if (options.validateSavedModels) {
@@ -119,7 +123,7 @@ export class DeckRuntime {
       }
       const hubId = await harness.commit(async (tx) => (await tx.doc(Identity)).id, context);
       // Bind Deck tool callbacks before recovered Pi tool tasks can run.
-      runtime = new DeckRuntime(harness, main, options.admissionGuard ?? (async () => {}), !!options.hostFiles, hubId, implementation, importer.task, rex.task, reconciler.task, options.hostFiles, options.rexClient);
+      runtime = new DeckRuntime(harness, main, options.admissionGuard ?? (async () => {}), !!options.hostFiles, hubId, implementation, importer.task, rex.task, reconciler.task, options.models, { provider: options.model.provider, modelId: options.model.modelId }, options.hostFiles, options.rexClient);
       harness.resume();
       return runtime;
     } catch (error) {
@@ -439,6 +443,50 @@ export class DeckRuntime {
     return instructionSnapshot(String(chat.id), await this.instructionSource(id), projectInstructionTask(task));
   }
 
+  private selection(agent: Pick<AgentChange, "model" | "thinkingLevel">): ModelSelection {
+    if (!agent.model) throw new DeckError("invalid", "Chat has no selected model");
+    return { provider: agent.model.provider, modelId: agent.model.modelId, thinkingLevel: agent.thinkingLevel ?? "off" };
+  }
+
+  async modelSettings(id: string): Promise<ModelSettingsSnapshot> {
+    const chat = await this.chat(id);
+    // Registered chat catalog only: no network refresh, credential/header exposure
+    // or claim that the account is entitled to every catalog entry.
+    const models = this.models.getModels().flatMap((model) => {
+      const thinkingLevels = getSupportedThinkingLevels(model);
+      return thinkingLevels.length ? [{ provider: model.provider, modelId: model.id, name: prefixUnits(model.name, 160), thinkingLevels, defaultThinkingLevel: clampThinkingLevel(model, "medium") }] : [];
+    }).sort((a, b) => a.provider.localeCompare(b.provider) || a.modelId.localeCompare(b.modelId));
+    if (models.length > 256) throw new DeckError("too_large", "Model catalog exceeds client limit");
+    const selection = this.selection(await this.harness.snapshot(AgentDoc, chat.id, context) ?? {});
+    return { hubId: this.hubId, chatId: id, selection, defaultModel: { ...this.defaultModel }, models };
+  }
+
+  setModelSettings(args: SetModelSettingsArgs): Promise<ModelSettingsAck> {
+    return this.serial(async () => {
+      if (!validSetModelSettingsArgs(args)) throw new DeckError("invalid", "Invalid model settings");
+      const chat = await this.chat(args.chatId);
+      const saved = await this.harness.snapshot(ChatDoc, chat.id, context);
+      if (!saved || !["main", "task"].includes(saved.kind)) throw new DeckError("invalid", "Only ownerless Deck chats can change model settings");
+      return chat.commit(async (tx) => {
+        const binding = await tx.doc(ChatDoc, chat.id);
+        const record = await tx.conversation(chat.id);
+        if (!record || record.owner || binding.kind === "subagent") throw new DeckError("invalid", "Owned subagents inherit their owner's settings");
+        if (!await configurationIdle(tx, chat.id)) throw new DeckError("busy", "Conversation has unfinished work; wait for it to settle before changing model/thinking");
+        const agent = await tx.doc(AgentDoc, chat.id);
+        if (!sameSelection(this.selection(agent), args.expected)) throw new DeckError("conflict", "Model settings changed; refresh before choosing again");
+        const model = this.models.getModel(args.selection.provider, args.selection.modelId);
+        if (!model || !getSupportedThinkingLevels(model).includes(args.selection.thinkingLevel)) throw new DeckError("invalid", "Model or thinking level is not supported by this hub");
+        // Keep model extensions intact when changing only thinking. No cwd,
+        // instructions, bindings, prior captures or outstanding inputs are rewritten.
+        await configureAgent(tx, chat.id, {
+          ...(agent.model?.provider === args.selection.provider && agent.model?.modelId === args.selection.modelId ? {} : { model: { provider: args.selection.provider, modelId: args.selection.modelId } }),
+          thinkingLevel: args.selection.thinkingLevel,
+        });
+        return { hubId: this.hubId, chatId: args.chatId, selection: { ...args.selection } };
+      }, context);
+    });
+  }
+
   configure(id: string, change: AgentChange) {
     return this.serial(async () => {
       const chat = await this.chat(id);
@@ -457,7 +505,7 @@ export class DeckRuntime {
     const chat = await this.chat(id);
     return projectProgress(String(chat.id), await this.harness.snapshot(LiveDoc, chat.id, context));
   }
-  async activity(id: string): Promise<ActivitySnapshot> {
+  async activity(id: string, includeAgentStatus = false): Promise<ActivitySnapshot> {
     const chat = await this.chat(id);
     const [live, inbox] = await Promise.all([
       this.harness.snapshot(LiveDoc, chat.id, context), this.harness.snapshot(InboxDoc, chat.id, context),
@@ -468,6 +516,7 @@ export class DeckRuntime {
     // This is a bounded presentation of Pi's committed state, not another execution tracker.
     return {
       chatId: String(chat.id), busy: !!live?.run, queued: inbox?.items.length ?? 0,
+      ...(includeAgentStatus ? { agentStatus: await chat.commit((tx) => agentStatus(tx, chat.id, (inbox?.items.length ?? 0) > 0), context) } : {}),
       ...(live?.run ? { runTaskId: String(live.run.taskId) } : {}),
       ...(live?.generation ? { generation: { attempt: live.generation.attempt, phase: live.generation.retry ? "retrying" : live.generation.deferred ? "deferred" : "generating" } } : {}),
       tools: tools.slice(0, 32).map((tool) => ({ callId: prefixUnits(tool.callId, 128), name: prefixUnits(tool.name, 80), status: tool.status, ...(tool.taskId === undefined ? {} : { taskId: String(tool.taskId) }), nested: "parentTaskId" in tool })),

@@ -2,6 +2,7 @@
 .direnv/
 .zig-cache/
 zig-out/
+zig-pkg/
 node_modules/
 runtime/dist/
 result

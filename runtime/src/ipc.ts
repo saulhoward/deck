@@ -1,6 +1,8 @@
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { Readable, Writable } from "node:stream";
 import { ChatDoc, DeckError, type DeckRuntime } from "./deck.js";
+import { validModelSettingsArgs } from "./model-settings-contracts.js";
+import type { SetModelSettingsArgs } from "./generated/contracts.js";
 import { validStatusLoginArgs } from "./status-login-contracts.js";
 import { validOpenArgs, validRexReadArgs } from "./rex-open-contracts.js";
 import type { Login } from "./login.js";
@@ -46,7 +48,12 @@ async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, 
       // Project Deck metadata without rewriting retained documents. Pi model
       // parameters and global inspection records remain compatible opaque data.
       const binding = saved && { machineId: saved.machineId, cwd: saved.cwd, kind: saved.kind, title: saved.title, ...(saved.parentChatId === undefined ? {} : { parentChatId: saved.parentChatId }), ...(saved.ownerTaskId === undefined ? {} : { ownerTaskId: saved.ownerTaskId }) };
-      return { implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, rexStartup: 1, rexOpen: runtime.rexClient && runtime.localFiles ? 1 : 0, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding, activity: await runtime.harness.inspect(context), provider: model?.provider, model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
+      return { implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, modelSettings: 1, rexStartup: 1, rexOpen: runtime.rexClient && runtime.localFiles ? 1 : 0, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding, activity: await runtime.harness.inspect(context), provider: model?.provider, model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
+    }
+    case "model_settings":
+    case "set_model_settings": {
+      if (request.hubId !== runtime.hubId || !validModelSettingsArgs(String(request.command), args)) throw new DeckError("invalid", "Model settings require a selected chat and explicit hub identity");
+      return request.command === "model_settings" ? runtime.modelSettings(text(args.chatId, "chatId")) : runtime.setModelSettings(args as SetModelSettingsArgs);
     }
     case "rex_open": {
       if (request.hubId !== runtime.hubId || !validOpenArgs(args)) throw new DeckError("invalid", "Rex open requires valid arguments and explicit hub identity");
@@ -66,7 +73,7 @@ async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, 
     case "progress": {
       if (!validLiveArgs(args)) throw new DeckError("invalid", "Invalid live view arguments");
       const id = args.chatId ?? String(runtime.main.id);
-      return request.command === "activity" ? runtime.activity(id) : runtime.progress(id);
+      return request.command === "activity" ? runtime.activity(id, args.includeAgentStatus === true) : runtime.progress(id);
     }
     case "list_chats": {
       if (!validDiscoveryArgs(args)) throw new DeckError("invalid", "Invalid chat discovery arguments");
@@ -96,7 +103,7 @@ async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, 
       if (!validHistoryArgs(args)) throw new DeckError("invalid", "Invalid history arguments");
       const id = args.chatId;
       const page = await runtime.history(id, { ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.before === undefined ? {} : { before: args.before }), ...(args.after === undefined ? {} : { after: args.after }) });
-      const canonical = { ...page, ...(args.includeActivity ? { activity: await runtime.activity(id) } : {}) };
+      const canonical = { ...page, ...(args.includeActivity ? { activity: await runtime.activity(id, args.includeAgentStatus === true) } : {}) };
       if (!args.includeProgress && !args.includeInstructions) return canonical;
       const combined = { ...canonical, ...(args.includeProgress ? { progress: await runtime.progress(id) } : {}), ...(args.includeInstructions ? { instructions: await runtime.instructionsStatus(id) } : {}) };
       // Optional previews/instruction samples never make fitting canonical history fail.

@@ -21,7 +21,7 @@ if(command[0]==='server') {
  if(command[0]==='run') {assert.equal(command[command.indexOf('--session')+1],'session:'+uuid); assert.ok(command.includes('--focus=false'));}
  fs.appendFileSync(root+'/created','create\\n');
  assert.ok(command.includes('--shell=none')); assert.ok(command.includes('--keep-open'));
- const argv=command.slice(command.indexOf('--')+1); assert.equal(argv[1],'agent'); assert.ok(argv.includes('--hub-id')); assert.ok(argv.includes('--task')); assert.match(argv[argv.indexOf('--rex-allocation')+1],/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/); assert.equal(argv.includes('--message'),false);
+ const argv=command.slice(command.indexOf('--')+1); assert.equal(argv[1],'agent'); assert.ok(argv.includes('--tui')); assert.equal(argv.includes('--no-tui'),false); assert.ok(argv.includes('--hub-id')); assert.ok(argv.includes('--task')); assert.match(argv[argv.indexOf('--rex-allocation')+1],/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/); assert.equal(argv.includes('--message'),false);
  if(mode==='cancel'||mode==='lost_ack') {process.on('SIGTERM',()=>{}); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0);}
  if(mode==='failed') { console.error('PRIVATE_REX_ERROR'); process.exit(7); }
  if(mode==='malformed') { console.log('PRIVATE_BAD_RESULT'); process.exit(0); }

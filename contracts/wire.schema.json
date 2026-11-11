@@ -17,7 +17,7 @@
       "additionalProperties": true
     },
     "TransportId": { "type": "string", "minLength": 1, "maxLength": 200 },
-    "HubCommand": { "enum": ["status", "login_start", "login_status", "login_reply", "login_cancel", "rex_open", "rex_status", "rex_inspect", "rex_startup", "activity", "progress", "list_chats", "create_task", "import_instructions", "instruction_status", "admit", "history", "stop"] },
+    "HubCommand": { "enum": ["status", "login_start", "login_status", "login_reply", "login_cancel", "rex_open", "rex_status", "rex_inspect", "rex_startup", "activity", "progress", "list_chats", "create_task", "import_instructions", "instruction_status", "admit", "history", "stop", "model_settings", "set_model_settings"] },
     "KnownCommandErrorCode": { "enum": ["conflict", "offline", "not_found", "invalid", "auth_required", "busy", "settings_changed", "invalid_response", "too_large", "runtime_failed"] },
     "FailureSource": { "enum": ["local", "transport", "remote"] },
     "FailurePolicy": {
@@ -127,7 +127,7 @@
       "type": "object", "additionalProperties": false,
       "properties": {
         "implementation": { "$ref": "#/$defs/Sha256" }, "hubId": { "$ref": "#/$defs/TransportId" },
-        "hubGuard": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexStartup": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexOpen": { "type": "integer", "minimum": 0, "maximum": 1 },
+        "modelSettings": { "type": "integer", "minimum": 0, "maximum": 1 }, "hubGuard": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexStartup": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexOpen": { "type": "integer", "minimum": 0, "maximum": 1 },
         "mainChatId": { "$ref": "#/$defs/PiId" }, "chatId": { "$ref": "#/$defs/PiId" }, "binding": { "$ref": "#/$defs/StatusBinding" },
         "activity": { "$ref": "#/$defs/StatusInspection" }, "provider": { "$ref": "#/$defs/ChatListLabel" }, "model": { "$ref": "#/$defs/StatusModel" }, "tools": { "type": "string", "minLength": 1, "maxLength": 32 }
       }, "required": ["hubId", "mainChatId", "chatId", "tools"]
@@ -216,8 +216,8 @@
       "required": ["items"], "additionalProperties": false
     },
     "LiveViewArgs": {
-      "description": "Read-only activity/progress selection; omitted chat defaults to main. Legacy ignored extensions remain accepted.",
-      "type": "object", "properties": { "chatId": { "$ref": "#/$defs/PiId" } }, "required": [], "additionalProperties": true
+      "description": "Read-only activity/progress selection; omitted chat defaults to main. Activity may opt into the bounded Pi agent-status observation. Legacy ignored extensions remain accepted.",
+      "type": "object", "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "includeAgentStatus": { "type": "boolean" } }, "required": [], "additionalProperties": true
     },
     "InstructionStatusArgs": {
       "type": "object", "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "taskId": { "$ref": "#/$defs/PiId" } }, "required": [], "additionalProperties": false
@@ -233,9 +233,14 @@
       "type": "object", "properties": { "callId": { "type": "string", "maxLength": 128 }, "name": { "type": "string", "maxLength": 80 }, "status": { "$ref": "#/$defs/ActivityToolStatus" }, "taskId": { "$ref": "#/$defs/PiId" }, "nested": { "type": "boolean" } },
       "required": ["callId", "name", "status", "nested"], "additionalProperties": false
     },
+    "AgentStatus": {
+      "description": "Read-only Pi work observation. Done/error require the latest settled generation task ID. Working may carry its latest settled reply's generation ID to baseline unread indications while other work drains. Not a worker-health or future-idleness guarantee.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "state": { "enum": ["idle", "working", "done", "error"] }, "taskId": { "$ref": "#/$defs/PiId" }, "settledTaskId": { "$ref": "#/$defs/PiId" } }, "required": ["state"]
+    },
     "ActivitySnapshot": {
       "description": "Bounded presentation sampled from Pi, not a lifecycle/worker-health or process-draining receipt. Existing UTF-16 label caps remain semantic guards.",
-      "type": "object", "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "busy": { "type": "boolean" }, "queued": { "$ref": "#/$defs/ViewCount" }, "runTaskId": { "$ref": "#/$defs/PiId" }, "generation": { "$ref": "#/$defs/ActivityGeneration" }, "tools": { "type": "array", "items": { "$ref": "#/$defs/ActivityTool" }, "maxItems": 32 }, "omittedTools": { "$ref": "#/$defs/ViewCount" }, "compactions": { "$ref": "#/$defs/ViewCount" }, "compactionFailed": { "type": "boolean" } },
+      "type": "object", "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "busy": { "type": "boolean" }, "queued": { "$ref": "#/$defs/ViewCount" }, "runTaskId": { "$ref": "#/$defs/PiId" }, "generation": { "$ref": "#/$defs/ActivityGeneration" }, "tools": { "type": "array", "items": { "$ref": "#/$defs/ActivityTool" }, "maxItems": 32 }, "omittedTools": { "$ref": "#/$defs/ViewCount" }, "compactions": { "$ref": "#/$defs/ViewCount" }, "compactionFailed": { "type": "boolean" }, "agentStatus": { "$ref": "#/$defs/AgentStatus" } },
       "required": ["chatId", "busy", "queued", "tools", "omittedTools", "compactions", "compactionFailed"], "additionalProperties": false
     },
     "ProgressGeneration": {
@@ -286,7 +291,7 @@
     "HistoryArgs": {
       "description": "Legacy ignored extensions remain accepted. before/after are mutually exclusive; after zero bootstraps an empty chat. Limit defaults to 100.",
       "type": "object",
-      "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "limit": { "type": "integer", "minimum": 1, "maximum": 100 }, "before": { "$ref": "#/$defs/PiId" }, "after": { "$ref": "#/$defs/HistoryAfter" }, "includeActivity": { "type": "boolean" }, "includeProgress": { "type": "boolean" }, "includeInstructions": { "type": "boolean" } },
+      "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "limit": { "type": "integer", "minimum": 1, "maximum": 100 }, "before": { "$ref": "#/$defs/PiId" }, "after": { "$ref": "#/$defs/HistoryAfter" }, "includeActivity": { "type": "boolean" }, "includeAgentStatus": { "type": "boolean" }, "includeProgress": { "type": "boolean" }, "includeInstructions": { "type": "boolean" } },
       "required": ["chatId"], "additionalProperties": true
     },
     "HistoryText": { "type": "string", "maxLength": 1048576 },
@@ -504,6 +509,34 @@
       },
       "required": ["version", "operationId", "requestHash", "state", "creation"],
       "additionalProperties": false
-    }
+    },
+    "TuiRequest": {
+      "description": "Client-only renderer bridge, never a Pi execution channel. One outstanding request; no replay on loss.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "action": { "enum": ["poll", "older", "latest", "send", "retry", "discard", "stop", "models", "configure", "tasks", "select", "create", "rexStatus", "rexInspect", "rexOpen"] }, "chatId": { "$ref": "#/$defs/PiId" }, "after": { "$ref": "#/$defs/PiId" }, "configuration": { "$ref": "#/$defs/ModelSettingsChange" }, "text": { "type": "string", "maxLength": 16384 }, "hold": { "type": "boolean" } }, "required": ["version", "id", "action"]
+    },
+    "TuiEntry": { "type": "object", "additionalProperties": false, "properties": { "id": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "role": { "enum": ["user", "assistant", "tool", "note"] }, "text": { "type": "string", "maxLength": 8192 } }, "required": ["id", "role", "text"] },
+    "TuiDraft": { "description": "Display-only preview. Retry always uses the original DraftStore request, never this preview.", "type": "object", "additionalProperties": false, "properties": { "requestId": { "$ref": "#/$defs/DurableRequestId" }, "kind": { "enum": ["input", "task", "instructions"] }, "saved": { "type": "boolean" }, "text": { "type": "string", "maxLength": 16384 }, "clipped": { "type": "boolean" } }, "required": ["requestId", "kind", "saved", "text", "clipped"] },
+    "TuiChat": { "type": "object", "additionalProperties": false, "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "kind": { "$ref": "#/$defs/ChatListKind" }, "title": { "type": "string", "maxLength": 160 }, "machineId": { "type": "string", "maxLength": 80 }, "cwd": { "type": "string", "maxLength": 256 } }, "required": ["chatId", "kind", "title", "machineId", "cwd"] },
+    "TuiTasks": { "description": "One bounded discovery page; labels are display-only, never routing authority.", "type": "object", "additionalProperties": false, "properties": { "items": { "type": "array", "maxItems": 25, "items": { "$ref": "#/$defs/TuiChat" } }, "after": { "$ref": "#/$defs/PiId" }, "next": { "$ref": "#/$defs/PiId" } }, "required": ["items"] },
+    "TuiRex": { "description": "Selected-chat creation provenance and optional independent presence sample, not agent health.", "type": "object", "additionalProperties": false, "properties": { "status": { "$ref": "#/$defs/RexStatusSnapshot" }, "inspection": { "$ref": "#/$defs/RexInspectionSnapshot" } }, "required": ["status"] },
+    "TuiSnapshot": { "type": "object", "additionalProperties": false, "properties": {
+      "settingsPending": { "type": "boolean" }, "mainChatId": { "$ref": "#/$defs/PiId" }, "tasks": { "$ref": "#/$defs/TuiTasks" }, "rex": { "$ref": "#/$defs/TuiRex" }, "modelSettings": { "$ref": "#/$defs/ModelSettingsSnapshot" }, "hubId": { "$ref": "#/$defs/TransportId" }, "chatId": { "$ref": "#/$defs/PiId" }, "title": { "type": "string", "maxLength": 160 }, "model": { "type": "string", "maxLength": 160 }, "tools": { "type": "string", "maxLength": 80 },
+      "agentStatus": { "$ref": "#/$defs/AgentStatus" }, "activityKnown": { "type": "boolean" }, "busy": { "type": "boolean" }, "queued": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }, "entries": { "type": "array", "maxItems": 80, "items": { "$ref": "#/$defs/TuiEntry" } }, "hasOlder": { "type": "boolean" }, "historical": { "type": "boolean" }, "preview": { "type": "string", "maxLength": 4096 }, "notice": { "type": "string", "maxLength": 1024 }, "draft": { "anyOf": [{ "$ref": "#/$defs/TuiDraft" }, { "type": "null" }] }
+    }, "required": ["hubId", "chatId", "title", "model", "tools", "activityKnown", "busy", "queued", "entries", "hasOlder", "historical", "preview", "notice", "draft"] },
+    "TuiResponse": { "oneOf": [
+      { "type": "object", "additionalProperties": false, "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "ok": { "const": true }, "snapshot": { "$ref": "#/$defs/TuiSnapshot" } }, "required": ["version", "id", "ok", "snapshot"] },
+      { "type": "object", "additionalProperties": false, "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "ok": { "const": false }, "error": { "type": "string", "minLength": 1, "maxLength": 1024 } }, "required": ["version", "id", "ok", "error"] }
+    ] },
+    "ThinkingLevel": { "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"] },
+    "ModelToken": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "ModelRef": { "type": "object", "additionalProperties": false, "properties": { "provider": { "$ref": "#/$defs/ModelToken" }, "modelId": { "$ref": "#/$defs/ModelToken" } }, "required": ["provider", "modelId"] },
+    "ModelSelection": { "type": "object", "additionalProperties": false, "properties": { "provider": { "$ref": "#/$defs/ModelToken" }, "modelId": { "$ref": "#/$defs/ModelToken" }, "thinkingLevel": { "$ref": "#/$defs/ThinkingLevel" } }, "required": ["provider", "modelId", "thinkingLevel"] },
+    "ModelOption": { "type": "object", "additionalProperties": false, "properties": { "provider": { "$ref": "#/$defs/ModelToken" }, "modelId": { "$ref": "#/$defs/ModelToken" }, "name": { "type": "string", "maxLength": 160 }, "thinkingLevels": { "type": "array", "minItems": 1, "maxItems": 7, "items": { "$ref": "#/$defs/ThinkingLevel" } }, "defaultThinkingLevel": { "$ref": "#/$defs/ThinkingLevel" } }, "required": ["provider", "modelId", "name", "thinkingLevels", "defaultThinkingLevel"] },
+    "ModelSettingsArgs": { "type": "object", "additionalProperties": false, "properties": { "chatId": { "$ref": "#/$defs/PiId" } }, "required": ["chatId"] },
+    "ModelSettingsChange": { "type": "object", "additionalProperties": false, "properties": { "expected": { "$ref": "#/$defs/ModelSelection" }, "selection": { "$ref": "#/$defs/ModelSelection" } }, "required": ["expected", "selection"] },
+    "SetModelSettingsArgs": { "type": "object", "additionalProperties": false, "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "expected": { "$ref": "#/$defs/ModelSelection" }, "selection": { "$ref": "#/$defs/ModelSelection" } }, "required": ["chatId", "expected", "selection"] },
+    "ModelSettingsSnapshot": { "type": "object", "additionalProperties": false, "properties": { "hubId": { "$ref": "#/$defs/TransportId" }, "chatId": { "$ref": "#/$defs/PiId" }, "selection": { "$ref": "#/$defs/ModelSelection" }, "defaultModel": { "$ref": "#/$defs/ModelRef" }, "models": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/ModelOption" } } }, "required": ["hubId", "chatId", "selection", "defaultModel", "models"] },
+    "ModelSettingsAck": { "type": "object", "additionalProperties": false, "properties": { "hubId": { "$ref": "#/$defs/TransportId" }, "chatId": { "$ref": "#/$defs/PiId" }, "selection": { "$ref": "#/$defs/ModelSelection" } }, "required": ["hubId", "chatId", "selection"] }
   }
 }

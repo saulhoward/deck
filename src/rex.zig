@@ -62,7 +62,7 @@ pub fn allocate(native: Native, allocator: std.mem.Allocator, cwd: []const u8, e
     } else {
         try launch.appendSlice(&.{ "new", plan.label });
     }
-    try launch.appendSlice(&.{ "--json", "--cwd", cwd, "--shell=none", "--keep-open", "--", client, "agent", "--no-tui", "--port", port, "--task", plan.chatId, "--hub-id", plan.hubId });
+    try launch.appendSlice(&.{ "--json", "--cwd", cwd, "--shell=none", "--keep-open", "--", client, "agent", "--tui", "--port", port, "--task", plan.chatId, "--hub-id", plan.hubId });
     if (plan.allocationId) |allocation| try launch.appendSlice(&.{ "--rex-allocation", allocation });
     const created = cli(native, allocator, cwd, plan, launch.items, cancelled) catch return refuse("effect_uncertain");
     if (!created.ok or cancelled.load(.acquire)) return refuse("effect_uncertain");

@@ -13,12 +13,25 @@
         "x86_64-linux"
       ];
       eachSystem = nixpkgs.lib.genAttrs systems;
+      terminalSources = pkgs: {
+        vaxis = pkgs.fetchzip {
+          extension = "tar.gz";
+          url = "https://codeload.github.com/rockorager/libvaxis/tar.gz/74b7d916c8879e5379f428ea8c4d43d1a1bb061b";
+          hash = "sha256-T8i4NUXLuvo399l1s7IbFZ8Dk2ll0D/aM+Je+/b4DMc=";
+        };
+        unicode = pkgs.fetchzip {
+          extension = "tar.gz";
+          url = "https://codeload.github.com/jacobsandlund/uucode/tar.gz/1fb73433bba5d93366c57f23ff2e9d7939746500";
+          hash = "sha256-fZTYVFN0N10R0Ty+3tpMkTLqEBq4tTpkBK6G1m6VgmY=";
+        };
+      };
     in
     {
       packages = eachSystem (
         system:
         let
           pkgs = import nixpkgs { inherit system; };
+          sources = terminalSources pkgs;
         in
         {
           default = pkgs.buildNpmPackage {
@@ -28,7 +41,9 @@
               root = ./.;
               fileset = pkgs.lib.fileset.unions [
                 ./build.zig
+                ./build.zig.zon
                 ./src
+                ./licenses
                 ./contracts
                 ./scripts
                 ./runtime/src
@@ -42,11 +57,16 @@
             npmFlags = [ "--ignore-scripts" ];
             nativeBuildInputs = [
               pkgs.zig_0_17
+              (pkgs.python3.withPackages (ps: [ ps.pyte ])) # PTY/screen tests only.
               pkgs.makeWrapper
             ];
             buildPhase = ''
               runHook preBuild
               export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
+              # 0.17 caches packages as archives. Seed from fixed, unpacked Nix
+              # sources: no network in the build, no nested-root fetch-cache bug.
+              zig fetch ${sources.vaxis}
+              zig fetch ${sources.unicode}
               npm run contracts:check
               zig build -Doptimize=ReleaseSafe --prefix "$TMPDIR/deck-zig"
               npm run build
@@ -66,6 +86,7 @@
               npm prune --omit=dev --no-save --ignore-scripts --offline
               mkdir -p "$out/bin" "$out/libexec/deck/runtime"
               cp "$TMPDIR/deck-zig/bin/deck" "$out/bin/deck"
+              cp -r "$TMPDIR/deck-zig/share" "$out/share"
               cp package.json "$out/libexec/deck/"
               cp -r runtime/dist "$out/libexec/deck/runtime/"
               find "$out/libexec/deck/runtime/dist" -name '*.test.*' -delete
@@ -100,9 +121,14 @@
         in
         {
           default = pkgs.mkShell {
+            shellHook = ''
+              zig fetch ${(terminalSources pkgs).vaxis} >/dev/null
+              zig fetch ${(terminalSources pkgs).unicode} >/dev/null
+            '';
             packages = [
               pkgs.zig_0_17
               pkgs.nodejs_24
+              (pkgs.python3.withPackages (ps: [ ps.pyte ]))
               pkgs.git
               pkgs.nixfmt
             ];

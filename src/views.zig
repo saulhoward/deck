@@ -34,8 +34,17 @@ pub fn validArgs(command: []const u8, args: std.json.Value) bool {
     if (std.mem.eql(u8, command, "instruction_status")) return instructionArgs(args);
     return true;
 }
+pub fn validAgentStatus(value: std.json.Value) bool {
+    if (!wire.validAgentStatus(value)) return false;
+    const state = value.object.get("state").?.string;
+    const id = value.object.get("taskId");
+    if (value.object.get("settledTaskId")) |settled| if (!std.mem.eql(u8, state, "working") or !safeId(settled)) return false;
+    if (std.mem.eql(u8, state, "done") or std.mem.eql(u8, state, "error")) return if (id) |v| safeId(v) else false;
+    return id == null;
+}
 fn activity(value: std.json.Value, chat: ?std.json.Value) bool {
     if (!wire.validActivitySnapshot(value) or !same(value.object.get("chatId").?, chat)) return false;
+    if (value.object.get("agentStatus")) |status| if (!validAgentStatus(status)) return false;
     if (value.object.get("runTaskId")) |id| if (!safeId(id)) return false;
     for (value.object.get("tools").?.array.items) |tool| {
         if (!unitsWithin(tool.object.get("callId").?, 128) or !unitsWithin(tool.object.get("name").?, 80)) return false;

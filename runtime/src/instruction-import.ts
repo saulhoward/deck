@@ -5,7 +5,7 @@ import type { HostFiles } from "./host-files.js";
 
 export const INSTRUCTION_BYTES = 32 * 1024;
 export const IMPORT_KIND = "deck.import-instructions";
-const unfinished = ["pending", "running", "waiting", "sleeping", "completing"] as const;
+export const unfinished = ["pending", "running", "waiting", "sleeping", "completing"] as const;
 export type InstructionSource = { machineId: string; cwd: string; path: "AGENTS.md"; sha256: string; bytes: number; taskId: string };
 type Rejection = "offline" | "unavailable" | "read_failed" | "effect_uncertain" | "invalid" | "too_large" | "settings_changed" | "busy";
 export type InstructionImportResult = { status: "applied"; source: InstructionSource } | { status: "rejected"; reason: Rejection } | { status: "aborted" };

@@ -270,7 +270,7 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
       };
       const receipts = await readdir(join(state, "worker/operations"));
       assert.equal((await sample()).observation?.state, "running");
-      await rex("send", "--session", saved.sessionId, "--block", saved.blockId, "/exit\n");
+      await rex("send", "--session", saved.sessionId, "--block", saved.blockId, ":q\r");
       assert.equal((await exit(saved.sessionId, saved.blockId)).exit_code, 0);
       await writeFile(`${request}.inspect`, "");
       const afterExit = await until(async () => { try { return JSON.parse(await readFile(`${request}.inspect.result`, "utf8")) as RexStartup; } catch { return undefined; } }, (value) => !!value);
@@ -307,7 +307,7 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
       const cli = spawnSync(deckBinary!, ["rex", "open", "--task", task.chatId, "--port", String(port)], { env, encoding: "utf8", timeout: 5000 });
       assert.equal(cli.status, 0, cli.stderr); assert.match(cli.stdout, /reused/);
       assert.deepEqual((await publicStatus()).binding, first);
-      await rex("send", "--session", first.sessionId, "--block", first.blockId, "/exit\n"); await exit(first.sessionId, first.blockId);
+      await rex("send", "--session", first.sessionId, "--block", first.blockId, ":q\r"); await exit(first.sessionId, first.blockId);
       await command("rex_open", { chatId: task.chatId, requestId: randomUUID(), port });
       const second = await allocated(); assert.equal(second.sessionId, first.sessionId); assert.notEqual(second.blockId, first.blockId);
       assert.deepEqual((await publicStatus()).previousBinding, first);

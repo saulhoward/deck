@@ -11,7 +11,7 @@ pub fn failure(command: []const u8, code: []const u8, source: wire.FailureSource
     if (source == .local) {
         policy.outcome = .not_sent;
         policy.action = .fix_request;
-    } else if (oneOf(command, &.{ "status", "list_chats", "history", "activity", "progress", "instruction_status", "rex_status", "rex_inspect", "login_status" })) {
+    } else if (oneOf(command, &.{ "model_settings", "status", "list_chats", "history", "activity", "progress", "instruction_status", "rex_status", "rex_inspect", "login_status" })) {
         policy.outcome = .read_only;
         policy.action = if (std.mem.eql(u8, command, "history") and source == .remote and std.mem.eql(u8, code, "too_large")) .reduce_page else .retry_read;
     } else if (oneOf(command, &.{ "admit", "create_task", "import_instructions" })) {
@@ -20,7 +20,7 @@ pub fn failure(command: []const u8, code: []const u8, source: wire.FailureSource
         policy.action = .inspect_terminal;
     } else if (oneOf(command, &.{ "login_start", "login_reply", "login_cancel" })) {
         policy.action = if (std.mem.eql(u8, command, "login_reply") and source == .remote and std.mem.eql(u8, code, "conflict")) .poll_login else .observe_login;
-    } else if (oneOf(command, &.{ "stop", "rex_startup" })) {
+    } else if (oneOf(command, &.{ "set_model_settings", "stop", "rex_startup" })) {
         policy.action = .explicit_action;
     }
     return policy;

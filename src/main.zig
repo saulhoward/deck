@@ -4,6 +4,12 @@ const state = @import("state.zig");
 const hub = @import("hub.zig");
 const worker = @import("worker.zig");
 const runtime_paths = @import("runtime_paths.zig");
+const tui = @import("tui.zig");
+pub const panic = @import("vaxis").Panic;
+pub const std_options: std.Options = .{ .log_scope_levels = &.{
+    .{ .scope = .vaxis, .level = .err },
+    .{ .scope = .vaxis_parser, .level = .err },
+} };
 
 const help =
     \\deck — local prototype
@@ -17,7 +23,9 @@ const help =
     \\  deck rex open|reopen|status|inspect --task CHAT_ID [--port 52800]
     \\    [--rex /path/to/rex] [--server unix:///path/to/socket] [--host-id UUID] [--instance-id UUID]
     \\  deck serve --stdio --mock [--directory PATH] [--runtime PATH]
-    \\  deck agent --no-tui [--port 52800] [--task CHAT_ID] [--message TEXT]
+    \\  deck agent [--tui | --no-tui] [--port 52800] [--task CHAT_ID] [--message TEXT]
+    \\    TTYs default to the Zig TUI; --message and redirected input use the plain client.
+    \\    TUI: i insert, Esc normal, Tab chat/prompt, Ctrl-S send, :help, :q detach.
     \\  deck --help | --version
     \\
     \\serve binds only 127.0.0.1. --stdio selects private framed IPC instead.
@@ -50,7 +58,9 @@ const help =
     \\Rex open/reopen is best-effort, ownerless-task-only, with no automatic retry.
     \\Duplicates after races/lost replies need manual cleanup. No GUI focus/attach.
     \\Plain /rex open|reopen|status|inspect uses the selected task and defaults/saved target.
-    \\Remote workers and TUI are not yet available.
+    \\TUI /tasks, /task TITLE, /select CHAT_ID and /main manage task chats.
+    \\TUI /rex shows selected-task status; i inspects, o explicitly opens/reopens.
+    \\Remote workers and scheduled jobs are not yet available.
     \\
 ;
 
@@ -271,6 +281,19 @@ pub fn main(init: std.process.Init) void {
     const allocator = init.gpa;
     const native: Native = .{ .io = init.io, .environ = init.minimal.environ };
     const args = init.minimal.args.toSlice(init.arena.allocator()) catch std.process.exit(1);
+    if (args.len > 1 and std.mem.eql(u8, args[1], "agent")) {
+        const interactive = tui.selected(args[2..], std.c.isatty(0) == 1 and std.c.isatty(1) == 1) catch {
+            std.debug.print("--tui cannot be combined with --no-tui or --message\n", .{});
+            std.process.exit(2);
+        };
+        if (interactive) {
+            tui.run(init, args[2..]) catch |err| {
+                std.debug.print("Deck TUI: {s}; use --no-tui for the plain client\n", .{@errorName(err)});
+                std.process.exit(1);
+            };
+            return;
+        }
+    }
     if (args.len > 1 and (std.mem.eql(u8, args[1], "agent") or std.mem.eql(u8, args[1], "login") or std.mem.eql(u8, args[1], "rex"))) {
         const term = launchClient(native, allocator, args) catch {
             std.Io.File.stderr().writeStreamingAll(init.io, "deck: client runtime unavailable; rebuild or check the installation\n") catch {};
@@ -325,4 +348,8 @@ test {
     _ = @import("contracts_test.zig");
     _ = @import("native_contracts_test.zig");
     _ = @import("command_policy_test.zig");
+    _ = @import("model_settings.zig");
+    _ = tui;
+    _ = @import("tui_editor.zig");
+    _ = @import("tui_bridge.zig");
 }

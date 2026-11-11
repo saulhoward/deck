@@ -1,0 +1,17 @@
+.{
+    .name = .deck,
+    .fingerprint = 0x4fac36378df6f086,
+    .version = "0.1.0",
+    .minimum_zig_version = "0.17.1",
+    .dependencies = .{
+        .vaxis = .{
+            .url = "https://codeload.github.com/rockorager/libvaxis/tar.gz/74b7d916c8879e5379f428ea8c4d43d1a1bb061b",
+            .hash = "vaxis-0.6.0-BWNV_J2zDQArkPcsc2nkktgxfg2r0u1AwwQP9WLugo_1",
+        },
+        .uucode = .{
+            .url = "https://codeload.github.com/jacobsandlund/uucode/tar.gz/1fb73433bba5d93366c57f23ff2e9d7939746500",
+            .hash = "uucode-0.2.0-ZZjBPm6FVgBcY-79AHV8ckQj86z0JwOyVyj89VeZrEiv",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "licenses" },
+}

@@ -1,0 +1,25 @@
+{
+  "read": { "command": "model_settings", "hubId": "hub", "args": { "chatId": "1" }, "result": { "hubId": "hub", "chatId": "1", "selection": { "provider": "mock", "modelId": "alpha", "thinkingLevel": "medium" }, "defaultModel": { "provider": "mock", "modelId": "alpha" }, "models": [{ "provider": "mock", "modelId": "alpha", "name": "Alpha", "thinkingLevels": ["off", "low", "medium", "high"], "defaultThinkingLevel": "medium" }] } },
+  "write": { "command": "set_model_settings", "hubId": "hub", "args": { "chatId": "1", "expected": { "provider": "mock", "modelId": "alpha", "thinkingLevel": "medium" }, "selection": { "provider": "mock", "modelId": "beta", "thinkingLevel": "high" } }, "result": { "hubId": "hub", "chatId": "1", "selection": { "provider": "mock", "modelId": "beta", "thinkingLevel": "high" } } },
+  "cases": [
+    { "name": "catalog", "base": "read", "valid": true },
+    { "name": "exact settings ACK", "base": "write", "valid": true },
+    { "name": "missing pin", "base": "read", "set": { "hubId": null }, "valid": false },
+    { "name": "wrong hub", "base": "read", "result": { "hubId": "other" }, "valid": false },
+    { "name": "wrong chat", "base": "read", "result": { "chatId": "2" }, "valid": false },
+    { "name": "unsafe id", "base": "read", "set": { "args": { "chatId": "9007199254740992" } }, "result": { "chatId": "9007199254740992" }, "valid": false },
+    { "name": "no credential metadata", "base": "read", "result": { "credentials": "PRIVATE" }, "valid": false },
+    { "name": "unsupported default", "base": "read", "result": { "models": [{ "provider": "mock", "modelId": "alpha", "name": "Alpha", "thinkingLevels": ["off"], "defaultThinkingLevel": "medium" }] }, "valid": false },
+    { "name": "unordered levels", "base": "read", "result": { "models": [{ "provider": "mock", "modelId": "alpha", "name": "Alpha", "thinkingLevels": ["high", "medium"], "defaultThinkingLevel": "medium" }] }, "valid": false },
+    { "name": "duplicate levels", "base": "read", "result": { "models": [{ "provider": "mock", "modelId": "alpha", "name": "Alpha", "thinkingLevels": ["medium", "medium"], "defaultThinkingLevel": "medium" }] }, "valid": false },
+    { "name": "empty levels", "base": "read", "result": { "models": [{ "provider": "mock", "modelId": "alpha", "name": "Alpha", "thinkingLevels": [], "defaultThinkingLevel": "medium" }] }, "valid": false },
+    { "name": "private model fields", "base": "read", "result": { "models": [{ "provider": "mock", "modelId": "alpha", "name": "Alpha", "headers": { "authorization": "PRIVATE" }, "thinkingLevels": ["medium"], "defaultThinkingLevel": "medium" }] }, "valid": false },
+    { "name": "duplicate model keys", "base": "read", "result": { "models": [{ "provider": "mock", "modelId": "alpha", "name": "Alpha", "thinkingLevels": ["medium"], "defaultThinkingLevel": "medium" }, { "provider": "mock", "modelId": "alpha", "name": "Alias", "thinkingLevels": ["medium"], "defaultThinkingLevel": "medium" }] }, "valid": false },
+    { "name": "legacy preference not normalized", "base": "read", "result": { "selection": { "provider": "mock", "modelId": "alpha", "thinkingLevel": "xhigh" } }, "valid": true },
+    { "name": "catalog can lack saved selection", "base": "read", "result": { "models": [] }, "valid": true },
+    { "name": "wrong selected model", "base": "write", "result": { "selection": { "provider": "mock", "modelId": "alpha", "thinkingLevel": "high" } }, "valid": false },
+    { "name": "wrong selected thinking", "base": "write", "result": { "selection": { "provider": "mock", "modelId": "beta", "thinkingLevel": "low" } }, "valid": false },
+    { "name": "unknown thinking", "base": "write", "result": { "selection": { "provider": "mock", "modelId": "beta", "thinkingLevel": "extreme" } }, "valid": false },
+    { "name": "closed setter args", "base": "write", "set": { "args": { "chatId": "1", "expected": { "provider": "mock", "modelId": "alpha", "thinkingLevel": "medium" }, "selection": { "provider": "mock", "modelId": "beta", "thinkingLevel": "high" }, "cwd": "/injected" } }, "valid": false }
+  ]
+}

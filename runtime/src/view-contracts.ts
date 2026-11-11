@@ -16,8 +16,14 @@ export function validViewArgs(command: string, args: unknown): boolean {
   return true;
 }
 function scope(actual: string, expected?: string) { return validSafePiId(actual) && (expected === undefined || actual === expected); }
+export function validAgentStatus(value: unknown): value is wire.AgentStatus {
+  return wire.validAgentStatus(value)
+    && (value.state === "done" || value.state === "error" ? validSafePiId(value.taskId) : value.taskId === undefined)
+    && (value.settledTaskId === undefined || (value.state === "working" && validSafePiId(value.settledTaskId)));
+}
 export function validActivity(value: unknown, chatId?: string): value is wire.ActivitySnapshot {
   return wire.validActivitySnapshot(value) && scope(value.chatId, chatId)
+    && (value.agentStatus === undefined || validAgentStatus(value.agentStatus))
     && (value.runTaskId === undefined || validSafePiId(value.runTaskId))
     && value.tools.every((tool) => tool.callId.length <= 128 && tool.name.length <= 80 && (tool.taskId === undefined || validSafePiId(tool.taskId)));
 }

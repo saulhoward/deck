@@ -11,7 +11,7 @@ import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
-import { defineTask, defineDocFamily } from "@earendil-works/pi-durable";
+import { defineTask, defineDocFamily, InboxDoc } from "@earendil-works/pi-durable";
 import { DeckRuntime, ChatDoc, type RuntimeOptions } from "./deck.js";
 import { validDiscoveryPage } from "./discovery-contracts.js";
 
@@ -311,6 +311,30 @@ test("legacy reservation repair keeps the original limited capture without inven
   });
 });
 
+test("agent status projects canonical idle, settled answers and failures without exposing diagnostics or executing work", async () => {
+  await fixture(async (runtime, options, path, faux) => {
+    const id = String(runtime.main.id);
+    const inboxBefore = await runtime.harness.snapshot(InboxDoc, runtime.main.id, context);
+    assert.deepEqual((await runtime.activity(id, true)).agentStatus, { state: "idle" });
+    assert.deepEqual(await runtime.harness.snapshot(InboxDoc, runtime.main.id, context), inboxBefore);
+    assert.equal((await runtime.activity(id)).agentStatus, undefined); // Older clients receive the original view.
+    faux.setResponses([fauxAssistantMessage("Answer"), fauxAssistantMessage("", { stopReason: "error", errorMessage: "INVALID_REQUEST_PRIVATE_DIAGNOSTIC" })]);
+    await (await runtime.admit(id, input("answer"))).wait(context); await runtime.main.waitForIdle(context);
+    const done = (await runtime.activity(id, true)).agentStatus!;
+    assert.equal(done.state, "done"); assert.match(done.taskId!, /^[1-9]\d*$/);
+    assert.deepEqual((await runtime.activity(id, true)).agentStatus, done); assert.equal(faux.state.callCount, 1);
+    const other = await runtime.createTask("Other", options.binding);
+    assert.deepEqual((await runtime.activity(String(other.id), true)).agentStatus, { state: "idle" });
+    await (await runtime.admit(id, input("failed"))).wait(context); await runtime.main.waitForIdle(context);
+    const failed = (await runtime.activity(id, true)).agentStatus!;
+    assert.equal(failed.state, "error"); assert.notEqual(failed.taskId, done.taskId);
+    assert.doesNotMatch(JSON.stringify(failed), /PRIVATE_DIAGNOSTIC/); assert.equal(faux.state.callCount, 2);
+    await runtime.close(); const reopened = await DeckRuntime.open(path, options);
+    try { assert.deepEqual((await reopened.activity(id, true)).agentStatus, failed); assert.equal(faux.state.callCount, 2); }
+    finally { await reopened.close(); }
+  });
+});
+
 test("configuration cannot change active or queued work, but succeeds once Pi settles it", { timeout: 10_000 }, async () => {
   await fixture(async (runtime, options, path, faux) => {
     const id = String(runtime.main.id); const entered = gate(); const release = gate();
@@ -320,6 +344,7 @@ test("configuration cannot change active or queued work, but succeeds once Pi se
       await entered.promise;
       await assert.rejects(runtime.configure(id, { instructions: "Must not apply" }), { code: "busy" });
       const queued = await runtime.admit(id, input("queued"));
+      assert.deepEqual((await runtime.activity(id, true)).agentStatus, { state: "working" });
       await assert.rejects(runtime.configure(id, { thinkingLevel: "high" }), { code: "busy" });
       assert.equal((await runtime.main.agent(context)).instructions, undefined);
       release.release(); await first.wait(context); await queued.wait(context);
@@ -330,11 +355,16 @@ test("configuration cannot change active or queued work, but succeeds once Pi se
 });
 
 test("configuration checks authoritative pending tasks even when chat activity looks idle", async () => {
-  await fixture(async (runtime) => {
+  await fixture(async (runtime, _options, _path, faux) => {
+    faux.setResponses([fauxAssistantMessage("Already seen answer")]);
+    await (await runtime.admit(String(runtime.main.id), input("prior-answer"))).wait(context);
+    await runtime.main.waitForIdle(context);
+    const prior = (await runtime.activity(String(runtime.main.id), true)).agentStatus!;
     const pending = defineTask<{}, { phase: "blocked" }, null>({ name: "test.uninstalled", version: 1, initial: () => ({ phase: "blocked" }), phases: { blocked: async () => {} }, abort: async () => {} });
     await runtime.main.commit((tx) => tx.createTask(pending, {}, { ownership: { kind: "conversation" } }), context);
     const id = String(runtime.main.id);
     assert.equal((await runtime.activity(id)).busy, false);
+    assert.deepEqual((await runtime.activity(id, true)).agentStatus, { state: "working", settledTaskId: prior.taskId });
     await assert.rejects(runtime.configure(id, { instructions: "Not safe yet" }), { code: "busy" });
   });
 });
@@ -380,6 +410,7 @@ test("stop requests and unrelated admissions proceed while issued native files d
       await entered.promise;
       inputPipe.write(encodeFrame({ version: 1, id: "stop", command: "stop", args: { chatId: String(native.main.id) } }));
       const stop = await frames.next(); assert.equal(stop.value.result.requested, true);
+      assert.deepEqual((await native.activity(String(native.main.id), true)).agentStatus, { state: "working" });
       await assert.rejects(native.configure(String(native.main.id), { instructions: "Too early; effects still drain" }), { code: "busy" });
       inputPipe.write(encodeFrame({ version: 1, id: "other", command: "admit", args: { chatId: String(task.id), requestId: "independent", text: "Hello", mode: "followUp" } }));
       const admission = await frames.next(); assert.equal(admission.value.id, "other"); assert.equal(admission.value.ok, true);
@@ -409,6 +440,7 @@ test("Pi scoped abort propagates cancellation to native bash and drains its resu
       await native.admit(String(native.main.id), input("shell-abort")); await entered.promise;
       await native.stop(String(native.main.id)); assert.equal(aborted, true);
       await native.main.waitForIdle(context);
+      assert.deepEqual((await native.activity(String(native.main.id), true)).agentStatus, { state: "idle" });
     } finally { await native.close(); }
   });
 });

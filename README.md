@@ -1,100 +1,258 @@
 # Deck
 
-A personal agent harness: a Zig hub, CLI and TUI with coordinator-owned TypeScript/Pi conversations and inference, tools executing on trusted workers, and named Rex task chats. Every chat uses the hub; workers do not run independent model runtimes.
+Deck is a personal coding-agent tool. It has a Zig hub, command-line client, and terminal user interface (TUI). One TypeScript runtime uses Pi to store conversations and run agents. Zig runs local file and shell tools. Rex can keep task terminals open.
 
-**Prototype, local slice in progress.** See the [phased implementation plan](docs/implementation-plan.md) for progress and limits, and the [architecture proposal](docs/architecture.md) for the target. Zig initializes private state, supervises a single Pi writer, and exposes a loopback HTTP command bridge over [private framed IPC](docs/runtime-ipc.md). A plain client supports persistent main/task chats, durable deduplicated admission and [crash-recoverable request drafts](docs/client-drafts.md). Drafts save privately before sending; reconnect and `/retry` explicitly—there is no automatic replay. [Settings observations](docs/settings.md) have explicit limits; general settings configuration remains deferred, apart from the explicit idle-only instruction import below. [Startup compatibility](docs/recovery-compatibility.md) now refuses changed-code recovery while unfinished work remains; upgrade when idle and retain the original build. Writer death or failed Pi store closure stops the hub with a nonzero exit; there is no automatic restart or effect replay. Default `serve` now wires OpenAI with hub-owned ChatGPT OAuth; `--mock` remains an offline demo and `--api-key` is an explicit paid-key opt-in. The user reports the live API-key smoke suite passed: inference, file write/read/edit, bash, stop, detach/reconnect and durable draft recovery. Live ChatGPT OAuth is still unverified. Native UTF-8 `read`/`write`/exact-`edit` and bounded, cancellable `bash` now execute in Zig; [public local Rex open/reopen](docs/rex-open.md) is now available on a best-effort basis; remote workers and TUI remain unimplemented.
+**Deck is a local prototype.** Remote workers are not implemented. Tools run with your user permissions. The workspace is not a sandbox.
 
-The [local client foundations](docs/client-foundations.md) are now ready for a Zig TUI library spike: generated native-effect contracts, shared command failure policy, bounded HTTP decoding and unchanged receipt/draft safety. This does **not** add a TUI or remote workers; the next step is evaluating a maintained Zig 0.17.1-compatible terminal library.
+## Documentation
 
-## Development
+- [Developer guide](docs/DEVELOPER.md): architecture, contracts, storage, builds, and tests.
+- [Roadmap](docs/ROADMAP.md): remaining work and acceptance checks.
+- [History](docs/HISTORY.md): previous changes, design decisions, and test evidence.
+
+These documents distinguish current behavior from the target design. A local build does not publish a release or update a running hub.
+
+## Target workflow
+
+Every chat uses the hub. Interactive tasks will have named Rex sessions on their execution machines. Their subagents will have named TUI terminals inside the same session. Closing and reopening a session will retain the task's hub conversation.
+
+Scheduled jobs and their children will run in the hub runtime through registered host connections, without Rex terminals. Each job will reuse its task and Pi conversation. Each run will have its own admission identity and captured file settings.
+
+Remote hosts, jobs, and subagent terminals still need implementation. Local task navigation and Rex-managed TUI launches are available. See the [target architecture](docs/DEVELOPER.md#target-interactive-and-scheduled-architecture) and [next implementation steps](docs/ROADMAP.md#next-implementation-sequence). The instructions below describe what works now.
+
+## Current workflow
+
+1. Start one hub for your state directory and workspace.
+2. Open the main chat to plan work. Find an existing task before creating another task.
+3. Use a task chat for a separate piece of work. Each task keeps its conversation, model settings, and workspace binding.
+4. Send input from a Deck client. You can use a normal terminal or an optional Rex task terminal. Both connect to the same hub.
+5. Review answers, tool results, and changed files. An accepted request is not completed work.
+6. Detach when you do not need the client. The hub continues the work. Reopen the same chat later.
+7. Use an explicit stop command to cancel work. Wait for outstanding effects to finish before changing settings or upgrading the hub.
+
+Pi stores each chat separately. Task answers do not automatically become new input to main. Rex owns terminals, not agents. Closing a Rex window does not delete the chat or stop hub-owned inference.
+
+## Build and try offline
+
+Use Nix to build the package:
 
 ```sh
-nix develop                 # Zig 0.17.1 (stable), Node 24, npm, Git
-npm ci --ignore-scripts
-zig build
-zig build test
-zig build run -- --help
-npm run check
-npm test                    # runtime-only offline tests
-DECK_TEST_BINARY="$PWD/zig-out/bin/deck" npm test  # also exercise the Zig supervisor
-zig fmt --check build.zig src
-```
-
-Use the pinned shell: an unrelated system Zig may have incompatible APIs. See the [Zig toolchain migration](docs/zig-toolchain.md) for the 0.17.1 pin and native I/O/process changes. `npm test` bounds concurrency to four test files so native runtime startup/fingerprint checks do not compete with a large batch of crash fixtures.
-
-```sh
-nix build path:.            # Zig + compiled runtime + production dependencies + private Node
+nix build path:.
 ./result/bin/deck --help
-nix flake check path:.
 ```
 
-The installed package works outside the checkout without global Node/npm or startup downloads; see [packaging and its smoke test](docs/packaging.md). The explicit `path:.` form includes newly added prototype files before they are committed; once tracked, ordinary `nix build` works too.
+The package includes Node and the runtime. It works outside the checkout and needs no runtime downloads. The `path:.` form includes new files that are not yet tracked by Git. For a local profile installation, use `nix profile add path:.`.
 
-The flake targets arm64/x86_64 macOS and Linux. CI checks macOS and Linux on its available runner architectures. Nix does not install or manage Rex, Tailscale or 1Password.
-
-## Layout
-
-- `src/`, `build.zig`: Zig CLI, private-state initialization, writer locking/supervision and tests.
-- `runtime/`: strict ESM TypeScript, version-pinned Pi adapter, IPC frame codec, schema-generated request/response envelope validation with exact reply correlation, and offline contract tests.
-- `docs/implementation-plan.md`: phased rollout, completed checks and implementation limitations.
-- `docs/architecture.md`: proposed system design (not an implementation claim).
-- `flake.nix`, `flake.lock`: reproducible package and development environment.
-- `package.json`, `package-lock.json`: locked runtime/development dependencies.
-
-## Try the mock prototype
-
-From the repository root, after `zig build` and `npm run build`:
+Start a disposable mock hub from the checkout:
 
 ```sh
-./zig-out/bin/deck init --directory /tmp/deck-demo
-./zig-out/bin/deck serve --mock --directory /tmp/deck-demo
-# In another terminal:
-./zig-out/bin/deck agent --no-tui
+DEMO="$(mktemp -d /tmp/deck-demo.XXXXXX)"
+mkdir "$DEMO/work"
+./result/bin/deck init --directory "$DEMO/state"
+./result/bin/deck serve --mock --port 52801 \
+  --directory "$DEMO/state" --workspace "$DEMO/work"
 ```
 
-The hub binds only `127.0.0.1:52800`. Use `/help`, `/tasks` (then `/tasks more` for another page), `/select CHAT_ID`, `/main`, `/older`, `/task TITLE`, `/status`, `/activity`, `/stop` or `/exit`. Listing and selecting existing chats never creates or stops work. `/older` walks retained history backward in labeled pages while new entries are fetched incrementally. Within a selection, forward catch-up preserves entry order through bursts and transient disconnections; a new selection/client still starts from a bounded recent tail. The client shows changing Pi activity, bounded [provisional answer and native-bash output snapshots](docs/live-progress.md), and settled tool results. Retained history/results remain authoritative; snapshots are sampled tails, not lossless streams. Reopen a task directly with `deck agent --no-tui --task CHAT_ID`. All inference output is from the mock provider. Native file tools are enabled, though the mock does not call them. History pages and rendered payloads have [schema-backed validation](docs/history-contracts.md) before any output/cursor advance, preserving existing numeric entry IDs and string cursors. [Activity, progress and instruction views](docs/live-view-contracts.md), including history attachments, now use generated closed contracts too; invalid samples preserve cursors, display state and saved drafts. [Startup/selection and login](docs/status-login-contracts.md) now validate their identities, snapshots and acknowledgements through the same generated path, before changing selection or displaying authentication state. See [protocol and limitations](docs/runtime-ipc.md).
+In another terminal, from the checkout:
 
-Models have read-only `task_list`, `task_history` and `task_activity` tools, plus separate `task_create`/`task_message` tools for ownerless tasks and durable admission. Search is a paginated title-substring filter, not a full-store index. Messaging returns an admission receipt, not an answer; stopping the caller does not stop independent target work. These ownerless operations are distinct from the new foreground `subagent` tool, which waits for a Pi-owned child's answer and propagates ordinary scoped cancellation. Children inherit the saved host/agent selections without recursive delegation or task-control tools. See [inspection](docs/task-tools.md), [task control](docs/task-control.md), and [foreground subagents and limits](docs/subagents.md).
+```sh
+./result/bin/deck agent --port 52801
+```
 
-Use `/instructions load` to explicitly import saved-worker `AGENTS.md` into Pi's stored instructions while the selected chat is idle. It **replaces**, rather than appends, explicit instruction text and starts no inference. `/instructions` or `/instructions TASK_ID` reads source/import status without loading. The client saves its request/binding before send; an admission ACK is not successful application. See [instruction import and recovery](docs/instruction-import.md). `AGENTS.md` is not automatically loaded on startup or input admission.
+Use another unused port if 52801 is occupied. The mock provider makes no external model calls. It returns mock answers and does not exercise model-driven tools.
 
-## Rex allocation foundation (internal only)
+`serve` stays in the foreground. It does not install a service. The default endpoint is `127.0.0.1:52800`; clients must use the hub's port. `--directory` selects stored state. `--workspace` sets the initial main workspace. Saved chats keep their original binding when the hub restarts.
 
-An opt-in [isolated Rex CLI test](docs/rex-contract.md) exercises real Deck clients, stable IDs, hub reconnect and continued central Pi execution after Rex destruction. The new [internal Pi/native allocator](docs/rex-allocation.md) persists launch intent, retains a native effect receipt and atomically binds full Rex IDs without inference. It refuses duplicate/uncertain retries and launches clients pinned to the intended hub. [Allocation-bound startup registration](docs/rex-startup.md) now joins the saved intent, native `REX_BLOCK` and retained binding, including early/lost-ACK recovery. It is a **historical observation, not current health**. New [internal read-only inspection](docs/rex-inspection.md) separately samples the saved worker/full Rex IDs without creating objects, Pi work or read receipts; running process presence is not responsive-client readiness. [Explicit receipt-based reconciliation](docs/rex-reconciliation.md) can now repair an unbound creation binding only from hash-matched native success, preserving the original uncertain/aborted result and never calling Rex. Missing evidence stays unresolved. [Public local allocation/open/reopen](docs/rex-open.md) now exposes this adapter through `deck rex open|reopen|status|inspect --task CHAT_ID` and plain `/rex` commands. It follows the explicitly [best-effort local scope](docs/rex-replacement.md): native race prevention and lost-reply recovery are not guarantees. Concurrent opens or explicit new attempts after unknown outcomes may leave duplicate terminals for manual cleanup; model-input deduplication and file/bash replay rules are unchanged. The internal native adapter explicitly supports tested Rex APIs 8 and 10; unknown revisions still refuse. API 10 supplies no proven conditional replacement guard, so no atomicity/idempotency guarantee is claimed. The legacy internal allocator remains single-attempt; explicit public open can start another attempt without replaying the old accepted operation. First open defaults to `rex` on the hub's PATH and its already-running local Unix server, discovering the host/instance IDs; target flags are optional overrides. Later opens reuse the saved target without rediscovery. No server autostart is performed. Running clients are reused, exited/missing clients get a new window, and missing sessions can be recreated. No GUI focus/attachment or automatic cleanup is added. Normal tests never connect to your Rex server.
+## Use the TUI
 
-## Offline backup and restore
+Interactive terminals use the TUI by default. Open a saved task with:
 
-After stopping `serve` and awaiting the actual writer-lock release:
+```sh
+deck agent --task CHAT_ID
+```
+
+Use `/tasks` to open the task picker. Move with `j/k` or arrows and press Enter to select. Use `n` for the next page, `g` for the first page, and Esc to close.
+
+Use `/task TITLE` to create a task on the current chat's saved workspace binding. Creation does not submit input or switch chats. The receipt shows its ID; use `/select ID` or the picker to open it. `/main` returns to main. Switching or creation refuses unsent prompt text and unresolved requests, rather than losing them. Send or clear the prompt first.
+
+| Action | Keys or command |
+| --- | --- |
+| Start editing | `i` |
+| Return to Normal mode | `Esc` |
+| Add a line in Insert mode | Enter, Shift-Enter, or `Ctrl-J` |
+| Submit or steer input | `Ctrl-S` or `:send` |
+| Switch between chat and prompt | Tab or `Ctrl-W w` |
+| Scroll chat | `j/k`, arrows, Page Up/Down, or mouse wheel |
+| Read older or latest history | `:older`, `:latest` |
+| List or switch tasks | `/tasks`, `/select ID`, `/main` |
+| Create a task | `/task TITLE` |
+| Inspect the selected task's Rex state | `/rex`; `s` refreshes status, `i` inspects presence |
+| Open/reopen the selected task in Rex | `/rex open`, or `o` in the Rex view |
+| Select a model | Esc, `/model`, Enter; then arrows or `j/k`, Enter to select, Esc to cancel |
+| Cycle supported thinking levels | Shift-Tab |
+| Retry or discard the active input/task draft | `:retry`, `:discard` |
+| Request stop | `:stop` |
+| Detach | `:q` or `Ctrl-C` |
+| Detach and lose unsaved editor text | `:q!` |
+| Show full key help | `:help` or F1 |
+
+The editor supports a Vim-style subset: motions, counts, delete/change/yank, visual selection, paste, undo, and redo. It is not full Vim. Enter adds a line; it does not submit. Pasted text never runs a command or submits input.
+
+Unsubmitted editor text is memory-only and limited to 16 KiB. Exit warns when that text has no confirmed saved draft. The TUI renders bounded plain text and tool summaries, not Markdown. It shows a recent history window, not a complete local transcript.
+
+The client accepts one request at a time. An overlapping action is refused, not queued. Try it again after the reply. Fast background polls keep a neutral `client` label. A poll that takes at least 500 ms shows `client waiting`. Neither label describes worker health.
+
+The terminal title is `Δ - {dirName}`, using the client launch directory. Supported terminals receive OSC 7501 status with `app=deck`. Status distinguishes working, a new reply, a failed run, and required client action. Missing or stale observations clear the indicator. A selected-chat indicator is not proof that the whole hub is idle.
+
+## Use the plain client
+
+```sh
+deck agent --no-tui
+deck agent --no-tui --task CHAT_ID
+```
+
+| Command | Purpose |
+| --- | --- |
+| `/help` | List commands |
+| `/tasks`, `/tasks more` | List saved chats |
+| `/select CHAT_ID`, `/main` | Select an existing chat |
+| `/task TITLE` | Create and select an independent task |
+| `/status`, `/activity` | Inspect settings, bindings, or activity |
+| `/older` | Read an older history page |
+| `/instructions load` | Import the selected chat's `AGENTS.md` while idle |
+| `/instructions`, `/instructions TASK_ID` | Inspect instruction source or import result |
+| `/rex open`, `/rex status`, `/rex inspect` | Manage or inspect the selected task's Rex terminal |
+| `/draft`, `/drafts` | Inspect the active draft or list saved requests |
+| `/recover REQUEST_ID` | Select another saved request for this chat |
+| `/retry` | Retry the active request with its original ID and arguments |
+| `/discard`, `/discard REQUEST_ID` | Delete a local draft; do not cancel work |
+| `/stop` | Request stop for the selected chat |
+| `/exit`, `Ctrl-C` | Detach without stopping work |
+
+Enter submits a line or steers current work. Selection does not start or stop an agent. An unresolved active draft blocks selection changes.
+
+For one-shot input, use `deck agent --message 'TEXT'`. This returns an admission receipt and detaches; it does not wait for an answer. `--message` always sends model input. It does not run slash commands. Redirected input also uses plain mode.
+
+### Tasks and subagents
+
+Models can inspect chats with `task_list`, `task_history`, and `task_activity`. Search currently filters titles; it is not full-text search.
+
+`task_create` creates an independent task. `task_message` sends input and returns an admission receipt, not an answer. Stopping the sender does not stop the target task.
+
+`subagent` creates a Pi-owned foreground child and waits for its answer. It inherits the parent's settings and binding, but not its transcript. Stopping the parent cancels its ordinary owned work. You can inspect or stop child chats, but you cannot send them direct input or change their model independently.
+
+### Project instructions
+
+`/instructions load` reads exactly `AGENTS.md` from the selected chat's saved workspace. It replaces stored explicit instructions; it does not append or merge. The text must be valid UTF-8, contain no NUL, and fit within 32 KiB. Empty text clears the explicit instructions.
+
+Deck does not load this file automatically. The import starts no inference and requires no unfinished work. Admission is not application: inspect `/instructions` for the result. Later file edits need another explicit import. Independent tasks do not automatically copy imported instructions; foreground children inherit the parent's stored instructions.
+
+## Connect a provider
+
+Use separate state directories for mock, ChatGPT, and API-key testing. Deck rejects incompatible saved provider choices rather than silently converting them.
+
+### ChatGPT mode
+
+With `deck` installed and your workspace path selected:
+
+```sh
+deck init
+deck serve --workspace /absolute/path/to/project
+# In another terminal:
+deck login
+deck agent
+```
+
+The hub drives OpenAI's ChatGPT OAuth flow. Open the displayed URL and follow its prompts. Credentials stay on the hub. Default mode does not fall back to an ambient paid API key.
+
+**Live ChatGPT login, account access, and refresh are not yet verified.** Automated tests use fake providers. A user previously reported a successful live API-key smoke test; see [History](docs/HISTORY.md#manual-evidence).
+
+### Paid API-key mode
+
+Supply `OPENAI_API_KEY` securely in the hub environment, not in command arguments or chat. Then use a separate state directory:
+
+```sh
+deck init --directory "$HOME/.local/state/deck-api"
+deck serve --api-key --model gpt-4o-mini \
+  --directory "$HOME/.local/state/deck-api" --workspace /absolute/path/to/project
+```
+
+This mode can incur charges. Do not run `deck login` for an API-key hub. Deck does not silently exchange OAuth and API-key credentials.
+
+### Model and thinking settings
+
+`serve --model ID` is a **bootstrap default**, not a model lock. It selects the model only when main is first created. Without the flag, the current OpenAI default is `gpt-6-sol`. A catalog entry does not guarantee account access.
+
+- Saved chats keep their choices across restarts, even if the startup flag changes.
+- New tasks inherit main's current saved model and thinking level.
+- `/model` changes the selected chat's durable settings. All clients of that chat share them.
+- The picker label `[hub default]` means the hub's startup default, not necessarily main's current choice.
+- New main chats use medium thinking where supported. Non-reasoning models use off. Shift-Tab skips unsupported levels.
+- Changes require no active, queued, parked, or draining work. They preserve the prompt and do not submit it.
+- Resolve saved requests and unconfirmed settings outcomes before making another change. A lost settings reply causes read-back, not automatic resubmission.
+
+The picker and status indicators need a compatible hub and client. Follow the upgrade procedure below; do not restart an active hub to try a new UI.
+
+## Open a task in Rex
+
+Start Rex yourself. Create or find an independent task with the plain client, then run:
+
+```sh
+deck rex open --task CHAT_ID
+deck rex status --task CHAT_ID
+deck rex inspect --task CHAT_ID
+```
+
+First open finds `rex` on the hub/native worker's PATH and discovers its running local Unix server. It does not use the client's PATH or autostart Rex. Optional overrides are `--rex`, `--server`, `--host-id`, and `--instance-id`. Later opens reuse the saved target; they do not migrate it. Use `--port N` for another Deck hub.
+
+`open` and `reopen` have the same behavior. A running client is reused. An exited or missing client gets a new window. A missing session gets a new session. A failed inspection is not proof that an object is missing. These commands do not focus the Rex GUI.
+
+**Rex creation is best-effort.** A lost reply or concurrent request can leave duplicate or orphaned terminals. Inspect the attempt and Rex before explicitly trying again. Cleanup is manual. No automatic retry submits model input or repeats a native operation.
+
+Rex allocation supports independent task chats, not main or owned children. Managed launches use the TUI. Before enabling input, the client verifies its hub, chat, initial history, and allocation-bound native terminal ID. A failed or lost startup reply disables the client; it does not trigger a retry or submit input. The plain client remains available through an explicit `deck agent --no-tui --task CHAT_ID` launch.
+
+From the TUI, use `/rex` for allocation status and `i` for a fresh presence sample. These are separate from agent activity. Use `o` or `/rex open` for an explicit open/reopen. Reads do not create terminals. The panel does not poll continuously; `s` and `i` refresh it.
+
+## Recover an unconfirmed request
+
+Input, task creation, and instruction import save a private draft before sending. If saving fails, the client sends nothing. A lost reply can mean the request was already accepted.
+
+1. Reconnect to the same hub and original chat.
+2. Inspect the active draft. The TUI can retry input/task drafts. Use the plain client for instruction-import drafts or multiple saved requests.
+3. Use `/retry` or `:retry` only when you intend to retry the original request.
+4. Use discard only to forget the local draft. It cannot undo admission or cancel effects.
+
+Retry preserves the original ID and arguments. It does not submit the clipped display preview. Deck never retries a mutation automatically. A new model tool call has a new identity and can repeat an effect; inspect uncertain effects first.
+
+## Stop, upgrade, and back up
+
+**Detach is not stop. A stop acknowledgement is not completed cancellation.** File operations already issued must finish. Shell cancellation cannot undo files or network effects, and deliberately escaped processes can survive.
+
+Before an upgrade:
+
+1. Keep the previous immutable build and a secure way to restore provider access.
+2. Finish or explicitly stop work across **all** chats, including queued, parked, background, and owned-child work. Inspect global status, not only the selected-chat indicator.
+3. Wait for outstanding work to settle. Stop the hub and wait for the actual writer lock to be released.
+4. Back up the offline state. Start the new build and reopen clients.
+
+Changed code cannot resume unfinished work. If startup refuses, use the original build and mode. Never delete `writer.lock` or edit stored identities to bypass this check. A surviving Pi child can still hold the lock after the supervisor exits.
 
 ```sh
 deck backup --directory /path/to/state --output /path/to/new-backup
 deck restore --from /path/to/new-backup --directory /path/to/new-state
 ```
 
-These commands never resume work or overwrite existing destinations. Backups combine a standalone SQLite snapshot with config/native-effect receipts; stored credentials are excluded unless `--include-credentials` is explicit. Preserve the original build for unfinished work. Restore preserves identities/bindings, is not workspace relocation, and cannot undo later external effects: reconcile rollback before explicitly serving a restored image. Arrange an authenticated restart path before stopping a hub whose key exists only in process memory. See [backup format, limits and recovery procedure](docs/backup-restore.md).
+Destination paths must not exist; their parents must exist. These commands do not stop or resume work. Backup includes Pi state, config, and native receipts. It excludes the workspace, runtime, client drafts, and Rex objects. Stored credentials are excluded unless you add `--include-credentials`; environment-only keys are never copied.
 
-## OpenAI conversations (live ChatGPT flow not yet verified)
+Restore keeps identities and workspace bindings. Do not run source and restored copies as separate hubs. An old backup can forget later effects without undoing them. Reconcile that difference before serving or retrying drafts. See [recovery and backup details](docs/DEVELOPER.md#recovery-and-backup).
 
-Use a separate state directory from the mock demo:
+## Limits and trust
 
-```sh
-./zig-out/bin/deck init
-./zig-out/bin/deck serve
-# Another terminal:
-./zig-out/bin/deck login
-./zig-out/bin/deck agent --no-tui
-```
+- The hub listens only on loopback and trusts local OS users. It is not an authenticated remote service.
+- File and shell tools can access paths outside the workspace, use ordinary symlinks, and contact external services.
+- File tools handle regular UTF-8 files up to 128 KiB. Exact edit requires one match. Bash has a 60-second default timeout, a 300-second maximum, and a 64 KiB output tail.
+- Stored chats, receipts, instructions, credentials, drafts, and backups can contain sensitive plaintext. Display sanitization is not secret redaction.
+- Activity and output previews are samples, not complete streams or proof of success. Read retained results and inspect the actual workspace.
+- There is no remote worker, general settings editor, job scheduler, web UI, or automatic project-file loader. See the [Roadmap](docs/ROADMAP.md).
 
-Credentials stay on the hub. Default mode never falls back to an ambient paid API key. See [provider setup, model persistence and security limits](docs/providers.md) before using real account access. See [local file tools and a scratch-workspace smoke test](docs/local-tools.md) before enabling model-driven edits. Tools run with your OS user's capabilities; `--workspace` is a cwd, not a sandbox. See [shell ownership, cancellation and output limits](docs/shell-tools.md) before running commands.
-
-Optional local profile install (no service installation or sign-in during the build):
-
-```sh
-nix profile add path:.
-deck init
-deck serve
-# In another terminal:
-deck agent
-```
-
-No license has been selected yet.
+No license has been selected for Deck. Third-party notices remain in [`licenses/`](licenses/) and are installed with the package.
