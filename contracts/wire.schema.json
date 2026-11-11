@@ -38,7 +38,7 @@
     "RemoteHost": {
       "description": "Local operator registration, not a peer claim. Worker implementation and capabilities must occur together; client-only registrations omit both.",
       "type": "object", "additionalProperties": false,
-      "properties": { "machineId": { "$ref": "#/$defs/MachineIdentity" }, "peer": { "$ref": "#/$defs/TailPeer" }, "client": { "type": "boolean" }, "implementation": { "$ref": "#/$defs/Sha256" }, "capabilities": { "$ref": "#/$defs/WorkerCapabilities" } }, "required": ["machineId", "peer", "client"]
+      "properties": { "machineId": { "$ref": "#/$defs/MachineIdentity" }, "peer": { "$ref": "#/$defs/TailPeer" }, "client": { "type": "boolean" }, "implementation": { "$ref": "#/$defs/Sha256" }, "capabilities": { "$ref": "#/$defs/WorkerCapabilities" }, "listen": { "type": "string", "minLength": 1, "maxLength": 128 } }, "required": ["machineId", "peer", "client"]
     },
     "RemoteRegistry": {
       "description": "Explicit pinned authority for one hub. Semantic validation rejects duplicate machine/node IDs, missing roles and noncanonical capabilities. Not network enrollment.",
@@ -54,6 +54,18 @@
       "description": "A claim on an already peer-verified connection; never proof of identity. connectionId must match a fresh hub-issued challenge.",
       "type": "object", "additionalProperties": false,
       "properties": { "version": { "const": 1 }, "hubId": { "$ref": "#/$defs/TransportId" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "connectionId": { "$ref": "#/$defs/Sha256" }, "implementation": { "$ref": "#/$defs/Sha256" }, "capabilities": { "$ref": "#/$defs/WorkerCapabilities" } }, "required": ["version", "hubId", "machineId", "connectionId", "implementation", "capabilities"]
+    },
+    "RemoteWorkerConfig": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "version": { "const": 1 }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "hubId": { "$ref": "#/$defs/TransportId" }, "hubPeer": { "$ref": "#/$defs/TailPeer" }, "hubAddress": { "type": "string", "minLength": 1, "maxLength": 128 } }, "required": ["version", "machineId", "hubId", "hubPeer", "hubAddress"]
+    },
+    "RemoteRuntimeRoutes": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "hubId": { "$ref": "#/$defs/TransportId" }, "hosts": { "type": "array", "maxItems": 8, "items": { "type": "object", "additionalProperties": false, "properties": { "machineId": { "$ref": "#/$defs/MachineIdentity" }, "readFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "writeFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "controlFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 } }, "required": ["machineId", "readFd", "writeFd", "controlFd"] } } }, "required": ["hubId", "hosts"]
+    },
+    "RemoteLinkHeader": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "version": { "const": 1 }, "channel": { "enum": ["data", "control"] }, "hubId": { "$ref": "#/$defs/TransportId" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "connectionId": { "$ref": "#/$defs/Sha256" } }, "required": ["version", "channel", "hubId", "machineId"]
     },
     "NativeOperation": { "enum": ["read", "write", "edit", "bash", "bash_progress", "rex_allocate", "rex_inspect", "rex_resolve", "rex_allocation_receipt"] },
     "NativeCorrelationId": { "type": "string", "minLength": 1, "maxLength": 32 },

@@ -57,6 +57,8 @@ export type RuntimeOptions = {
   binding: Binding;
   environment: (binding: Binding) => ExecutionEnv | undefined;
   hostFiles?: HostFiles;
+  // Trusted native registration scope; checked before any recovered work resumes.
+  expectedHubId?: string;
   // Trusted launcher supplies its own Deck wrapper, never public caller argv.
   rexClient?: string;
   admissionGuard?: () => Promise<void>;
@@ -104,6 +106,10 @@ export class DeckRuntime {
       },
     }, context);
     try {
+      if (options.expectedHubId !== undefined) {
+        const identity = await harness.commit(async (tx) => (await tx.doc(Identity)).id, context);
+        if (identity !== options.expectedHubId) throw new DeckError("conflict", "Remote registry belongs to a different hub; work was not resumed");
+      }
       await stampImplementation(harness, implementation);
       const initialModel = options.models.getModel(options.model.provider, options.model.modelId);
       const main = await harness.root(context, {

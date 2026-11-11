@@ -2,7 +2,7 @@
 
 Deck is a personal coding-agent tool. It has a Zig hub, command-line client, and terminal user interface (TUI). One TypeScript runtime uses Pi to store conversations and run agents. Zig runs local file and shell tools. Rex can keep task terminals open.
 
-**Deck is a local prototype.** Remote workers are not implemented. Tools run with your user permissions. The workspace is not a sandbox.
+**Deck is a prototype.** Local hub/Rex clients and opt-in registered files/bash workers are implemented. Remote Rex/TUI access is not yet available. Tools run with your user permissions; the workspace is not a sandbox.
 
 ## Documentation
 
@@ -18,7 +18,7 @@ Every chat uses the hub. Interactive tasks will have named Rex sessions on their
 
 Scheduled jobs and their children will run in the hub runtime through registered host connections, without Rex terminals. Each job will reuse its task and Pi conversation. Each run will have its own admission identity and captured file settings.
 
-Remote hosts, jobs, and subagent terminals still need implementation. Local task navigation and Rex-managed TUI launches are available. See the [target architecture](docs/DEVELOPER.md#target-interactive-and-scheduled-architecture) and [next implementation steps](docs/ROADMAP.md#next-implementation-sequence). The instructions below describe what works now.
+Remote interactive clients, jobs, and subagent terminals still need implementation. Local task navigation, Rex-managed TUI launches, and worker-only native effects are available. See the [target architecture](docs/DEVELOPER.md#target-interactive-and-scheduled-architecture) and [next implementation steps](docs/ROADMAP.md#next-implementation-sequence). The instructions below describe what works now.
 
 ## Current workflow
 
@@ -250,17 +250,65 @@ Destination paths must not exist; their parents must exist. These commands do no
 
 Restore keeps identities and workspace bindings. Do not run source and restored copies as separate hubs. An old backup can forget later effects without undoing them. Reconcile that difference before serving or retrying drafts. See [recovery and backup details](docs/DEVELOPER.md#recovery-and-backup).
 
-## Remote verification groundwork
+## Register a files/bash worker
 
-Remote worker/client connections are not enabled yet. `deck remote-check` can compare a Tailscale peer observation against an explicit private registration file. It does not connect a worker or expose the hub. See [registration and verification](docs/DEVELOPER.md#remote-verification-foundation) for the file format and limits.
+This enables **native effects only**, not remote task participation or remote Rex. Pi, models, history, and credentials stay at the hub. The worker uses its saved machine ID/cwd; disconnection never redirects its work locally. An actual two-machine Deck acceptance test is still pending; isolated TCP tests use injected verifier identities, not a live tailnet.
+
+Both OS hosts need a running Tailscale backend and an explicit absolute Tailscale executable. An embedded Rex service's node identity is **not** automatically the worker OS's identity. Do not expose the loopback chat API or reuse a Rex HTTPS URL as a worker endpoint.
+
+1. Build `nix build path:.#worker --out-link result-worker` for the native-only package. It contains `deck-worker`, with no Node/Pi runtime dependency. The full package also includes it. Use the **same executable** for identity approval and running: `deck worker` is another entry point, but its binary digest differs.
+2. Obtain the existing hub's `hubId` from its status, its direct OS Tailscale IP (`tailscale ip -4`), and its exact peer identity:
+   ```sh
+   deck-worker peer --tailscale /absolute/path/to/tailscale
+   ```
+   On macOS the executable may be `/Applications/Tailscale.app/Contents/MacOS/Tailscale`. Peer user IDs are emitted as strings; do not round-trip them through floating-point JSON numbers.
+3. On the worker, initialize a **new, absolute, dedicated** directory. Its parent must exist:
+   ```sh
+   deck-worker init --directory /absolute/new-worker-state \
+     --hub-id HUB_ID --hub-address HUB_TAILSCALE_IP:52901 \
+     --hub-node HUB_STABLE_NODE_ID --hub-user HUB_DECIMAL_USER_ID
+   deck-worker identity --directory /absolute/new-worker-state \
+     --tailscale /absolute/path/to/tailscale
+   ```
+   Initialization creates a private machine identity and hub pins, not a Pi store or connection. Review the returned machine ID, OS peer, implementation SHA-256, and ordered `files,bash` capabilities independently before approving them.
+4. On the hub, create a private regular registry file (mode `0600`), with this shape. Replace every placeholder with approved values. Each worker needs its own hub-side Tailscale listener port; at most eight workers are enabled:
+   ```json
+   {
+     "version": 1,
+     "hubId": "HUB_ID",
+     "hosts": [{
+       "machineId": "WORKER_32_HEX_MACHINE_ID",
+       "peer": { "nodeId": "WORKER_STABLE_NODE_ID", "userId": "WORKER_DECIMAL_USER_ID" },
+       "client": false,
+       "implementation": "WORKER_BINARY_SHA256",
+       "capabilities": ["files", "bash"],
+       "listen": "HUB_TAILSCALE_IP:52901"
+     }]
+   }
+   ```
+5. After settling all hub work, start the hub with the approved registry (keep its normal provider/model options), then run the worker:
+   ```sh
+   # Hub: separate worker listeners; chat API remains loopback-only.
+   deck serve --directory /absolute/hub-state \
+     --workers /absolute/private/registry.json --tailscale /absolute/path/to/tailscale
+   # Worker: outbound connections; no worker listener or provider login.
+   deck-worker run --directory /absolute/new-worker-state \
+     --tailscale /absolute/path/to/tailscale
+   ```
+
+Registrations are loaded at hub startup, not auto-discovered or hot-reloaded. The worker verifies the hub on both actual sockets; the hub verifies the worker, pins, capabilities, and fresh generation. The connected log is a connection event, not proof of task completion. Reconnect uses backoff and never replays effects. Lost outcomes remain uncertain; an explicit original-identity retry consults retained receipts. Keep the worker configuration and receipts together, and never run divergent copies of its state.
+
+Existing saved bindings can use the worker through the native adapter. There is not yet a user-facing remote task creation/participation workflow: `/task` still requires a working Rex path, and remote Rex is deliberately refused. Do not start `deck serve` on the worker to join the hub—that creates another hub.
+
+`deck remote-check` remains a read-only peer/registration diagnostic with `connection: "not_checked"`; it does not enroll or connect anything. See [transport details and limits](docs/DEVELOPER.md#registered-filesbash-workers).
 
 ## Limits and trust
 
-- The hub listens only on loopback and trusts local OS users. It is not an authenticated remote service.
+- The chat API listens only on loopback and trusts local OS users. Optional worker-only listeners authenticate registered Tailscale machines, not individual OS users; they do not expose chat commands.
 - File and shell tools can access paths outside the workspace, use ordinary symlinks, and contact external services.
 - File tools handle regular UTF-8 files up to 128 KiB. Exact edit requires one match. Bash has a 60-second default timeout, a 300-second maximum, and a 64 KiB output tail.
 - Stored chats, receipts, instructions, credentials, drafts, and backups can contain sensitive plaintext. Display sanitization is not secret redaction.
 - Activity and output previews are samples, not complete streams or proof of success. Read retained results and inspect the actual workspace.
-- There is no remote worker, general settings editor, job scheduler, web UI, or automatic project-file loader. See the [Roadmap](docs/ROADMAP.md).
+- There is no remote Rex/TUI access, general settings editor, job scheduler, web UI, or automatic project-file loader. See the [Roadmap](docs/ROADMAP.md).
 
 No license has been selected for Deck. Third-party notices remain in [`licenses/`](licenses/) and are installed with the package.

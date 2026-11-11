@@ -19,6 +19,13 @@ pub fn build(b: *std.Build) void {
     module.addImport("vaxis", terminal.module("vaxis"));
     const exe = b.addExecutable(.{ .name = "deck", .root_module = module });
     b.installArtifact(exe);
+    const worker = b.addExecutable(.{ .name = "deck-worker", .root_module = b.createModule(.{
+        .root_source_file = b.path("src/worker_main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    }) });
+    b.installArtifact(worker);
     b.installDirectory(.{ .source_dir = b.path("licenses"), .install_dir = .prefix, .install_subdir = "share/licenses/deck" });
     const run = b.addRunArtifact(exe);
     run.addPassthruArgs();

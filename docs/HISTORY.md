@@ -6,7 +6,19 @@ Test counts below are **recorded evidence for the named implementation stage**. 
 
 ## Unreleased source-tree work
 
-The work below follows `17c2ff9`. It includes the documentation consolidation and subsequent task-navigation work:
+The work below records development since `17c2ff9`, including the documentation consolidation and subsequent task-navigation work. The latest worker slice follows `7ec363e`:
+
+### Registered native files/bash workers
+
+- Added explicit private worker initialization and peer/implementation identity projection, plus opt-in hub registry listeners. Both actual data/control socket peers are checked through the local Tailscale daemon and bound to a fresh connection generation.
+- Routed native requests by saved machine identity over independent host pipes, preserving exact request bytes, receipt hashes and cancellation IDs. Remote descriptors use evented Node pipes, avoiding filesystem-threadpool starvation.
+- Kept Pi, models, credentials, task ownership and scheduling exclusively at the hub. Added a standalone `deck-worker` executable and native-only Nix package.
+- Bounded frames, handshake/control traffic, connection backoff and pending transport slots. Lost/malformed replies fence one generation, produce uncertain outcomes and never trigger effect replay or local fallback. Completed original-identity retries consult retained receipts; accepted-without-result stays uncertain.
+- Added isolated TCP tests with injected verifier identities for lost replies, receipt preservation, cancellation under saturated result pipes, live-slot refusal, identity/digest mismatch, frame deadlines and independent host progress. Verified actual anonymous pipe inheritance into evented Node sockets. These are not real two-machine Tailscale acceptance evidence.
+- A package run exposed a task-lock PTY test racing a quiet background poll. The UI correctly refused the overlapping send. Changed that test to pause polling in command mode and wait for explicit `client idle` before submitting; production behavior and deadlines were unchanged.
+- Remote Rex/TUI routing, generic read-only receipt reconciliation, child terminals and jobs remain future work. The selected remote Rex API 9 endpoint is still not enabled for Deck allocation.
+- Verified the installed standalone package's local OS-peer projection with the running Tailscale app, read-only and without attempting a connection. Its runtime closure excludes the hub package, Node, Pi and the Zig build compiler; package checks enforce the exclusions.
+- No live hub upgrade or remote installation was performed for this implementation slice.
 
 ### Hub inspection and Rex-only task participation
 
@@ -160,10 +172,11 @@ All rows below describe prior scratch-state validation on **aarch64-darwin**, us
 | Remote verification foundation | 46/46 | 439 total: 437 passed, 2 skipped | Remote/TUI/startup + package 51/51; isolated Rex API 10 11/11 |
 | Selected remote Rex peer verification | 47/47 | 448 total: 446 passed, 2 skipped | Remote/TUI/startup + package 60/60; isolated local Rex API 10 11/11; separate remote API 9 probe as described above |
 | Hub inspection and Rex task lock | 48/48 | 456 total: 454 passed, 2 skipped | Installed remote/TUI/startup + package 68/68; isolated Rex API 10 11/11; three cross-builds |
+| Registered files/bash worker transport | 55/55 | 462 total: 460 passed, 2 skipped | Installed remote/worker/hub identity/TUI + package 78/78; isolated local Rex API 10 11/11; hub and worker cross-builds for three targets |
 
 The recorded stages passed their generated/TypeScript checks and Nix package/flake gates. The separate polling-debounce check passed 37/37 Zig tests and 10/10 targeted TUI tests before model settings were added.
 
-Cross-builds passed for x86_64 macOS, x86_64 Linux, and aarch64 Linux at the migration, completed-foundation, TUI, model-settings, terminal-status, task-navigation, remote-verification-foundation, and selected-remote-peer stages. These are compilation results, not runtime support claims.
+Cross-builds passed for x86_64 macOS, x86_64 Linux, and aarch64 Linux at the migration, completed-foundation, TUI, model-settings, terminal-status, task-navigation, remote-verification-foundation, selected-remote-peer, hub-role, and registered-worker stages. These are compilation results, not runtime support claims.
 
 Important validation details:
 
@@ -176,6 +189,8 @@ Important validation details:
 - The task-navigation package is `/nix/store/d606fqp6yyr8l4f9yr1ka46zc7g5xsnf-deck-0.1.0-dev`. The prior build was retained at `/tmp/deck-before-task-navigation-result`. These identify development builds, not published releases or permanent GC-root guarantees.
 - The remote-verification foundation package is `/nix/store/v3yspah0j4hm81mc0bk0gik59n64hfb8-deck-0.1.0-dev`; the prior task-navigation build was retained at `/tmp/deck-before-remote-boundary-result`. This package does not enable remote connectivity.
 - The selected-peer verifier update is `/nix/store/64wbmzbkhy5vygw0ldskib3k5pw2q8ja-deck-0.1.0-dev`. Its predecessor was retained at `/tmp/deck-before-remote-peer-result`. It still does not enable remote Deck links or Rex API 9 allocation.
+
+The registered-worker builds are `/nix/store/gz0pmppb42qjsx4yas9ldx2pmxdhwjn1-deck-0.1.0-dev` and `/nix/store/0q3yf43c2qqylbip07qd6073xnzlkava-deck-worker-0.1.0-dev`. The preceding hub-role package is retained at `/tmp/deck-before-worker-result`. These are tested development artifacts, not deployment or a real two-machine acceptance claim.
 
 ## Manual evidence
 

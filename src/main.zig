@@ -12,13 +12,15 @@ pub const std_options: std.Options = .{ .log_scope_levels = &.{
 } };
 
 const help =
-    \\deck — local prototype
+    \\deck — prototype
     \\
     \\Usage:
     \\  deck init [--directory PATH]
     \\  deck backup --output NEW_DIRECTORY [--directory STATE] [--include-credentials]
     \\  deck restore --from BACKUP_DIRECTORY --directory NEW_STATE
     \\  deck serve [--mock | --api-key] [--model ID] [--port 52800] [--directory PATH]
+    \\    [--workers /private/registry.json --tailscale /absolute/path/to/tailscale]
+    \\  deck worker peer|init|identity|run ... (deck worker --help for registration)
     \\  deck login [--port 52800]
     \\  deck rex open|reopen|status|inspect --task CHAT_ID [--port 52800]
     \\    [--rex /path/to/rex] [--server unix:///path/to/socket] [--host-id UUID] [--instance-id UUID]
@@ -31,7 +33,8 @@ const help =
     \\    Read-only peer/registration diagnostic; does not connect a worker or expose the hub.
     \\  deck --help | --version
     \\
-    \\serve binds only 127.0.0.1. --stdio selects private framed IPC instead.
+    \\The chat API binds only 127.0.0.1. --stdio selects private framed IPC instead.
+    \\--workers enables separate pinned Tailscale listeners for files/bash workers only.
     \\--workspace PATH sets the initial hub workspace (saved chats keep their binding).
     \\Native read/write/exact-edit/bash tools run as your user, without a sandbox.
     \\The mock provider does not perform inference.
@@ -66,7 +69,7 @@ const help =
     \\TUI /rex shows selected-task status; i inspects, o explicitly opens/reopens.
     \\Rex task clients are allocation-verified and locked to one task.
     \\Direct --task launches are read-only, including plain and one-shot paths.
-    \\Remote workers and scheduled jobs are not yet available.
+    \\Remote Rex/TUI access and scheduled jobs are not yet available.
     \\
 ;
 
@@ -83,6 +86,8 @@ const Options = struct {
     output: ?[]const u8 = null,
     from: ?[]const u8 = null,
     include_credentials: bool = false,
+    workers: ?[]const u8 = null,
+    tailscale: ?[]const u8 = null,
 };
 
 fn parse(args: []const []const u8) !Options {
@@ -96,6 +101,12 @@ fn parse(args: []const []const u8) !Options {
             i += 1;
             if (i == args.len) return error.InvalidArguments;
             if (std.mem.eql(u8, arg, "--directory")) result.directory = args[i] else result.runtime = args[i];
+        } else if (std.mem.eql(u8, arg, "--workers") or std.mem.eql(u8, arg, "--tailscale")) {
+            i += 1;
+            if (i == args.len or !std.fs.path.isAbsolute(args[i])) return error.InvalidArguments;
+            const slot = if (std.mem.eql(u8, arg, "--workers")) &result.workers else &result.tailscale;
+            if (slot.* != null) return error.InvalidArguments;
+            slot.* = args[i];
         } else if (std.mem.eql(u8, arg, "--output") or std.mem.eql(u8, arg, "--from")) {
             i += 1;
             if (i == args.len or args[i].len == 0) return error.InvalidArguments;
@@ -124,6 +135,7 @@ fn parse(args: []const []const u8) !Options {
         } else return error.InvalidArguments;
     }
     if (result.mock and (result.api_key or result.model.len != 0)) return error.InvalidArguments;
+    if ((result.workers == null) != (result.tailscale == null) or (result.workers != null and (!std.mem.eql(u8, result.command, "serve") or result.stdio or result.runtime != null))) return error.InvalidArguments;
     return result;
 }
 
@@ -196,11 +208,19 @@ fn run(native: Native, allocator: std.mem.Allocator, options: Options) !void {
     try std.Io.Dir.cwd().createDirPath(io, journal);
     const native_executable = try std.process.executablePathAlloc(io, allocator);
     defer allocator.free(native_executable);
+    var remote: ?@import("remote_hub.zig").Hub = if (options.workers) |registry| try @import("remote_hub.zig").Hub.init(native, registry, options.tailscale.?, config.value.machine_id) else null;
+    defer if (remote) |*manager| manager.deinit();
+    const routes = if (remote) |*manager| try manager.json() else null;
+    defer if (routes) |bytes| std.heap.page_allocator.free(bytes);
+    var inherited: std.ArrayList(std.Io.File) = .empty;
+    defer inherited.deinit(allocator);
+    try inherited.appendSlice(allocator, &.{ held, .{ .handle = requests[1], .flags = .{ .nonblocking = false } }, .{ .handle = results[0], .flags = .{ .nonblocking = false } }, .{ .handle = controls[1], .flags = .{ .nonblocking = false } } });
+    if (remote) |manager| try inherited.appendSlice(allocator, manager.inherit.items);
     var child = try std.process.spawn(io, .{
-        .argv = &.{ node_path, runtime, database, config.value.machine_id, cwd, descriptor, if (options.mock) "--mock" else if (options.api_key) "--api-key" else "--chatgpt", options.model, result_fd, request_fd, control_fd, native_executable },
+        .argv = &.{ node_path, runtime, database, config.value.machine_id, cwd, descriptor, if (options.mock) "--mock" else if (options.api_key) "--api-key" else "--chatgpt", options.model, result_fd, request_fd, control_fd, native_executable, routes orelse "" },
         .stdin = if (options.stdio) .inherit else .pipe,
         .stdout = if (options.stdio) .inherit else .pipe,
-        .inherit_files = &.{ held, .{ .handle = requests[1], .flags = .{ .nonblocking = false } }, .{ .handle = results[0], .flags = .{ .nonblocking = false } }, .{ .handle = controls[1], .flags = .{ .nonblocking = false } } },
+        .inherit_files = inherited.items,
     });
     Native.close(requests[1]);
     Native.close(results[0]);
@@ -212,6 +232,13 @@ fn run(native: Native, allocator: std.mem.Allocator, options: Options) !void {
     };
     worker_started = true;
     defer thread.join();
+    if (remote) |*manager| {
+        manager.closeChildEnds();
+        manager.start() catch |err| {
+            child.kill(io);
+            return err;
+        };
+    }
     if (!options.stdio) {
         defer {
             if (child.stdin) |file| file.close(io);
@@ -287,6 +314,13 @@ pub fn main(init: std.process.Init) void {
     const allocator = init.gpa;
     const native: Native = .{ .io = init.io, .environ = init.minimal.environ };
     const args = init.minimal.args.toSlice(init.arena.allocator()) catch std.process.exit(1);
+    if (args.len > 1 and std.mem.eql(u8, args[1], "worker")) {
+        @import("remote_worker.zig").run(native, args[2..]) catch |err| {
+            std.debug.print("deck: worker unavailable ({s}); no Pi runtime started\n", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        return;
+    }
     if (args.len > 1 and std.mem.eql(u8, args[1], "remote-check")) {
         @import("remote_check.zig").run(native, allocator, args[2..]) catch |err| {
             std.debug.print("deck: remote peer unconfirmed ({s}); no connection enabled\n", .{@errorName(err)});
@@ -366,4 +400,5 @@ test {
     _ = @import("tui_editor.zig");
     _ = @import("tui_bridge.zig");
     _ = @import("remote_test.zig");
+    _ = @import("remote_transport_test.zig");
 }

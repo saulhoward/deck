@@ -223,7 +223,9 @@ test("real PTY: allocation-registered Rex TUI participates but refuses every tas
   try {
     const steps: object[] = [{ wait: "history for 2" }, { wait: "task / Rex locked" }];
     for (const cmd of ["/tasks", "/hub", "/main", "/select 1", "/task forbidden"]) steps.push({ keys: cmd }, { wait: "client idle" }, { keys: "\r" }, { wait: "Rex task client locked" });
-    steps.push({ keys: "iallowed in Rex" }, { keys: "\x13" }, { wait: "Input admitted" }, { keys: ":q\r" });
+    // Command mode pauses polls and exposes precise transport readiness. A
+    // neutral footer during normal editing does not mean Ctrl-S can be queued.
+    steps.push({ keys: "iallowed in Rex" }, { keys: "\x1b" }, { keys: ":send" }, { wait: ":send" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Input admitted" }, { keys: ":q\r" });
     const child = spawn("python3", [fileURLToPath(new URL("../../scripts/tui-pty-test.py", import.meta.url)), resolve(binary!), "agent", "--tui", "--port", String(f.port), "--task", "2", "--hub-id", hub, "--rex-allocation", hub], { env: { ...f.local.env, DECK_NODE: process.execPath, REX_BLOCK: `block:${hub}` } });
     const closed = once(child, "close"); child.stdout.resume(); let errors = ""; child.stderr.on("data", c => { errors += c; }); child.stdin.end(JSON.stringify(steps));
     assert.equal((await closed)[0], 0, errors);

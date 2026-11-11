@@ -30,6 +30,19 @@ test("expected hub guard rejects reads, admissions and stop before dispatch; leg
   } finally { input.end(); await serving; decoder.destroy(); output.destroy(); await runtime.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test("native remote registry is pinned before runtime work resumes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "deck-registry-hub-")); const { models } = provider();
+  const options = { models, model, binding: { machineId: "host", cwd: "/saved" }, implementation: IMPLEMENTATION, environment: () => undefined };
+  const path = join(directory, "pi.sqlite");
+  try {
+    const first = await DeckRuntime.open(path, options); const hubId = first.hubId, main = first.main.id; await first.close();
+    await assert.rejects(DeckRuntime.open(path, { ...options, expectedHubId: "wrong-hub" }), /different hub; work was not resumed/);
+    const resumed = await DeckRuntime.open(path, { ...options, expectedHubId: hubId });
+    try { assert.equal(resumed.hubId, hubId); assert.equal(resumed.main.id, main); assert.equal((await resumed.listChats()).items.length, 1); }
+    finally { await resumed.close(); }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
 async function until(check: () => boolean) { for (let i = 0; i < 500; i++) { if (check()) return; await new Promise((resolve) => setTimeout(resolve, 10)); } throw new Error("Expected client hub guard not observed"); }
 for (const guard of [false, true]) test(`pinned client rejects initial ${guard ? "wrong hub" : "missing guard capability"} without sending input`, async () => {
   let writes = 0;

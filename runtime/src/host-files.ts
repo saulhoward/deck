@@ -1,4 +1,5 @@
 import { createReadStream, createWriteStream } from "node:fs";
+import { Socket } from "node:net";
 import { Type } from "@earendil-works/pi-ai";
 import type { Context } from "@earendil-works/chord";
 import { defineExtension, defineTool, type ToolExecutionApi } from "@earendil-works/pi-durable";
@@ -29,10 +30,12 @@ export class PipeFiles implements HostFiles {
   private failed = false;
   private closing: Promise<void> | undefined;
   private readonly decoder = new FrameDecoder();
-  constructor(readFd: number, writeFd: number, controlFd?: number) {
-    this.reader = createReadStream("", { fd: readFd, autoClose: true });
-    this.writer = createWriteStream("", { fd: writeFd, autoClose: true });
-    this.control = controlFd === undefined ? undefined : createWriteStream("", { fd: controlFd, autoClose: true });
+  constructor(readFd: number, writeFd: number, controlFd?: number, evented = false) {
+    // Multiple remote pipes must not consume one blocking libuv filesystem
+    // thread each. uv_pipe-backed Sockets keep these inherited FDs evented.
+    this.reader = evented ? new Socket({ fd: readFd, readable: true, writable: false }) : createReadStream("", { fd: readFd, autoClose: true });
+    this.writer = evented ? new Socket({ fd: writeFd, readable: false, writable: true }) : createWriteStream("", { fd: writeFd, autoClose: true });
+    this.control = controlFd === undefined ? undefined : evented ? new Socket({ fd: controlFd, readable: false, writable: true }) : createWriteStream("", { fd: controlFd, autoClose: true });
     const fail = () => { void this.close(); };
     this.control?.on("error", fail);
     this.writer.on("error", fail); this.reader.on("error", fail);
@@ -65,7 +68,7 @@ export class PipeFiles implements HostFiles {
     signal?.throwIfAborted();
     const processOperation = operation === "bash" || operation === "rex_allocate" || operation === "rex_inspect" || operation === "rex_resolve";
     if (processOperation && !this.control) throw new Error("offline: process cancellation channel unavailable");
-    if (this.failed) throw new Error("offline: local worker unavailable");
+    if (this.failed) throw new Error("offline: assigned worker unavailable");
     if ([...this.pending.values()].filter((item) => item.kind === "result").length >= 16 || this.pending.has(id)) throw new Error("busy: native operation capacity reached");
     const { frame, request } = nativeFrame({ version: 1, id, ...binding, operation, args });
     if (request.id !== id || request.operation === "bash_progress") throw new Error("invalid: invalid native request; no operation sent");

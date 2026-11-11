@@ -86,6 +86,9 @@
               npm prune --omit=dev --no-save --ignore-scripts --offline
               mkdir -p "$out/bin" "$out/libexec/deck/runtime"
               cp "$TMPDIR/deck-zig/bin/deck" "$out/bin/deck"
+              cp "$TMPDIR/deck-zig/bin/deck-worker" "$out/bin/deck-worker"
+              wrapProgram "$out/bin/deck-worker" \
+                --prefix PATH : "${pkgs.lib.makeBinPath [ pkgs.bash ]}"
               cp -r "$TMPDIR/deck-zig/share" "$out/share"
               cp package.json "$out/libexec/deck/"
               cp -r runtime/dist "$out/libexec/deck/runtime/"
@@ -109,10 +112,26 @@
               platforms = systems;
             };
           };
+          # Copy only the standalone native executable. No reference to the hub
+          # package, Node, Pi, provider libraries or the renderer at runtime.
+          worker = pkgs.runCommand "deck-worker-0.1.0-dev" {
+            nativeBuildInputs = [ pkgs.makeWrapper pkgs.removeReferencesTo ];
+            disallowedRequisites = [ self.packages.${system}.default pkgs.nodejs_24 pkgs.zig_0_17 ];
+            meta = { description = "Deck native files/bash worker (no Pi runtime)"; mainProgram = "deck-worker"; platforms = systems; };
+          } ''
+            mkdir -p "$out/bin"
+            cp ${self.packages.${system}.default}/bin/.deck-worker-wrapped "$out/bin/deck-worker"
+            # Source-location/debug strings must not retain the build compiler.
+            chmod u+w "$out/bin/deck-worker"
+            remove-references-to -t ${pkgs.zig_0_17} "$out/bin/deck-worker"
+            wrapProgram "$out/bin/deck-worker" --prefix PATH : "${pkgs.lib.makeBinPath [ pkgs.bash ]}"
+            "$out/bin/deck-worker" --help > /dev/null
+          '';
         }
       );
       checks = eachSystem (system: {
         package = self.packages.${system}.default;
+        worker = self.packages.${system}.worker;
       });
       devShells = eachSystem (
         system:

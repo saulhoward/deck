@@ -5,17 +5,23 @@ import { CompatibilityError, fingerprintImplementation } from "./compatibility.j
 import { providers } from "./providers.js";
 import { DeckError, DeckRuntime } from "./deck.js";
 import { PipeFiles } from "./host-files.js";
+import { parseRoutes, RoutedFiles } from "./remote-files.js";
 import { serveIpc } from "./ipc.js";
 
 async function main() {
-  const [path, machineId, cwd, descriptor, mode, modelId, readFd, writeFd, controlFd, nativeExecutable] = process.argv.slice(2);
+  const [path, machineId, cwd, descriptor, mode, modelId, readFd, writeFd, controlFd, nativeExecutable, routesJson] = process.argv.slice(2);
   const lockFd = Number(descriptor);
   if (!nativeExecutable || !path || !machineId || !cwd || !Number.isSafeInteger(lockFd) || lockFd < 3 || (mode !== "--mock" && mode !== "--chatgpt" && mode !== "--api-key")) throw new Error("Runtime must be launched by deck serve");
   if (!fstatSync(lockFd).isFile()) throw new Error("Missing inherited writer lock");
   // Upstream's callback bind override must not expose a public listener.
   if (mode === "--chatgpt") process.env.PI_OAUTH_CALLBACK_HOST = "127.0.0.1";
   const provider = providers(mode, join(dirname(path), "auth.json"), machineId, modelId || undefined);
-  const files = readFd && writeFd ? new PipeFiles(Number(readFd), Number(writeFd), controlFd ? Number(controlFd) : undefined) : undefined;
+  const routes = routesJson ? parseRoutes(routesJson, machineId, [lockFd, Number(readFd), Number(writeFd), Number(controlFd)]) : undefined;
+  const local = readFd && writeFd ? new PipeFiles(Number(readFd), Number(writeFd), controlFd ? Number(controlFd) : undefined) : undefined;
+  if (routes && !local) throw new Error("Remote routing requires the native launcher");
+  let files: PipeFiles | RoutedFiles | undefined = local;
+  try { if (routes) files = new RoutedFiles(machineId, local!, routes); }
+  catch (error) { await local?.close(); throw error; }
   let runtime: DeckRuntime | undefined;
   let closing = false;
   const shutdown = async () => {
@@ -31,6 +37,7 @@ async function main() {
   process.once("SIGINT", () => { void shutdown().then(() => process.exit(0)); });
   try {
     runtime = await DeckRuntime.open(path, {
+      ...(routes ? { expectedHubId: routes.hubId } : {}),
       models: provider.models, model: provider.model, admissionGuard: provider.guard, validateSavedModels: true,
       implementation: await fingerprintImplementation({ native: nativeExecutable, entry: process.argv[1]!, mode }),
       rexClient: basename(nativeExecutable) === ".deck-wrapped" ? join(dirname(nativeExecutable), "deck") : nativeExecutable,

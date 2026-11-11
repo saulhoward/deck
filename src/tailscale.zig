@@ -126,10 +126,28 @@ fn capture(native: Native, allocator: std.mem.Allocator, argv: []const []const u
     return captured.stdout;
 }
 
-pub fn verify(native: Native, allocator: std.mem.Allocator, executable: []const u8, address: Ip, cancelled: *std.atomic.Value(bool)) !std.json.Parsed(wire.TailPeer) {
-    if (!std.fs.path.isAbsolute(executable) or executable.len > 4096 or std.mem.indexOfScalar(u8, executable, 0) != null or !direct(address) or address.getPort() == 0) return error.InvalidPeerVerifier;
+pub fn validateExecutable(native: Native, executable: []const u8) !void {
+    if (!std.fs.path.isAbsolute(executable) or executable.len > 4096 or std.mem.indexOfScalar(u8, executable, 0) != null) return error.InvalidPeerVerifier;
     try std.Io.Dir.cwd().access(native.io, executable, .{ .execute = true });
     if ((try std.Io.Dir.cwd().statFile(native.io, executable, .{})).kind != .file) return error.InvalidPeerVerifier;
+}
+pub fn localPeer(native: Native, allocator: std.mem.Allocator, executable: []const u8) !std.json.Parsed(wire.TailPeer) {
+    try validateExecutable(native, executable);
+    var cancelled = std.atomic.Value(bool).init(false);
+    const bytes = try capture(native, allocator, &.{ executable, "status", "--json", "--peers=false" }, &cancelled);
+    defer allocator.free(bytes);
+    try checkLocalStatus(allocator, bytes);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{ .parse_numbers = false });
+    defer parsed.deinit();
+    const self = try field(parsed.value, "Self");
+    const output = try std.json.Stringify.valueAlloc(allocator, .{ .nodeId = (try field(self, "ID")).string, .userId = (try field(self, "UserID")).number_string }, .{});
+    defer allocator.free(output);
+    return std.json.parseFromSlice(wire.TailPeer, allocator, output, .{ .allocate = .alloc_always });
+}
+
+pub fn verify(native: Native, allocator: std.mem.Allocator, executable: []const u8, address: Ip, cancelled: *std.atomic.Value(bool)) !std.json.Parsed(wire.TailPeer) {
+    if (!direct(address) or address.getPort() == 0) return error.InvalidPeerVerifier;
+    try validateExecutable(native, executable);
     const remote = try std.fmt.allocPrint(allocator, "{f}", .{address});
     defer allocator.free(remote);
     // Explicit executable and literal address, no PATH/DNS, headers, shell text,

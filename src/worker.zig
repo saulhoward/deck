@@ -222,7 +222,12 @@ const State = struct {
     journal: Io.Dir,
     output: Io.File,
     machine_id: []const u8,
+    network: bool = false,
     fn send(self: *State, response: []const u8) !void {
+        errdefer if (self.network) {
+            @import("remote_io.zig").shutdown(self.output.handle);
+            self.cancelAll();
+        };
         if (response.len > frame_limit) return error.InvalidFrame;
         const checked = try contracts.parseNativeResponse(std.heap.page_allocator, response);
         defer checked.deinit();
@@ -232,8 +237,15 @@ const State = struct {
         defer self.writes.unlock(io);
         var header: [4]u8 = undefined;
         std.mem.writeInt(u32, &header, @intCast(response.len), .big);
-        try self.output.writeStreamingAll(io, &header);
-        try self.output.writeStreamingAll(io, response);
+        if (self.network) {
+            const tcp = @import("remote_io.zig");
+            const deadline = tcp.now(io) + 5000;
+            try tcp.writeUntil(io, self.output.handle, &header, deadline);
+            try tcp.writeUntil(io, self.output.handle, response, deadline);
+        } else {
+            try self.output.writeStreamingAll(io, &header);
+            try self.output.writeStreamingAll(io, response);
+        }
     }
     fn cancelAll(self: *State) void {
         self.stopping.store(true, .release);
@@ -285,6 +297,12 @@ fn processJob(state: *State, slot: *Slot, body: []u8) void {
 }
 
 pub fn serve(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8) void {
+    serveImpl(native, read_fd, write_fd, control_fd, journal_path, machine_id, true);
+}
+pub fn serveRemote(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8) void {
+    serveImpl(native, read_fd, write_fd, control_fd, journal_path, machine_id, false);
+}
+fn serveImpl(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8, allow_rex: bool) void {
     const io = native.io;
     const input = Io.File{ .handle = read_fd, .flags = .{ .nonblocking = false } };
     const output = Io.File{ .handle = write_fd, .flags = .{ .nonblocking = false } };
@@ -294,7 +312,7 @@ pub fn serve(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, 
     defer if (control_owned) Native.close(control_fd);
     var journal = Io.Dir.cwd().openDir(io, journal_path, .{}) catch return;
     defer journal.close(io);
-    var state = State{ .native = native, .journal = journal, .output = output, .machine_id = machine_id };
+    var state = State{ .native = native, .journal = journal, .output = output, .machine_id = machine_id, .network = !allow_rex };
     const controller = std.Thread.spawn(.{}, control, .{ &state, control_fd }) catch return;
     control_owned = false;
     defer controller.join();
@@ -303,19 +321,30 @@ pub fn serve(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, 
         state.jobs.wait(io);
     }
     while (true) {
+        // Cancellation/control EOF must also wake an otherwise idle network reader.
+        if (state.stopping.load(.acquire)) return;
+        var polls = [_]std.posix.pollfd{.{ .fd = input.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+        if ((std.posix.poll(&polls, 100) catch return) == 0) continue;
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         const allocator = arena.allocator();
         var header: [4]u8 = undefined;
-        readExact(input, &header) catch return;
+        const tcp = @import("remote_io.zig");
+        const deadline = tcp.now(io) + 5000;
+        if (allow_rex) readExact(input, &header) catch return else tcp.readUntil(io, input.handle, &header, deadline) catch return;
         const length = std.mem.readInt(u32, &header, .big);
         if (length == 0 or length > frame_limit) return;
         const body = allocator.alloc(u8, length) catch return;
-        readExact(input, body) catch return;
+        if (allow_rex) readExact(input, body) catch return else tcp.readUntil(io, input.handle, body, deadline) catch return;
         // Observed control failure refuses subsequent requests. In-flight file
         // operations still drain; process groups are independently cancelled.
         if (state.stopping.load(.acquire)) return;
         const parsed = boundary.parseRequest(allocator, body) catch return;
+        if (!allow_rex and !@import("remote_link.zig").supported(parsed.value.operation)) {
+            const response = resultFrame(allocator, parsed.value, .{ .ok = false, .code = "offline", .output = "Remote Rex capability unavailable; no operation accepted" }) catch return;
+            state.send(response) catch return;
+            continue;
+        }
         if (parsed.value.operation == .bash_progress) {
             // Read-only ephemeral sampling, not an accepted operation or receipt.
             // Copy under the slot mutex; serialize/write only after releasing it.
