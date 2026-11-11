@@ -8,13 +8,13 @@ The local prototype has one Pi writer, durable main/task chats, native file/bash
 
 The [target architecture](DEVELOPER.md#target-interactive-and-scheduled-architecture) keeps all Pi execution and history at the hub. Interactive tasks get named Rex sessions on their execution machines, with named TUI terminals for their subagents. Scheduled jobs and their children use registered hosts without Rex. Jobs reuse their task/chat across runs; each run has its own admission identity and captured file settings.
 
-Remote interactive workflows and jobs remain target requirements, not current support. No delivery dates are set.
+Remote interactive workflows are implemented with isolated evidence; real two-machine acceptance remains open. Jobs and child terminals remain target requirements. No delivery dates are set.
 
 ## Next implementation sequence
 
 1. **Implemented:** distinct hub presentation, read-only task inspection, hub creation followed by Rex opening, and explicit status/inspection/reopen. Unsent prompts block hub navigation/creation; saved requests retain exact retries.
 2. **Implemented:** allocation-bound TUI startup and task-locked Rex clients. No cross-task navigation or non-Rex task participation. Explicit `--no-tui` follows the same role restrictions.
-3. **Partial:** registered native files/bash links and worker-only packaging are implemented. Complete real two-machine acceptance, then add a separately authenticated remote TUI path and assigned-host Rex sessions. Do not bypass the remote-client or Rex API 9 gates.
+3. **Partial:** registered native links, worker-only packaging, allocation-scoped task relay and assigned-host Rex launches are implemented. Complete real two-machine acceptance. Reuse the verified worker link, not a second login or exposed HTTP API; do not bypass the selected Rex API 9 gate.
 4. Add named subagent TUI terminals inside the parent interactive task's session. Preserve Pi ownership and define direct-input rules separately.
 5. Implement per-run file capture and Pi scheduling. Reuse each job's task/chat, give each run its own admission identity, and prove that jobs and their children create no Rex objects.
 
@@ -70,7 +70,7 @@ Acceptance: no agent swapping around queued inputs, hook-only enforcement, secon
 
 Do not expose a remote listener before verified identity exists. The existing loopback trust model is not remote authentication.
 
-**First transport slice implemented:** explicit private worker configuration/approval, actual-socket Tailscale verification on both outbound data/control links, generation fencing, exact saved-host routing, independent cancellation/heartbeat capacity, and a native-only `deck-worker` package. Isolated TCP tests use injected identity verification and cover receipt preservation, lost results, host isolation, and saturated result pipes. This is not a real two-machine Deck test. Earlier Tailscale self-node/selected-peer and HTTPS/Rex probe evidence remains separate; the selected Rex endpoint's API 9 is still not enabled for Deck allocation. Remote Rex and remote client access remain disabled.
+**First transport slice implemented:** explicit private worker configuration/approval, actual-socket Tailscale verification on both outbound data/control links, generation fencing, exact saved-host routing, independent cancellation/heartbeat capacity, and a native-only `deck-worker` package. Isolated TCP tests use injected identity verification and cover receipt preservation, lost results, host isolation, and saturated result pipes. This is not a real two-machine Deck test. Earlier Tailscale self-node/selected-peer and HTTPS/Rex probe evidence remains separate; the selected Rex endpoint's API 9 is still not enabled for Deck allocation. Opt-in `files,bash,rex` workers now pair a third verified, generation-bound task channel and a private Unix proxy. Assigned-host Rex discovery/allocation/inspection and managed task clients are tested with a private API 10 server and actual sockets/FIFOs. This remains isolated evidence; the selected real API 9 service is still unsupported.
 
 - [ ] Validate Tailscale peer verification on selected real test machines. Map actual verified peers to registration, not claimed headers or names.
 - [x] Define schema-backed worker registration, capabilities, and connection generation. Runtime inventory remains future work.
@@ -79,12 +79,14 @@ Do not expose a remote listener before verified identity exists. The existing lo
 - [x] Preserve host/cwd assignments while a worker is offline. Never execute its effects elsewhere as fallback.
 - [x] Preserve original operation IDs/bytes and consult retained receipts on explicit original-identity retry; never replay on reconnect.
 - [ ] Add a general read-only remote receipt/reconciliation UI without reissuing effects.
-- [ ] Test disconnect before/after acceptance, lost results, duplicate/stale replies, identity drift, hub/worker restart, and reconnect backoff.
+- [ ] Repeat disconnect before/after acceptance, lost results, duplicate/stale replies, identity drift, hub/worker restart, and reconnect-backoff acceptance on real machines.
 - [x] Prove host isolation with independent native links and evented remote pipes in isolated tests; repeat on actual machines.
 - [x] Package worker-only mode without a Pi runtime or provider credentials.
-- [ ] Route Rex creation/inspection through the assigned execution host and verify its saved server identity. Do not treat a remote server option as permission to move a task.
-- [ ] Provide verified remote client access to the hub. Rex's connection does not secure Deck's separate chat transport.
-- [ ] Test remote task TUI startup, session closure, and explicit reopen of the same conversation without duplicate input or generation.
+- [x] Route Rex creation/inspection through the assigned execution host and verify its saved server identity. A server override never moves a task.
+- [x] Carry allocation-scoped task commands through the verified worker link, with independent bounded capacity and no extra user login. The trusted-local HTTP API remains private.
+- [x] Add hub-only `/task-at` explicit host/cwd creation using existing saved drafts and separate creation/open ACKs.
+- [x] Test task TUI startup, worker-link reconnect, session closure and explicit same-conversation reopening through actual isolated transport and a private supported Rex server, without replaying input.
+- [ ] Repeat that interactive workflow on two real machines with operator-approved peer/binary/client pins. Validate API 9 contracts before any allowlist change.
 
 Acceptance: use verified identity and explicit bindings for every effect. Keep unknown accepted effects uncertain. Worker liveness is not effect completion. Do not add worker Pi stores, transcript replication, or cross-host failover.
 

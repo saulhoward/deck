@@ -68,23 +68,26 @@ pub fn deinit(self: *Bridge) void {
     if (self.hub_chat_id) |id| self.a.free(id);
 }
 pub fn request(self: *Bridge, action: @FieldType(wire.TuiRequest, "action"), text: ?[]const u8, hold: ?bool) !bool {
-    return self.requestConfigured(action, text, hold, null, null, null);
+    return self.requestConfigured(action, text, hold, null, null, null, null);
 }
 pub fn configure(self: *Bridge, change: wire.ModelSettingsChange) !bool {
-    return self.requestConfigured(.configure, null, null, change, null, null);
+    return self.requestConfigured(.configure, null, null, change, null, null, null);
 }
 pub fn selectChat(self: *Bridge, chat_id: []const u8) !bool {
-    return self.requestConfigured(.select, null, null, null, chat_id, null);
+    return self.requestConfigured(.select, null, null, null, chat_id, null, null);
 }
 pub fn tasks(self: *Bridge, after: ?[]const u8) !bool {
-    return self.requestConfigured(.tasks, null, null, null, null, after);
+    return self.requestConfigured(.tasks, null, null, null, null, after, null);
 }
-fn requestConfigured(self: *Bridge, action: @FieldType(wire.TuiRequest, "action"), text: ?[]const u8, hold: ?bool, configuration: ?wire.ModelSettingsChange, chat_id: ?[]const u8, after: ?[]const u8) !bool {
+pub fn createAt(self: *Bridge, target: wire.TaskCreationTarget) !bool {
+    return self.requestConfigured(.create, null, null, null, null, null, target);
+}
+fn requestConfigured(self: *Bridge, action: @FieldType(wire.TuiRequest, "action"), text: ?[]const u8, hold: ?bool, configuration: ?wire.ModelSettingsChange, chat_id: ?[]const u8, after: ?[]const u8, task_target: ?wire.TaskCreationTarget) !bool {
     if (self.failed or self.pending != null) return false;
     if (self.client_mode == .task and (action == .select or action == .tasks or action == .create)) return error.TaskLocked;
     self.sequence += 1;
     const id = try std.fmt.bufPrint(&self.id_buf, "{d}", .{self.sequence});
-    var request_value: wire.TuiRequest = .{ .version = 1, .id = id, .action = action, .text = text, .hold = hold, .configuration = configuration, .chatId = chat_id, .after = after };
+    var request_value: wire.TuiRequest = .{ .version = 1, .id = id, .action = action, .text = text, .hold = hold, .configuration = configuration, .chatId = chat_id, .after = after, .taskTarget = task_target };
     const bytes = try std.json.Stringify.valueAlloc(self.a, request_value, .{});
     defer self.a.free(bytes);
     const checked = try std.json.parseFromSlice(std.json.Value, self.a, bytes, .{});
@@ -101,8 +104,17 @@ fn requestConfigured(self: *Bridge, action: @FieldType(wire.TuiRequest, "action"
     // not borrowed from the command buffer or an old display page.
     if (chat_id) |target| request_value.chatId = try std.fmt.bufPrint(&self.target_buf, "{s}", .{target});
     if (after) |cursor| request_value.after = try std.fmt.bufPrint(&self.after_buf, "{s}", .{cursor});
+    // The complete mutation payload is owned by output; reply correlation does
+    // not retain borrowed JSON task-target strings after the command is parsed.
+    request_value.taskTarget = null;
     self.pending = request_value;
     return true;
+}
+pub fn validTaskTarget(value: std.json.Value) bool {
+    if (!wire.validTaskCreationTarget(value)) return false;
+    const cwd = value.object.get("cwd").?.string;
+    const title = value.object.get("title").?.string;
+    return std.fs.path.isAbsolute(cwd) and cwd.len <= 4096 and std.mem.indexOfScalar(u8, cwd, 0) == null and title.len <= 200 and std.mem.trim(u8, title, " \t\r\n").len > 0;
 }
 pub fn validRequest(value: std.json.Value) bool {
     if (!wire.validTuiRequest(value)) return false;
@@ -113,8 +125,10 @@ pub fn validRequest(value: std.json.Value) bool {
     } else if (value.object.contains("chatId")) return false;
     if (value.object.get("after")) |after| if (!std.mem.eql(u8, action, "tasks") or !safeId(after)) return false;
     if (value.object.contains("hold") and !std.mem.eql(u8, action, "poll")) return false;
+    if (value.object.contains("taskTarget") and !std.mem.eql(u8, action, "create")) return false;
     if (std.mem.eql(u8, action, "configure")) return value.object.contains("configuration") and text == null;
     if (value.object.contains("configuration")) return false;
+    if (value.object.get("taskTarget")) |target| return std.mem.eql(u8, action, "create") and text == null and validTaskTarget(target);
     if (std.mem.eql(u8, action, "send") or std.mem.eql(u8, action, "create")) {
         const content = text orelse return false;
         return content.string.len <= (if (std.mem.eql(u8, action, "create")) @as(usize, 200) else 16384) and std.mem.trim(u8, content.string, " \t\r\n").len > 0;
@@ -447,6 +461,21 @@ test "renderer boundary correlates transport, chat, hub and canonical history be
     try snapshot.object.put(a, "entries", entries);
     try response.object.put(a, "snapshot", snapshot);
     try std.testing.expect(!validReply(response, "1", null, null));
+    const target: wire.TaskCreationTarget = .{ .machineId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .cwd = "/remote workspace 🧪", .title = " exact title " };
+    var create_pipe = try TestPipe.init();
+    defer create_pipe.deinit();
+    create_pipe.bridge.client_mode = .task;
+    try std.testing.expectError(error.TaskLocked, create_pipe.bridge.createAt(target));
+    create_pipe.bridge.client_mode = .hub;
+    try std.testing.expect(try create_pipe.bridge.createAt(target));
+    const creation = try std.json.parseFromSlice(std.json.Value, a, create_pipe.bridge.output.items[4..], .{});
+    try std.testing.expect(validRequest(creation.value));
+    var creation_value = creation.value;
+    try creation_value.object.put(a, "action", .{ .string = "send" });
+    try std.testing.expect(!validRequest(creation_value));
+    try creation_value.object.put(a, "action", .{ .string = "create" });
+    try creation_value.object.getPtr("taskTarget").?.object.put(a, "cwd", .{ .string = "relative" });
+    try std.testing.expect(!validRequest(creation_value));
     for ([_][]const u8{
         "{\"version\":1,\"id\":\"1\",\"action\":\"send\"}",
         "{\"version\":1,\"id\":\"1\",\"action\":\"send\",\"text\":\" \"}",

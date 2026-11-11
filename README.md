@@ -2,7 +2,7 @@
 
 Deck is a personal coding-agent tool. It has a Zig hub, command-line client, and terminal user interface (TUI). One TypeScript runtime uses Pi to store conversations and run agents. Zig runs local file and shell tools. Rex can keep task terminals open.
 
-**Deck is a prototype.** Local hub/Rex clients and opt-in registered files/bash workers are implemented. Remote Rex/TUI access is not yet available. Tools run with your user permissions; the workspace is not a sandbox.
+**Deck is a prototype.** Local hub/Rex clients, registered native workers, and opt-in assigned-host Rex task clients are implemented. Real two-machine acceptance is still pending; the selected Rex API 9 endpoint remains unsupported. Tools run with your user permissions; the workspace is not a sandbox.
 
 ## Documentation
 
@@ -14,11 +14,11 @@ These documents distinguish current behavior from the target design. A local bui
 
 ## Target workflow
 
-Every chat uses the hub. Interactive tasks will have named Rex sessions on their execution machines. Their subagents will have named TUI terminals inside the same session. Closing and reopening a session will retain the task's hub conversation.
+Every chat uses the hub. Interactive tasks can open named Rex sessions on their explicitly configured execution machines. Their subagents will have named TUI terminals inside the same session. Closing and reopening a session will retain the task's hub conversation.
 
 Scheduled jobs and their children will run in the hub runtime through registered host connections, without Rex terminals. Each job will reuse its task and Pi conversation. Each run will have its own admission identity and captured file settings.
 
-Remote interactive clients, jobs, and subagent terminals still need implementation. Local task navigation, Rex-managed TUI launches, and worker-only native effects are available. See the [target architecture](docs/DEVELOPER.md#target-interactive-and-scheduled-architecture) and [next implementation steps](docs/ROADMAP.md#next-implementation-sequence). The instructions below describe what works now.
+Assigned-host task clients are implemented and tested in isolation; real two-machine acceptance remains pending. Jobs and subagent terminals still need implementation. See the [target architecture](docs/DEVELOPER.md#target-interactive-and-scheduled-architecture) and [next implementation steps](docs/ROADMAP.md#next-implementation-sequence). The instructions below describe what works now.
 
 ## Current workflow
 
@@ -88,6 +88,7 @@ Rex task clients cannot list/create/select other tasks or return to the hub. Hub
 | Read older or latest history | `:older`, `:latest` |
 | Inspect tasks / return to hub (hub client only) | `/tasks`, `/select ID`, `/hub` |
 | Create a task and request Rex (hub chat only) | `/task TITLE` |
+| Create on an explicit saved host/cwd (hub only) | `/task-at {"machineId":"32 hex ID","cwd":"/absolute/path","title":"Task"}` |
 | Inspect the selected task's Rex state | `/rex`; `s` refreshes status, `i` inspects presence |
 | Open/reopen the selected task in Rex | `/rex open`, or `o` in the Rex view |
 | Select a model | Esc, `/model`, Enter; then arrows or `j/k`, Enter to select, Esc to cancel |
@@ -121,6 +122,7 @@ deck agent --no-tui --task CHAT_ID
 | `/tasks`, `/tasks more` | Hub only: list saved chats |
 | `/select CHAT_ID`, `/hub` | Hub only: inspect a task / return to hub |
 | `/task TITLE` | Hub chat only: create a task and request its Rex terminal |
+| `/task-at JSON` | Hub chat only: explicit `machineId`, absolute `cwd`, and `title`; save first, then request Rex |
 | `/status`, `/activity` | Inspect settings, bindings, or activity |
 | `/older` | Read an older history page |
 | `/instructions load` | Import the selected chat's `AGENTS.md` while idle |
@@ -207,7 +209,7 @@ deck rex status --task CHAT_ID
 deck rex inspect --task CHAT_ID
 ```
 
-First open finds `rex` on the hub/native worker's PATH and discovers its running local Unix server. It does not use the client's PATH or autostart Rex. Optional overrides are `--rex`, `--server`, `--host-id`, and `--instance-id`. Later opens reuse the saved target; they do not migrate it. Use `--port N` for another Deck hub.
+First open finds `rex` on the assigned execution host's PATH and discovers its running local Unix server. It does not use the client's PATH or autostart Rex. Optional overrides are `--rex`, `--server`, `--host-id`, and `--instance-id`. Later opens reuse the saved target; they do not migrate it. Use `--port N` for another Deck hub.
 
 `open` and `reopen` have the same behavior. A running client is reused. An exited or missing client gets a new window. A missing session gets a new session. A failed inspection is not proof that an object is missing. These commands do not focus the Rex GUI.
 
@@ -252,7 +254,7 @@ Restore keeps identities and workspace bindings. Do not run source and restored 
 
 ## Register a files/bash worker
 
-This enables **native effects only**, not remote task participation or remote Rex. Pi, models, history, and credentials stay at the hub. The worker uses its saved machine ID/cwd; disconnection never redirects its work locally. An actual two-machine Deck acceptance test is still pending; isolated TCP tests use injected verifier identities, not a live tailnet.
+This default configuration enables **files/bash only**. [Rex task clients](#enable-assigned-host-rex-task-clients) require explicit additional approval. Pi, models, history, and credentials stay at the hub. The worker uses its saved machine ID/cwd; disconnection never redirects its work locally. An actual two-machine Deck acceptance test is still pending; isolated TCP tests use injected verifier identities, not a live tailnet.
 
 Both OS hosts need a running Tailscale backend and an explicit absolute Tailscale executable. An embedded Rex service's node identity is **not** automatically the worker OS's identity. Do not expose the loopback chat API or reuse a Rex HTTPS URL as a worker endpoint.
 
@@ -298,17 +300,47 @@ Both OS hosts need a running Tailscale backend and an explicit absolute Tailscal
 
 Registrations are loaded at hub startup, not auto-discovered or hot-reloaded. The worker verifies the hub on both actual sockets; the hub verifies the worker, pins, capabilities, and fresh generation. The connected log is a connection event, not proof of task completion. Reconnect uses backoff and never replays effects. Lost outcomes remain uncertain; an explicit original-identity retry consults retained receipts. Keep the worker configuration and receipts together, and never run divergent copies of its state.
 
-Existing saved bindings can use the worker through the native adapter. There is not yet a user-facing remote task creation/participation workflow: `/task` still requires a working Rex path, and remote Rex is deliberately refused. Do not start `deck serve` on the worker to join the hub—that creates another hub.
+Existing saved bindings use the worker through the native adapter. Files/bash-only workers still refuse Rex. Do not start `deck serve` on the worker to join the hub—that creates another hub.
 
 `deck remote-check` remains a read-only peer/registration diagnostic with `connection: "not_checked"`; it does not enroll or connect anything. See [transport details and limits](docs/DEVELOPER.md#registered-filesbash-workers).
 
+## Enable assigned-host Rex task clients
+
+Rex over Tailscale provides terminal access; Deck adds **no second user login**. A remote task TUI connects to a private Unix socket on its worker. Its task commands travel on a separate bounded channel of the same verified worker link, not through a remotely exposed hub HTTP API. Pi, inference, history, and scheduling remain on the hub.
+
+1. Install the full Deck client and a supported Rex CLI/server on the execution host. Run Rex and the worker as the same OS user so its terminals can access the private client socket. The native-only worker package does not contain the TUI or Node; installing the client separately does not make the worker daemon a Pi runtime. Rex must be reachable through a **worker-local Unix endpoint**, with API **8 or 10**. HTTPS targets and API 9 are still refused.
+2. For a **new** worker, add `--client /absolute/path/to/deck` to `deck-worker init`. The worker saves that client path and a derived `client.sock` path inside its private state directory (socket path at most 100 UTF-8 bytes). `identity` now emits ordered `files,bash,rex` capabilities plus:
+   ```json
+   {
+     "rexClient": {
+       "executable": "/absolute/path/to/deck",
+       "socket": "/absolute/worker-state/client.sock"
+     }
+   }
+   ```
+   For an existing worker, first settle work and stop it. Preserve its machine ID, hub pins, and receipts; add this exact `rexClient` object to its private `worker.json` rather than reinitializing or copying the directory. The socket must be that directory's `client.sock`.
+3. Review the new `identity` output. Approve the exact client/socket pair and ordered capabilities alongside the existing machine/peer/binary pins in the hub registry. Keep `client:false`: that separate diagnostic role does not grant general remote hub access. Changes require a controlled hub restart, not hot reload. Start the worker normally with `run`.
+4. From the **hub chat**, create an explicitly bound task in either TUI or plain mode:
+   ```text
+   /task-at {"machineId":"WORKER_32_HEX_MACHINE_ID","cwd":"/remote/project with spaces","title":"Remote task"}
+   ```
+   Replace the placeholder with the actual 32-hex machine ID. The TUI command line is limited to 256 UTF-8 bytes and does not accept pasted commands; use `--no-tui` for longer JSON targets. Title, host, cwd, and request ID are saved before creation is sent. Creation ACK clears that draft before the separate best-effort Rex open. If the worker/Rex is unavailable or opening is unconfirmed, the task stays saved; inspect and explicitly `/rex open` it from the hub. **Do not repeat task creation to recover a terminal.** `/task TITLE` still uses the hub's saved workspace, not the most recently opened terminal.
+
+Default Rex discovery runs on the assigned worker. Use `deck rex open --task ID --rex /worker/path/to/rex --server unix:///worker/socket` on the hub for explicit overrides. Saved targets bypass discovery. No local fallback, migration, terminal adoption, input replay, or automatic allocation retry occurs.
+
+The client must register its exact hub/task/allocation and native `REX_BLOCK` before participation. The hub independently checks the saved host, cwd, ownership, current allocation, approved client/socket, and block on every relay command and again at mutation admission. Remote task clients cannot list/create/switch tasks, log in, access the hub chat, or allocate replacement terminals; use the hub for opening/reopening. Their status omits global Pi inspection. Detaching does not stop work. Reconnect resumes reads only; lost mutation acknowledgements retain drafts for explicit original-identity recovery.
+
+All three sockets (effects, control, clients) independently verify their actual Tailscale peer and bind one fresh generation. Revocation, replacement, or config drift cannot silently attach an old client to another task. Changing an approved client path requires explicitly closing/reopening affected terminals; retain the old immutable build and settle work first. No live hub or remote machine is upgraded by building this feature.
+
+Validation includes real isolated sockets/FIFOs with injected peer verification and a private Rex API 10 server: managed startup, task input at the hub, worker-link reconnect with the same client PID, and explicit reopening of the same conversation. This is **not** real two-machine/Tailscale acceptance and does not validate the selected API 9 service.
+
 ## Limits and trust
 
-- The chat API listens only on loopback and trusts local OS users. Optional worker-only listeners authenticate registered Tailscale machines, not individual OS users; they do not expose chat commands.
+- The chat API listens only on loopback and trusts local OS users. Worker listeners authenticate registered Tailscale machines, not individual OS users. Opt-in task relays expose only allocation-scoped commands, never the general HTTP/login/hub command surface.
 - File and shell tools can access paths outside the workspace, use ordinary symlinks, and contact external services.
 - File tools handle regular UTF-8 files up to 128 KiB. Exact edit requires one match. Bash has a 60-second default timeout, a 300-second maximum, and a 64 KiB output tail.
 - Stored chats, receipts, instructions, credentials, drafts, and backups can contain sensitive plaintext. Display sanitization is not secret redaction.
 - Activity and output previews are samples, not complete streams or proof of success. Read retained results and inspect the actual workspace.
-- There is no remote Rex/TUI access, general settings editor, job scheduler, web UI, or automatic project-file loader. See the [Roadmap](docs/ROADMAP.md).
+- There is no general remote hub-client API, interactive child-terminal workflow, general settings editor, job scheduler, web UI, or automatic project-file loader. See the [Roadmap](docs/ROADMAP.md).
 
 No license has been selected for Deck. Third-party notices remain in [`licenses/`](licenses/) and are installed with the package.

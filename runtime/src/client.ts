@@ -59,11 +59,14 @@ function renderHistory(items: unknown[], descending = true) {
   }
 }
 
+import { taskCommand, taskScope } from "./task-client.js";
+import { parseTaskTarget } from "./task-target.js";
+
 async function main() {
   let login = false;
   let rexCommand: string | undefined;
   const rexTarget: Record<string, string> = {};
-  let port = 52800; let selected: string | undefined; let message: string | undefined; let expectedHubId: string | undefined; let rexAllocationId: string | undefined;
+  let port = 52800; let selected: string | undefined; let message: string | undefined; let expectedHubId: string | undefined; let rexAllocationId: string | undefined; let workerSocket: string | undefined;
   const args = process.argv.slice(2);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -76,6 +79,7 @@ async function main() {
     else if (arg === "--message") message = value;
     else if (arg === "--hub-id" && value.length <= 200) expectedHubId = value;
     else if (arg === "--rex-allocation" && validRexUuid(value)) rexAllocationId = value;
+    else if (arg === "--worker-socket") workerSocket = value;
     else if (arg === "--rex-command" && ["open", "reopen", "status", "inspect"].includes(value)) rexCommand = value;
     else if (arg === "--rex") rexTarget.executable = value;
     else if (arg === "--server") rexTarget.server = value;
@@ -92,7 +96,8 @@ async function main() {
   if (rexAllocationId && (!expectedHubId || !selected || login || message !== undefined || !validMutationArgs("rex_startup", { chatId: selected, allocationId: rexAllocationId, blockId: rexBlockId }))) throw new Error("Rex startup requires an explicit hub/task and native full REX_BLOCK; no input sent");
   const transport = new AbortController();
   let detached = false;
-  const command = async (name: string, args: ObjectValue = {}) => object(await hubCommand(port, name, args, expectedHubId, transport.signal));
+  const scope = workerSocket ? taskScope(expectedHubId, selected, rexAllocationId, rexBlockId) : undefined;
+  const command = async (name: string, args: ObjectValue = {}) => object(await (scope ? taskCommand(workerSocket!, scope, name, args, expectedHubId, transport.signal) : hubCommand(port, name, args, expectedHubId, transport.signal)));
   const historyPage = async (args: ObjectValue, limit: number) => {
     for (;;) {
       try {
@@ -291,7 +296,7 @@ async function main() {
       if (!text) continue;
       try {
         if (text === "/exit") break;
-        if (text === "/help") { stdout.write("/status /activity /stop /older /tasks [more] /select CHAT_ID /hub /task TITLE /instructions [load|TASK_ID] /rex [open|reopen|status|inspect] /draft /drafts /recover REQUEST_ID /retry /discard [REQUEST_ID] /exit\nEnter submits or steers. /instructions load replaces stored explicit instructions with saved-worker AGENTS.md, only while idle; admission is not application. /instructions reads source/task status without loading. Hub task inspection is read-only; /task creates and opens Rex. Rex task clients cannot list, create or switch tasks. Ctrl+C detaches. Answer previews are sampled/provisional; retained history is authoritative. This is plain line mode, not TUI.\n"); continue; }
+        if (text === "/help") { stdout.write("/status /activity /stop /older /tasks [more] /select CHAT_ID /hub /task TITLE /task-at JSON /instructions [load|TASK_ID] /rex [open|reopen|status|inspect] /draft /drafts /recover REQUEST_ID /retry /discard [REQUEST_ID] /exit\nEnter submits or steers. /instructions load replaces stored explicit instructions with saved-worker AGENTS.md, only while idle; admission is not application. /instructions reads source/task status without loading. Hub task inspection is read-only; /task creates and opens Rex. Rex task clients cannot list, create or switch tasks. Ctrl+C detaches. Answer previews are sampled/provisional; retained history is authoritative. This is plain line mode, not TUI.\n"); continue; }
         if (text === "/draft") {
           if (!active) throw new Error("No active unacknowledged draft");
           const preview = plain(JSON.stringify(active));
@@ -380,6 +385,12 @@ async function main() {
         }
         if (text === "/retry" && active?.kind === "instructions") { await importInstructions(); continue; }
         if (text === "/retry" && active?.kind === "task") { await createTask(); continue; }
+        if (text.startsWith("/task-at ")) {
+          create(); requireAcknowledged();
+          const saved = parseTaskTarget(text.slice(9));
+          active = { kind: "task", chatId: selected, requestId: randomUUID(), ...saved };
+          await createTask(); continue;
+        }
         if (text.startsWith("/task ")) {
           create();
           requireAcknowledged();

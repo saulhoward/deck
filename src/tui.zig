@@ -32,6 +32,7 @@ const help =
     \\
     \\/tasks                hub only: inspect tasks read-only
     \\/task TITLE           hub only: create task and open Rex
+    \\/task-at JSON         hub only: {machineId,cwd,title} target
     \\/select ID /hub       hub only: inspect task / return to hub
     \\Task clients are Rex-bound and locked; use /rex open to participate.
     \\/rex                  selected task Rex status; i inspect, o open
@@ -281,7 +282,22 @@ const Model = struct {
         if (!self.canList()) return;
         if (try self.bridge.tasks(after)) self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake) else self.note("Client request in flight; task read not queued.");
     }
-    fn createTask(self: *Model, title: []const u8) !void {
+    fn createAt(self: *Model, json: []const u8) !void {
+        if (!self.canNavigate()) return;
+        const raw = std.json.parseFromSlice(std.json.Value, self.a, json, .{}) catch {
+            self.note("Invalid /task-at JSON: use {machineId,cwd,title}.");
+            return;
+        };
+        defer raw.deinit();
+        if (!Bridge.validTaskTarget(raw.value)) {
+            self.note("Invalid task target: full machine ID, absolute cwd, title up to 200 bytes required.");
+            return;
+        }
+        const target = try wire.parseTaskCreationTarget(self.a, json);
+        defer target.deinit();
+        try self.createTask(target.value.title, target.value);
+    }
+    fn createTask(self: *Model, title: []const u8, target: ?wire.TaskCreationTarget) !void {
         if (!self.canNavigate()) return;
         if (self.readOnly()) {
             self.note("Return to /hub to create and open a Rex task.");
@@ -291,7 +307,8 @@ const Model = struct {
             self.note("Task title must be 1 to 200 UTF-8 bytes.");
             return;
         }
-        if (try self.bridge.request(.create, title, null)) self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake) else self.note("Client request in flight; task creation not queued.");
+        const started = if (target) |t| try self.bridge.createAt(t) else try self.bridge.request(.create, title, null);
+        if (started) self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake) else self.note("Client request in flight; task creation not queued.");
     }
     fn issue(self: *Model, action: Action) !void {
         if ((action == .send or action == .retry or action == .discard or action == .stop or action == .configure) and !self.canWrite()) return;
@@ -326,7 +343,7 @@ const Model = struct {
     }
     fn ex(self: *Model, ctx: *fw.EventContext) !void {
         const cmd = self.command.items;
-        if (std.mem.eql(u8, cmd, "tasks")) try self.taskPage(null) else if (std.mem.startsWith(u8, cmd, "task ")) try self.createTask(std.mem.trim(u8, cmd[5..], " ")) else if (std.mem.startsWith(u8, cmd, "select ")) {
+        if (std.mem.eql(u8, cmd, "tasks")) try self.taskPage(null) else if (std.mem.startsWith(u8, cmd, "task-at ")) try self.createAt(cmd[8..]) else if (std.mem.startsWith(u8, cmd, "task ")) try self.createTask(std.mem.trim(u8, cmd[5..], " "), null) else if (std.mem.startsWith(u8, cmd, "select ")) {
             const id = std.mem.trim(u8, cmd[7..], " ");
             const n = std.fmt.parseInt(u64, id, 10) catch 0;
             if (n == 0 or n > 9007199254740991 or id[0] == '0' or !std.ascii.isDigit(id[0])) self.note("Use /select with a positive chat ID from /tasks.") else try self.selectChat(id);
@@ -760,11 +777,12 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var hub_id: ?[]const u8 = null;
     var chat_id: ?[]const u8 = null;
     var allocation_id: ?[]const u8 = null;
+    var worker_socket: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--tui")) continue;
         const key = args[i];
-        if (!std.mem.eql(u8, key, "--port") and !std.mem.eql(u8, key, "--task") and !std.mem.eql(u8, key, "--hub-id") and !std.mem.eql(u8, key, "--rex-allocation")) return error.UnsupportedTuiOption;
+        if (!std.mem.eql(u8, key, "--port") and !std.mem.eql(u8, key, "--task") and !std.mem.eql(u8, key, "--hub-id") and !std.mem.eql(u8, key, "--rex-allocation") and !std.mem.eql(u8, key, "--worker-socket")) return error.UnsupportedTuiOption;
         i += 1;
         if (i == args.len) return error.MissingOptionValue;
         if (std.mem.eql(u8, key, "--port")) {
@@ -784,8 +802,13 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
             if (!wire.validRexUuid(.{ .string = args[i] })) return error.InvalidAllocation;
             allocation_id = args[i];
         }
+        if (std.mem.eql(u8, key, "--worker-socket")) {
+            if (!std.fs.path.isAbsolute(args[i]) or args[i].len > 100 or std.mem.indexOfAny(u8, args[i], "\x00\r\n") != null) return error.InvalidWorkerSocket;
+            worker_socket = args[i];
+        }
         try forwarded.appendSlice(init.gpa, &.{ key, args[i] });
     }
+    if (worker_socket != null and allocation_id == null) return error.InvalidAllocation;
     if (allocation_id != null and (hub_id == null or chat_id == null)) return error.InvalidAllocation;
     var bridge = try Bridge.start(.{ .io = init.io, .environ = init.minimal.environ }, init.gpa, forwarded.items);
     defer bridge.deinit();

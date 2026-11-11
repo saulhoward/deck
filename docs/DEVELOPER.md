@@ -51,7 +51,7 @@ Plain client / CLI -----------------------+-> loopback HTTP -> Zig hub
                                                        files, bash, Rex
 ```
 
-Pi owns conversations, input queues, generation, tool tasks, checkpoints, and history. Zig owns transport, process supervision, native effects, and the TUI. Rex owns terminals. Opt-in registered workers execute files/bash only; remote Rex and remote chat-client access are not enabled.
+Pi owns conversations, input queues, generation, tool tasks, checkpoints, and history. Zig owns transport, process supervision, native effects, and the TUI. Rex owns terminals. Registered workers execute native effects. Files/bash is the default; explicitly approved Rex workers also host task-scoped clients through the verified worker link. No worker owns a Pi runtime or transcript store.
 
 Keep these boundaries:
 
@@ -69,7 +69,7 @@ Unexpected writer exit or failed Harness closure stops the hub with a nonzero ex
 
 ### Target interactive and scheduled architecture
 
-**Target design; remote interactive clients, jobs, and subagent terminals are not yet implemented. Local managed Rex TUI startup and registered files/bash workers are implemented.**
+**Partly implemented:** local and assigned-host managed Rex task clients and verified native workers have isolated tests. Real two-machine acceptance is pending. Scheduled jobs and subagent terminals below remain target design.
 
 Every chat uses the hub. One hub-owned Pi runtime stores conversations and runs interactive agents, scheduled jobs, and their children. Background execution uses Pi tasks in that runtime, not a new process or store for each job. Registered host connections carry native effects to the assigned execution machine. Model credentials stay at the hub.
 
@@ -97,7 +97,7 @@ For scheduled work:
 - Jobs and their children open no Rex sessions or terminals. Scheduling, recovery, and history inspection must not create terminal objects.
 - Use Pi durable scheduling and ownership. Do not add a second queue, transcript store, or job-execution engine.
 
-Remote TUI clients need a verified path back to the hub. Rex connectivity alone does not authenticate Deck traffic. An offline host keeps its assignment; neither interactive nor scheduled effects fall back to the hub. Current version-3 admission observations are not the required per-run file capture. See the [implementation sequence](ROADMAP.md#next-implementation-sequence).
+Remote task clients use the verified worker link and allocation-scoped hub dispatch. Rex connectivity alone does not authenticate a separate HTTP connection. An offline host keeps its assignment; neither interactive nor scheduled effects fall back to the hub. Current version-3 admission observations are not the required per-run file capture. See the [implementation sequence](ROADMAP.md#next-implementation-sequence).
 
 ## Source map
 
@@ -114,6 +114,8 @@ Remote TUI clients need a verified path back to the hub. Rex connectivity alone 
 | `runtime/src/main.ts`, `ipc.ts`, `protocol.ts` | Runtime startup, command dispatch, and framing |
 | `runtime/src/host-files.ts`, `runtime/src/remote-files.ts` | Saved-worker tool adapters/routing; no Node filesystem or cross-host fallback |
 | `src/worker_main.zig`, `src/remote_worker.zig` | Standalone native-only worker startup; no Pi/model runtime |
+| `src/task_relay.zig`, `runtime/src/remote-clients.ts` | Bounded worker-link RPC and hub-side allocation/machine/task scope guards |
+| `runtime/src/task-client.ts`, `task-target.ts` | Client-only Unix transport and exact explicit task-target validation |
 | `runtime/src/client.ts`, `hub-client.ts`, `drafts.ts` | Plain client, bounded HTTP, and durable request drafts |
 | `runtime/src/tui-bridge.ts`, `tui-session.ts` | Client-only adapter reused by the Zig TUI |
 | `runtime/src/task-tools.ts`, `task-control.ts`, `subagent.ts` | Model task inspection, independent tasks, and owned delegation |
@@ -165,7 +167,7 @@ nix develop path:. -c sh -c '
 git diff --check
 ```
 
-`npm run check` verifies generated contracts without rewriting them, then checks TypeScript. `npm test` compiles TypeScript and runs offline tests with four test files at a time. `DECK_TEST_BINARY` enables real Zig supervisor and native-effect tests. Without it, those tests skip.
+`npm run check` verifies generated contracts without rewriting them, then checks TypeScript. `npm test` compiles TypeScript and runs offline tests with four test files at a time. `DECK_TEST_BINARY` enables real Zig supervisor and native-effect tests. Without it, those tests skip. Native test execution is uncached: socket/process tests and opt-in Rex checks depend on the live environment, so an earlier ordinary run cannot substitute for an enabled integration run.
 
 After editing the schema, regenerate and review both outputs:
 
@@ -181,12 +183,16 @@ Do not hand-edit `src/generated/contracts.zig` or `runtime/src/generated/contrac
 ```sh
 nix flake check path:.
 nix build path:.
+nix build path:.#worker --out-link result-worker
 nix develop path:. -c sh -c '
   npm run build &&
   DECK_TEST_BINARY="$PWD/result/bin/deck" \
   DECK_PACKAGE_BINARY="$PWD/result/bin/deck" \
+  DECK_TEST_WORKER_BINARY="$PWD/result-worker/bin/deck-worker" \
     node --test --test-concurrency=4 runtime/dist/tui.test.js \
       runtime/dist/tui-tasks.test.js runtime/dist/tui-startup.test.js \
+      runtime/dist/remote.test.js runtime/dist/remote-files.test.js \
+      runtime/dist/hub-identity.test.js runtime/dist/task-relay.test.js \
       runtime/dist/package.test.js
 '
 ```
@@ -254,7 +260,7 @@ The shared client rejects redirects and bounds streamed response bytes before JS
 
 ### Remote verification foundation
 
-The verifier and diagnostic are shared by the opt-in [files/bash transport](#registered-filesbash-workers). The diagnostic alone never enables connectivity. The chat API remains loopback-only; remote TUI routing and client authentication are still unimplemented.
+The verifier and diagnostic are shared by the opt-in [files/bash transport](#registered-filesbash-workers). The diagnostic alone never enables connectivity. The chat API remains loopback-only. Optional task-client traffic uses the verified worker link described below; there is no separate user login or general remote hub-client API.
 
 `RemoteRegistry` is an explicit local operator file for one hub. Up to 64 entries pin a Deck machine ID to a stable Tailscale node ID and exact decimal user ID. Node names, DNS names, tags, headers, public keys, and peer-supplied `verified` flags grant no authority. A worker registration additionally pins an implementation digest and ordered capabilities (`files`, `bash`, `rex`). A client-only registration omits both. Duplicate node/machine IDs and registrations without a role are refused. Tailscale ownership is machine-level authority, not an OS-user login; do not grant client access to an untrusted node.
 
@@ -292,19 +298,37 @@ See the [operator setup](../README.md#register-a-filesbash-worker). `deck-worker
 
 `worker init` creates a new private directory, a random machine ID, and `worker.json` containing exact hub ID, hub peer and direct Tailscale `hubAddress`. Invalid options are rejected before creating the directory. It refuses existing directories rather than silently reenrolling. `identity` reads local-daemon OS identity and hashes the actual executable; these self-reported values need independent operator approval, not automatic adoption or an attestation claim. `peer` projects just the local OS peer with exact decimal user strings. `run` holds an exclusive `writer.lock` and opens only native receipts at `operations/<id>.json`: no Harness, transcript, model, provider credentials, scheduler, or inbound worker listener. Do not retarget pins or clone a worker directory to run another writer.
 
-The hub's `--workers` private registry additionally specifies `listen` on each worker entry: a hub-side literal Tailscale IP and a distinct nonzero port. Up to eight worker entries are supported, each with exactly ordered `files,bash` capabilities; the broader registry schema retains up to 64 diagnostic/future-role entries. Remote `rex` capability is refused. Registries are immutable for the process lifetime. Revocation/changes require a controlled restart, not silent replacement. Tailscale ACLs should restrict these ports to the approved nodes. The hub checks the registry's `hubId` against its durable Pi identity before resuming work. `--workers` cannot be combined with `--stdio` or a custom runtime entry point.
+The hub's `--workers` private registry additionally specifies `listen` on each worker entry: a hub-side literal Tailscale IP and a distinct nonzero port. Up to eight worker entries are supported, each with exactly ordered `files,bash`, or `files,bash,rex` plus an approved `rexClient` pair; the broader registry schema retains up to 64 diagnostic/future-role entries. Files/bash-only workers continue to refuse every Rex operation. Registries are immutable for the process lifetime. Revocation/changes require a controlled restart, not silent replacement. Tailscale ACLs should restrict these ports to the approved nodes. The hub checks the registry's `hubId` against its durable Pi identity before resuming work. `--workers` cannot be combined with `--stdio` or a custom runtime entry point.
 
-A worker establishes outbound data and control TCP connections to its assigned listener. Both sockets independently verify the actual peer through the local Tailscale daemon. The data challenge/hello pins hub, machine, implementation, capabilities and connection generation; the control header must bind the same generation and verified peer. Only then can native requests flow. HTTP/chat commands are not accepted by this protocol. OS-machine authority is not OS-user authentication; the hello fingerprint is a compatibility pin, not hardware attestation.
+A worker establishes outbound data and control TCP connections to its assigned listener. Both sockets independently verify the actual peer through the local Tailscale daemon. The data challenge/hello pins hub, machine, implementation, capabilities, optional client/socket pair and connection generation; subsequent channel headers bind the same generation and verified peer. Rex workers pair a third independently verified client socket before requests flow. No channel accepts HTTP; task RPC is confined to that optional third channel and hub-side allocation scope. OS-machine authority is not OS-user authentication; the hello fingerprint is a compatibility pin, not hardware attestation.
 
-Each host owns independent inherited native request/result/control pipes and one serialized gate owner. TypeScript routes by the exact saved `machineId`, using evented `uv_pipe` sockets for remote descriptors rather than occupying the filesystem threadpool. No labels, client PATH, default host, or current terminal can retarget a binding. Unregistered/offline hosts return `offline` without sending this attempt; that does not disprove effects from an earlier attempt, including before a hub restart. Remote Rex operations are rejected in both the router and worker, even if a caller forges a native request. This intentionally leaves remote interactive task creation/participation unavailable until the separately authenticated client path exists.
+Each host owns independent inherited native request/result/control pipes and one serialized gate owner. TypeScript routes by the exact saved `machineId`, using evented `uv_pipe` sockets for remote descriptors rather than occupying the filesystem threadpool. No labels, client PATH, default host, or current terminal can retarget a binding. Unregistered/offline hosts return `offline` without sending this attempt; that does not disprove effects from an earlier attempt, including before a hub restart. Remote Rex operations are rejected in both the router and worker unless the exact Rex/client registration was approved. Discovery, allocation, inspection and receipt lookup then use the assigned host's native implementation. The hub selects the registered client path/socket; native allocation checks them against worker config before invoking Rex. Existing API 8/10 and Unix-endpoint checks are unchanged; selected API 9/HTTPS probe evidence is not permission to widen them.
 
-The transport keeps at most 20 in-flight/result slots per host (16 effects plus four progress samples upstream), with 1 MiB frames; it never persists a second execution queue. Connect is bounded to four seconds, handshake frames to 4 KiB/five seconds, and control pairing to 20 seconds. Network frame reads/writes use absolute five-second deadlines, including partial progress; captures keep the verifier's existing limits. Control heartbeats run independently at one second with a five-second loss threshold. Cancellation uses its own bounded fixed-size records and retains a 16-ID cancellation ring across reconnection. Result backpressure cannot block control delivery. File/progress requests have a 30-second transport deadline; bash has its requested/default timeout plus five seconds. These deadlines establish uncertainty, **not rollback or file-effect drainage**.
+The transport keeps at most 20 in-flight/result slots per host (16 effects plus four progress samples upstream), with 1 MiB frames; it never persists a second execution queue. Connect is bounded to four seconds, handshake frames to 4 KiB/five seconds, and each additional channel pairing to 20 seconds. Network frame reads/writes use absolute five-second deadlines, including partial progress; captures keep the verifier's existing limits. Control heartbeats run independently at one second with a five-second loss threshold. Cancellation uses its own bounded fixed-size records and retains a 16-ID cancellation ring across reconnection. Result backpressure cannot block control delivery. File/progress requests have a 30-second transport deadline; bash has its requested/default timeout plus five seconds. These deadlines establish uncertainty, **not rollback or file-effect drainage**.
 
 Requests cross the network with their original bytes and IDs, preserving native hashes/receipt encodings. A lost, malformed, wrong-ID, or timed-out connection fences that generation; issued calls return `effect_uncertain`, pending transport bytes are dropped, and no effect is replayed. The worker cancels process groups and drains its existing native work before its reconnect loop proceeds. Backoff is 1, 2, 4 … up to 30 seconds; it reconnects sockets only. Reconnect does not make an old result healthy or complete. Explicit same-identity requests consult original receipts: completed matches return the retained result, changed bytes conflict, accepted-without-result stays uncertain, and corrupt receipts are not permission to execute. A general read-only receipt/reconciliation UI remains future work; there is no automatic reissue after reconnect.
 
 Worker shutdown/connection loss does not prove that accepted file effects finished or were undone. Stop and settle all hub work and independently resolve remote uncertainty before upgrades. Keep worker configuration and receipts together when backing up; the hub's backup cannot capture a remote worker directory. Never delete a held lock or run divergent restored clones. Approving a new binary digest is an explicit operator change. Retain immutable builds; do not overwrite a running executable.
 
-Tests cover real isolated loopback sockets with **injected verifier identities**, exact-byte lost-result recovery, cancellation under result pressure, host isolation, identity/digest refusal, and stale generation contracts. These are not a real two-machine Tailscale/Deck acceptance test. The earlier selected-peer HTTPS/Rex API 9 probe remains separate evidence, not remote worker or remote TUI support.
+Tests cover real isolated loopback sockets with **injected verifier identities**, exact-byte lost-result recovery, cancellation under result pressure, host isolation, identity/digest refusal, and stale generation contracts. These are not a real two-machine Tailscale/Deck acceptance test. The earlier selected-peer HTTPS/Rex API 9 probe remains separate evidence, not support for that endpoint.
+
+### Worker-link task clients
+
+See [operator setup](../README.md#enable-assigned-host-rex-task-clients). `worker init --client ABSOLUTE_DECK` explicitly adds `rexClient: {executable,socket}` to worker configuration; the socket is derived as `DIRECTORY/client.sock`. It does not install software, create a hub/store, contact Rex, or enroll anything. Existing workers can be changed only while stopped, preserving their identities and receipts. The full client is a separate installation; the native-only worker package retains its Node/Pi/renderer-free closure. The `client` registration boolean remains reserved diagnostic metadata, not permission for general remote hub commands.
+
+`src/task_relay.zig` supplies an ephemeral, framed RPC channel, not another executor. It binds a third outbound socket to the already approved peer/implementation/configuration and the same fresh link generation. Both ends verify `getpeername` through their local Tailscale daemon for this socket too. The effects/control streams and capacity remain independent. The worker publishes a mode-0600 Unix socket only inside its private state directory after successful pairing. It refuses existing non-socket paths, removes only its stale socket under the held worker lock, and closes/unlinks the endpoint on session loss. No inbound worker TCP listener or remote HTTP listener is added.
+
+Each worker allows eight task-client sockets/outstanding correlations, one request per local connection, with 1 MiB framed limits and no execution retries. Framing/flush deadlines remain absolute five seconds; clients abandon an unanswered call after ten seconds, and a worker fences a still-unanswered relay after fifteen seconds. The native hub keeps accepted in-flight calls, including partial private-pipe forwarding, until the original hub reply arrives: a detached request may already have applied or may still be admitted. This is bounded volatile transport, not a second durable command queue. Reconnect never resends it. Replies retain original generation, correlation and scope; old replies are consumed/discarded, not routed to successor sockets. All private RPC descriptors are preflighted against local/native/control descriptors and inherited only by the hub runtime. Local pipe corruption fences that host; network loss fences that generation and preserves native uncertainty.
+
+`runtime/src/remote-clients.ts` uses the existing runtime/dispatch, not loopback HTTP. The inherited route supplies the authoritative machine ID. A request must name the current managed ownerless task, coherent machine/cwd, hub, allocation, full Rex block, and approved client/socket from the retained allocation plan. Only status/history/startup are allowed before startup registration. Remaining reads, input, stop, import and idle-only model configuration require matching startup. Login, task creation/listing/switching, hub chat access, and Rex replacement are refused. Remote status omits global Pi inspection and opaque provider model parameters. Native and TS bridges continue to pin hub/task/client mode.
+
+Authorization runs before dispatch, after dispatch before releasing results, and again inside serialized mutation admission. Async-local guards are removed around actual Pi-owned execution so they do not become inherited authority/lifetime restrictions on background work. `stop` still acknowledges a request, not drainage. Replacing an allocation or changing approved client paths invalidates old task scope. Already admitted work is not rolled back by detach or revocation.
+
+`runtime/src/task-client.ts` is a client-only bounded Unix transport with no store, inference, retry, redirects or provider login. Both TUI and plain launch paths require explicit hub/task/allocation and native `REX_BLOCK` with `--worker-socket`; they register startup before accepting input. A failed initial startup exits, not restarts. Existing live clients can resume fresh reads after worker reconnection; mutations/settings remain uncertain until explicit recovery. Only the existing draft store retains exact pending input on the client.
+
+Hub `/task-at {"machineId":"32 hex ID","cwd":"/absolute/path","title":"Task"}` adds explicit creation targets to the existing draft/ACK/open sequence in both clients. It does not migrate existing chats or change `/task` defaults. JSON preserves paths/titles with spaces without shell parsing. The existing TUI command-line bound remains 256 UTF-8 bytes with command paste disabled; longer targets use the plain client. Both bridge validators reject mixed actions, noncanonical machine IDs, relative/NUL/oversized paths and oversized titles; task clients and read-only task inspectors cannot use it.
+
+Opt-in native integration (`DECK_TEST_REX` and `DECK_TEST_BINARY`, after `npm run build`) exercises actual inherited FIFOs, hub dispatch/Pi, all three loopback sockets with injected verification, the worker-local Unix proxy, native Rex allocation/inspection, a private supported Rex server and the real Zig TUI. It covers task-locked startup/input, same-process client reconnect, exact history preservation, and explicit same-conversation reopening. Ordinary tests cover wrong third-socket peers, stale reply fencing, role/scope refusal at admission, exact lost-ACK drafts and explicit deduplication. None of this substitutes for real two-machine acceptance.
 
 ### Commands
 

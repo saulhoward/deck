@@ -72,9 +72,9 @@ fn execute(io: Io, allocator: std.mem.Allocator, request: Request) !Result {
 }
 
 pub fn operation(native: Native, allocator: std.mem.Allocator, journal: Io.Dir, machine_id: []const u8, body: []const u8) ![]const u8 {
-    return controlled(native, allocator, journal, machine_id, body, null, null);
+    return controlled(native, allocator, journal, machine_id, body, null, null, null);
 }
-fn controlled(native: Native, allocator: std.mem.Allocator, journal: Io.Dir, machine_id: []const u8, body: []const u8, cancelled: ?*std.atomic.Value(bool), progress: ?shell.Progress) ![]const u8 {
+fn controlled(native: Native, allocator: std.mem.Allocator, journal: Io.Dir, machine_id: []const u8, body: []const u8, cancelled: ?*std.atomic.Value(bool), progress: ?shell.Progress, rex_client: ?contracts.WorkerRexClient) ![]const u8 {
     const io = native.io;
     const parsed = try boundary.parseRequest(allocator, body);
     defer parsed.deinit();
@@ -114,7 +114,7 @@ fn controlled(native: Native, allocator: std.mem.Allocator, journal: Io.Dir, mac
         // Persist acceptance before touching the workspace. An accepted operation without
         // a retained result is uncertain after restart and is never automatically reissued.
         try save(io, allocator, journal, name, .{ .hash = &hash });
-        result = (if (request.operation == .bash) shell.runObserved(native, allocator, request.cwd, request.args.command.?, @intCast(request.args.timeout orelse 60), cancelled orelse return error.Unsupported, progress) else if (request.operation == .rex_allocate) rex.allocate(native, allocator, request.cwd, request.args.plan.?, cancelled orelse return error.Unsupported) else execute(io, allocator, request)) catch |err| .{ .ok = false, .output = if (request.operation == .read) @errorName(err) else "effect_uncertain: file operation failed; inspect the file before retrying", .code = if (request.operation == .read) "read_failed" else "effect_uncertain" };
+        result = (if (request.operation == .bash) shell.runObserved(native, allocator, request.cwd, request.args.command.?, @intCast(request.args.timeout orelse 60), cancelled orelse return error.Unsupported, progress) else if (request.operation == .rex_allocate) rex.allocateUsing(native, allocator, request.cwd, request.args.plan.?, cancelled orelse return error.Unsupported, rex_client) else execute(io, allocator, request)) catch |err| .{ .ok = false, .output = if (request.operation == .read) @errorName(err) else "effect_uncertain: file operation failed; inspect the file before retrying", .code = if (request.operation == .read) "read_failed" else "effect_uncertain" };
         const checked = try resultFrame(allocator, request, result);
         allocator.free(checked);
         try save(io, allocator, journal, name, .{ .hash = &hash, .result = result });
@@ -223,6 +223,7 @@ const State = struct {
     output: Io.File,
     machine_id: []const u8,
     network: bool = false,
+    rex_client: ?contracts.WorkerRexClient = null,
     fn send(self: *State, response: []const u8) !void {
         errdefer if (self.network) {
             @import("remote_io.zig").shutdown(self.output.handle);
@@ -289,7 +290,7 @@ fn processJob(state: *State, slot: *Slot, body: []u8) void {
     defer arena.deinit();
     const allocator = arena.allocator();
     var progress = ProgressContext{ .state = state, .slot = slot };
-    const response = controlled(state.native, allocator, state.journal, state.machine_id, body, &slot.cancelled, .{ .context = &progress, .publish = ProgressContext.publish }) catch blk: {
+    const response = controlled(state.native, allocator, state.journal, state.machine_id, body, &slot.cancelled, .{ .context = &progress, .publish = ProgressContext.publish }, state.rex_client) catch blk: {
         const id = std.fmt.allocPrint(allocator, "{d}", .{slot.id}) catch return;
         break :blk std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = id, .result = Result{ .ok = false, .output = if (slot.id >= (@as(u64, 1) << 63)) "Inspection inconclusive" else "effect_uncertain: worker failed; inspect effects before retrying", .code = if (slot.id >= (@as(u64, 1) << 63)) "inspection_failed" else "effect_uncertain" } }, .{}) catch return;
     };
@@ -297,12 +298,15 @@ fn processJob(state: *State, slot: *Slot, body: []u8) void {
 }
 
 pub fn serve(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8) void {
-    serveImpl(native, read_fd, write_fd, control_fd, journal_path, machine_id, true);
+    serveImpl(native, read_fd, write_fd, control_fd, journal_path, machine_id, true, false, null);
 }
 pub fn serveRemote(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8) void {
-    serveImpl(native, read_fd, write_fd, control_fd, journal_path, machine_id, false);
+    serveImpl(native, read_fd, write_fd, control_fd, journal_path, machine_id, false, true, null);
 }
-fn serveImpl(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8, allow_rex: bool) void {
+pub fn serveRemoteClient(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8, client: contracts.WorkerRexClient) void {
+    serveImpl(native, read_fd, write_fd, control_fd, journal_path, machine_id, true, true, client);
+}
+fn serveImpl(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8, allow_rex: bool, network: bool, rex_client: ?contracts.WorkerRexClient) void {
     const io = native.io;
     const input = Io.File{ .handle = read_fd, .flags = .{ .nonblocking = false } };
     const output = Io.File{ .handle = write_fd, .flags = .{ .nonblocking = false } };
@@ -312,7 +316,7 @@ fn serveImpl(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, 
     defer if (control_owned) Native.close(control_fd);
     var journal = Io.Dir.cwd().openDir(io, journal_path, .{}) catch return;
     defer journal.close(io);
-    var state = State{ .native = native, .journal = journal, .output = output, .machine_id = machine_id, .network = !allow_rex };
+    var state = State{ .native = native, .journal = journal, .output = output, .machine_id = machine_id, .network = network, .rex_client = rex_client };
     const controller = std.Thread.spawn(.{}, control, .{ &state, control_fd }) catch return;
     control_owned = false;
     defer controller.join();
@@ -331,11 +335,11 @@ fn serveImpl(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, 
         var header: [4]u8 = undefined;
         const tcp = @import("remote_io.zig");
         const deadline = tcp.now(io) + 5000;
-        if (allow_rex) readExact(input, &header) catch return else tcp.readUntil(io, input.handle, &header, deadline) catch return;
+        if (!network) readExact(input, &header) catch return else tcp.readUntil(io, input.handle, &header, deadline) catch return;
         const length = std.mem.readInt(u32, &header, .big);
         if (length == 0 or length > frame_limit) return;
         const body = allocator.alloc(u8, length) catch return;
-        if (allow_rex) readExact(input, body) catch return else tcp.readUntil(io, input.handle, body, deadline) catch return;
+        if (!network) readExact(input, body) catch return else tcp.readUntil(io, input.handle, body, deadline) catch return;
         // Observed control failure refuses subsequent requests. In-flight file
         // operations still drain; process groups are independently cancelled.
         if (state.stopping.load(.acquire)) return;

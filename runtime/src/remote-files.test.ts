@@ -12,12 +12,19 @@ const local = "a".repeat(32), remote = "b".repeat(32);
 const routes = { hubId: "hub", hosts: [{ machineId: remote, readFd: 11, writeFd: 12, controlFd: 13 }] };
 test("native route projection rejects identity/descriptor aliasing before constructing pipes", () => {
   assert.deepEqual(parseRoutes(JSON.stringify(routes), local, [3, 4, 5, 6]), routes);
+  const interactive = { ...routes.hosts[0], rexClient: { executable: "/tools/deck", socket: "/private/worker/client.sock" }, clientReadFd: 14, clientWriteFd: 15 };
+  assert.deepEqual(parseRoutes(JSON.stringify({ ...routes, hosts: [interactive] }), local, [3, 4, 5, 6]).hosts[0], interactive);
   for (const value of [
     { ...routes, hosts: [routes.hosts[0], routes.hosts[0]] },
     { ...routes, hosts: [{ ...routes.hosts[0], machineId: local }] },
     { ...routes, hosts: [{ ...routes.hosts[0], readFd: 3 }] },
     { ...routes, hosts: [{ ...routes.hosts[0], writeFd: 11 }] },
     { ...routes, hosts: [{ ...routes.hosts[0], controlFd: 0 }] },
+    { ...routes, hosts: [{ ...interactive, clientReadFd: 11 }] },
+    { ...routes, hosts: [{ ...interactive, clientWriteFd: undefined }] },
+    { ...routes, hosts: [{ ...interactive, rexClient: undefined }] },
+    { ...routes, hosts: [{ ...interactive, rexClient: { ...interactive.rexClient, executable: "relative" } }] },
+    { ...routes, hosts: [{ ...interactive, rexClient: { ...interactive.rexClient, socket: "/bad\0socket" } }] },
     { ...routes, verified: true },
     { ...routes, hosts: [{ ...routes.hosts[0], extra: true }] },
   ]) assert.throws(() => parseRoutes(JSON.stringify(value), local, [3, 4, 5, 6]));
@@ -87,6 +94,21 @@ for (const standalone of [false, true]) test(`${standalone ? "standalone" : "dec
     assert.equal(projected.implementation, createHash("sha256").update(raw).digest("hex"));
     const peer = spawnSync(executable, [...prefix, "peer", "--tailscale", fake], { encoding: "utf8" });
     assert.equal(peer.status, 0, peer.stderr); assert.deepEqual(JSON.parse(peer.stdout), projected.peer);
+    const clientRoot = await mkdtemp(join(tmpdir(), "drc-"));
+    try {
+      const clientDirectory = join(clientRoot, "worker"); const clientArgs = [...args]; clientArgs[clientArgs.indexOf(directory)] = clientDirectory;
+      clientArgs.push("--client", resolve(binary!));
+      const created = spawnSync(executable, clientArgs, { encoding: "utf8" }); assert.equal(created.status, 0, created.stderr);
+      const identityArgs = [...prefix, "identity", "--directory", clientDirectory, "--tailscale", fake];
+      const identity = spawnSync(executable, identityArgs, { encoding: "utf8" }); assert.equal(identity.status, 0, identity.stderr);
+      const interactive = JSON.parse(identity.stdout); assert.deepEqual(interactive.capabilities, ["files", "bash", "rex"]);
+      assert.deepEqual(interactive.rexClient, { executable: resolve(binary!), socket: join(clientDirectory, "client.sock") });
+      assert.equal(interactive.implementation, projected.implementation);
+      const savedClient = JSON.parse(await readFile(join(clientDirectory, "worker.json"), "utf8"));
+      savedClient.rexClient.socket = join(clientRoot, "different.sock"); await writeFile(join(clientDirectory, "worker.json"), JSON.stringify(savedClient));
+      assert.notEqual(spawnSync(executable, identityArgs).status, 0, "a worker cannot publish a socket outside its pinned directory");
+      assert.deepEqual((await readdir(clientDirectory)).sort(), ["worker.json", "writer.lock"]);
+    } finally { await rm(clientRoot, { recursive: true, force: true }); }
     assert.notEqual(spawnSync(executable, [...prefix, "serve", "--directory", directory]).status, 0);
     const invalid = [...args]; invalid[invalid.indexOf(directory)] = join(parent, "invalid"); invalid[invalid.length - 1] = "18446744073709551616";
     assert.notEqual(spawnSync(executable, invalid).status, 0); await assert.rejects(stat(join(parent, "invalid")), {code:"ENOENT"});

@@ -39,6 +39,9 @@ fn sameServer(native: Native, allocator: std.mem.Allocator, cwd: []const u8, pla
 }
 
 pub fn allocate(native: Native, allocator: std.mem.Allocator, cwd: []const u8, encoded: []const u8, cancelled: *std.atomic.Value(bool)) !Result {
+    return allocateUsing(native, allocator, cwd, encoded, cancelled, null);
+}
+pub fn allocateUsing(native: Native, allocator: std.mem.Allocator, cwd: []const u8, encoded: []const u8, cancelled: *std.atomic.Value(bool), approved: ?contracts.WorkerRexClient) !Result {
     if (encoded.len > 16 * 1024) return refuse("invalid");
     const parsed = contracts.parseRexAllocationPlan(allocator, encoded) catch return refuse("invalid");
     defer parsed.deinit();
@@ -47,9 +50,13 @@ pub fn allocate(native: Native, allocator: std.mem.Allocator, cwd: []const u8, e
     // Only our own Deck client (the packaged wrapper when present), never an
     // arbitrary process/runner chosen by a model or a public caller.
     const executable = try std.process.executablePathAlloc(native.io, allocator);
-    const client = if (std.mem.eql(u8, std.fs.path.basename(executable), ".deck-wrapped")) try std.fs.path.join(allocator, &.{ std.fs.path.dirname(executable).?, "deck" }) else executable;
+    const client = if (approved) |c| c.executable else if (std.mem.eql(u8, std.fs.path.basename(executable), ".deck-wrapped")) try std.fs.path.join(allocator, &.{ std.fs.path.dirname(executable).?, "deck" }) else executable;
+    if (approved) |c| {
+        if (plan.workerSocket == null or plan.allocationId == null or !std.mem.eql(u8, plan.client, c.executable) or !std.mem.eql(u8, plan.workerSocket.?, c.socket)) return refuse("invalid");
+    } else if (plan.workerSocket != null) return refuse("invalid");
     const requested = std.Io.Dir.cwd().realPathFileAlloc(native.io, plan.client, allocator) catch return refuse("invalid");
-    if (!std.mem.eql(u8, requested, client)) return refuse("invalid");
+    const expected = std.Io.Dir.cwd().realPathFileAlloc(native.io, client, allocator) catch return refuse("invalid");
+    if (!std.mem.eql(u8, requested, expected)) return refuse("invalid");
     if (cancelled.load(.acquire)) return refuse("cancelled");
     if (!(sameServer(native, allocator, cwd, plan, cancelled) catch false)) return refuse(if (cancelled.load(.acquire)) "cancelled" else "server_unavailable");
     if (cancelled.load(.acquire)) return refuse("cancelled");
@@ -64,6 +71,7 @@ pub fn allocate(native: Native, allocator: std.mem.Allocator, cwd: []const u8, e
     }
     try launch.appendSlice(&.{ "--json", "--cwd", cwd, "--shell=none", "--keep-open", "--", client, "agent", "--tui", "--port", port, "--task", plan.chatId, "--hub-id", plan.hubId });
     if (plan.allocationId) |allocation| try launch.appendSlice(&.{ "--rex-allocation", allocation });
+    if (plan.workerSocket) |socket| try launch.appendSlice(&.{ "--worker-socket", socket });
     const created = cli(native, allocator, cwd, plan, launch.items, cancelled) catch return refuse("effect_uncertain");
     if (!created.ok or cancelled.load(.acquire)) return refuse("effect_uncertain");
     const Window = struct { window_id: []const u8, block_ids: [][]const u8 };

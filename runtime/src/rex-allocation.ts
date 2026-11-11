@@ -6,7 +6,7 @@ import type { HostFiles } from "./host-files.js";
 import { validRexUuid, validRexBlockId, validRexCreation, type RexAllocationPlan } from "./generated/contracts.js";
 
 export const REX_KIND = "deck.rex-allocation";
-export type RexTarget = Pick<RexAllocationPlan, "executable" | "server" | "hostId" | "instanceId" | "client" | "port">;
+export type RexTarget = Pick<RexAllocationPlan, "executable" | "server" | "hostId" | "instanceId" | "client" | "port" | "workerSocket">;
 // Domain intent never generates a null UUID; the native wire also accepts legacy null.
 export type RexPlan = Omit<RexAllocationPlan, "allocationId"> & { allocationId?: string };
 export type RexBinding = Binding & { server: string; hostId: string; instanceId: string; sessionId: string; windowId: string; blockId: string; chatId: string; hubId: string; taskId: string; readiness: "not_checked" };
@@ -29,7 +29,8 @@ const uuid = rexUuid;
 const absolute = (value: unknown): value is string => typeof value === "string" && Buffer.byteLength(value) <= 4096 && isAbsolute(value) && !value.includes("\0");
 export function rexTarget(value: RexTarget): RexTarget {
   if (!value || !absolute(value.executable) || !absolute(value.client) || typeof value.server !== "string" || rexSocketPath(value.server) === undefined || !uuid(value.hostId) || !uuid(value.instanceId) || !Number.isInteger(value.port) || value.port < 1 || value.port > 65535) throw new Error("Invalid explicit local Rex target");
-  return { executable: value.executable, server: value.server, hostId: value.hostId, instanceId: value.instanceId, client: value.client, port: value.port };
+  if (value.workerSocket !== undefined && (!absolute(value.workerSocket) || Buffer.byteLength(value.workerSocket) > 100 || /[\r\n]/.test(value.workerSocket))) throw new Error("Invalid worker client socket");
+  return { executable: value.executable, server: value.server, hostId: value.hostId, instanceId: value.instanceId, client: value.client, port: value.port, ...(value.workerSocket === undefined ? {} : { workerSocket: value.workerSocket }) };
 }
 export async function rexCoherent(tx: Tx, id: ConversationId, expected?: Binding): Promise<boolean> {
   const chat = await tx.doc(ChatDoc, id); const agent = await tx.doc(AgentDoc, id);

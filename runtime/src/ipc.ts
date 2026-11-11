@@ -23,7 +23,7 @@ function text(value: unknown, name: string): string {
   return value;
 }
 
-async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, login?: Login): Promise<unknown> {
+export async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, login?: Login, taskClient = false): Promise<unknown> {
   if (request.hubId !== undefined) {
     if (typeof request.hubId !== "string" || !request.hubId || request.hubId.length > 200) throw new DeckError("invalid", "Invalid expected hub identity");
     if (request.hubId !== runtime.hubId) throw new DeckError("conflict", "Hub identity changed; reconnect to the intended hub. No command applied");
@@ -48,7 +48,7 @@ async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, 
       // Project Deck metadata without rewriting retained documents. Pi model
       // parameters and global inspection records remain compatible opaque data.
       const binding = saved && { machineId: saved.machineId, cwd: saved.cwd, kind: saved.kind, title: saved.title, ...(saved.parentChatId === undefined ? {} : { parentChatId: saved.parentChatId }), ...(saved.ownerTaskId === undefined ? {} : { ownerTaskId: saved.ownerTaskId }) };
-      return { implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, modelSettings: 1, rexStartup: 1, rexOpen: runtime.rexClient && runtime.localFiles ? 1 : 0, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding, activity: await runtime.harness.inspect(context), provider: model?.provider, model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
+      return { implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, modelSettings: 1, rexStartup: 1, rexOpen: runtime.rexClient && runtime.localFiles ? 1 : 0, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding, ...(taskClient ? {} : { activity: await runtime.harness.inspect(context) }), provider: model?.provider, model: taskClient && model ? { provider: model.provider, modelId: model.modelId } : model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
     }
     case "model_settings":
     case "set_model_settings": {
@@ -117,10 +117,13 @@ async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, 
     }
     case "stop": {
       if (!validMutationArgs("stop", args)) throw new DeckError("invalid", "Invalid stop arguments");
-      const chat = await runtime.chat(args.chatId);
-      // Pi owns cancellation and draining. Do not hold the command pipe while an
-      // already-issued native effect drains; this receipt is a request, not idle.
-      void chat.abort(context).catch(() => { process.stderr.write("deck runtime: stop failed; inspect activity\n"); });
+      // Remote scope is checked again inside admission. Keep trusted-local stop
+      // independent of other admission requests; neither path waits for drainage.
+      if (taskClient) await runtime.requestStop(args.chatId);
+      else {
+        const chat = await runtime.chat(args.chatId);
+        void chat.abort(context).catch(() => { process.stderr.write("deck runtime: stop failed; inspect activity\n"); });
+      }
       return { requested: true };
     }
     default: throw new DeckError("invalid", "Unknown command");

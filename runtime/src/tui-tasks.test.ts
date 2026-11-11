@@ -195,7 +195,7 @@ for (const rex of [false, true]) test(`plain client ${rex ? "Rex task locked" : 
     const child = spawn(process.execPath, [fileURLToPath(new URL("./client.js", import.meta.url)), "--port", String(f.port), "--task", "2", ...(rex ? ["--hub-id", hub, "--rex-allocation", hub] : [])], { env: { ...f.local.env, REX_BLOCK: `block:${hub}` } });
     const closed = once(child, "close"); let out = "", errors = "";
     child.stdout.on("data", c => { out += c; }); child.stderr.on("data", c => { errors += c; });
-    child.stdin.end(rex ? "/tasks\n/select 1\n/hub\n/main\n/task forbidden\n/status\nallowed task input\n/exit\n" : "forbidden input\n/stop\n/instructions load\n/retry\n/discard\n/exit\n");
+    child.stdin.end(rex ? "/tasks\n/select 1\n/hub\n/main\n/task forbidden\n/task-at {}\n/status\nallowed task input\n/exit\n" : "forbidden input\n/stop\n/instructions load\n/retry\n/discard\n/exit\n");
     assert.equal((await closed)[0], 0, errors);
     assert.match(errors, rex ? /locked/ : /Read-only/);
     assert.doesNotMatch(out, /OTHER_TASK_CONTENT/);
@@ -218,11 +218,30 @@ test("one-shot direct task input refuses without saving or sending; REX_BLOCK al
 });
 
 const binary = process.env.DECK_TEST_BINARY;
+for (const tui of [false, true]) test(`${tui ? "real PTY" : "plain client"}: /task-at saves exact explicit target and opens Rex without input`, { skip: tui && !binary, timeout: 30_000 }, async () => {
+  const f = await fixture();
+  try {
+    const target = { machineId: "b".repeat(32), cwd: "/remote path 🧪", title: " exact remote title " };
+    const command = `/task-at ${JSON.stringify(target)}`;
+    const child = tui
+      ? spawn("python3", [fileURLToPath(new URL("../../scripts/tui-pty-test.py", import.meta.url)), resolve(binary!), "agent", "--tui", "--port", String(f.port)], { env: { ...f.local.env, DECK_NODE: process.execPath } })
+      : spawn(process.execPath, [fileURLToPath(new URL("./client.js", import.meta.url)), "--port", String(f.port)], { env: f.local.env });
+    const closed = once(child, "close"); child.stdout.resume(); let errors = ""; child.stderr.on("data", b => { errors += b; });
+    child.stdin.end(tui ? JSON.stringify([{ wait: "history for 1" }, { keys: command }, { wait: "/task-at" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Task 3 created" }, { keys: ":q\r" }]) : `${command}\n/exit\n`);
+    assert.equal((await closed)[0], 0, errors);
+    const creation = f.requests.filter(r => r.command === "create_task"); assert.equal(creation.length, 1);
+    for (const [key, value] of Object.entries(target)) assert.equal(creation[0].args[key], value);
+    const opened = f.requests.filter(r => r.command === "rex_open"); assert.equal(opened.length, 1); assert.equal(opened[0].args.chatId, "3");
+    assert.ok(f.requests.indexOf(creation[0]) < f.requests.indexOf(opened[0]));
+    assert.ok(!f.requests.some(r => r.command === "admit"));
+    assert.deepEqual(await new DraftStore(hub, f.local.env.DECK_CLIENT_STATE_DIRECTORY).list(), []);
+  } finally { await f.close(); }
+});
 test("real PTY: allocation-registered Rex TUI participates but refuses every task-navigation path", { skip: !binary, timeout: 30_000 }, async () => {
   const f = await fixture();
   try {
     const steps: object[] = [{ wait: "history for 2" }, { wait: "task / Rex locked" }];
-    for (const cmd of ["/tasks", "/hub", "/main", "/select 1", "/task forbidden"]) steps.push({ keys: cmd }, { wait: "client idle" }, { keys: "\r" }, { wait: "Rex task client locked" });
+    for (const cmd of ["/tasks", "/hub", "/main", "/select 1", "/task forbidden", "/task-at {}"]) steps.push({ keys: cmd }, { wait: "client idle" }, { keys: "\r" }, { wait: "Rex task client locked" });
     // Command mode pauses polls and exposes precise transport readiness. A
     // neutral footer during normal editing does not mean Ctrl-S can be queued.
     steps.push({ keys: "iallowed in Rex" }, { keys: "\x1b" }, { keys: ":send" }, { wait: ":send" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Input admitted" }, { keys: ":q\r" });

@@ -31,7 +31,7 @@ export class RexInspector {
       }, context);
       if (!this.host) throw new DeckError("offline", "Rex discovery requires the assigned native worker");
       const result = await this.host.call(binding, this.readId(), "rex_resolve", { plan: JSON.stringify(options) }).catch(() => undefined);
-      if (!result?.ok) throw new DeckError(result?.code === "busy" ? "busy" : "offline", "Local Rex unavailable: put rex on the hub's PATH and start its local server, or supply explicit target overrides; no terminal requested");
+      if (!result?.ok) throw new DeckError(result?.code === "busy" ? "busy" : "offline", this.host.rexClientFor?.(binding.machineId) ? "Assigned worker Rex unavailable: put rex on that worker's PATH and start its local server, or supply explicit target overrides; no terminal requested" : "Local Rex unavailable: put rex on the hub's PATH and start its local server, or supply explicit target overrides; no terminal requested");
       let target: unknown;
       try { if (result.code === "rex_resolved" && !result.truncated && Buffer.byteLength(result.output) <= 16 * 1024) target = JSON.parse(result.output); } catch { /* Payload-free error below. */ }
       if (!validResolvedTarget(target) || (options.executable !== undefined && target.executable !== options.executable) || (options.server !== undefined && rexSocketPath(options.server) !== rexSocketPath(target.server)) || (options.hostId !== undefined && target.hostId !== options.hostId) || (options.instanceId !== undefined && target.instanceId !== options.instanceId)) throw new DeckError("invalid_response", "Invalid Rex target discovery response; no terminal requested");

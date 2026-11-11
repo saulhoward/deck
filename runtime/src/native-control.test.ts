@@ -21,7 +21,9 @@ test("invalid native cancellation identity cancels accepted processes and refuse
       writeSync(Number(args[8]),Buffer.alloc(8)); // Zero cannot name an operation.
       const exact=n=>{const b=Buffer.alloc(n);let used=0;while(used<n){const got=readSync(Number(args[6]),b,used,n-used,null);assert.notEqual(got,0);used+=got;}return b;};
       const reply=JSON.parse(exact(exact(4).readUInt32BE()).toString());assert.equal(reply.result.code,'cancelled');
-      send('2','write',{path:'must-not-exist',content:'PRIVATE'});
+      // The fenced reader may already be closed when the cancelled reply arrives.
+      try { send('2','write',{path:'must-not-exist',content:'PRIVATE'}); }
+      catch (error) { assert.equal(error.code,'EPIPE'); }
       assert.equal(readSync(Number(args[6]),Buffer.alloc(4),0,4,null),0);
       console.log('control failure fenced');
     `);

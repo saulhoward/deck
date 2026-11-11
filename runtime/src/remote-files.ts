@@ -3,7 +3,8 @@
 import { fstatSync } from "node:fs";
 import { PipeFiles, type HostFiles, type FileResult, type ShellProgress } from "./host-files.js";
 import type { Binding } from "./deck.js";
-import { validRemoteRuntimeRoutes, type RemoteRuntimeRoutes, type NativeArguments } from "./generated/contracts.js";
+import { validRexClient } from "./remote-contracts.js";
+import { validRemoteRuntimeRoutes, type WorkerRexClient, type RemoteRuntimeRoutes, type NativeArguments } from "./generated/contracts.js";
 export function parseRoutes(bytes: string, localMachine: string, reserved: number[]): RemoteRuntimeRoutes {
   const value: unknown = JSON.parse(bytes);
   if (!validRemoteRuntimeRoutes(value)) throw new Error("Invalid native worker routes");
@@ -11,7 +12,8 @@ export function parseRoutes(bytes: string, localMachine: string, reserved: numbe
   for (const host of value.hosts) {
     if (machines.has(host.machineId)) throw new Error("Duplicate native worker route");
     machines.add(host.machineId);
-    for (const fd of [host.readFd, host.writeFd, host.controlFd]) {
+    if (!!host.rexClient !== (host.clientReadFd !== undefined && host.clientWriteFd !== undefined) || (!host.rexClient && (host.clientReadFd !== undefined || host.clientWriteFd !== undefined)) || (host.rexClient && !validRexClient(host.rexClient))) throw new Error("Invalid worker client route");
+    for (const fd of [host.readFd, host.writeFd, host.controlFd, ...(host.rexClient ? [host.clientReadFd!, host.clientWriteFd!] : [])]) {
       if (fds.has(fd)) throw new Error("Duplicate native worker descriptor"); fds.add(fd);
     }
   }
@@ -19,18 +21,20 @@ export function parseRoutes(bytes: string, localMachine: string, reserved: numbe
 }
 export class RoutedFiles implements HostFiles {
   private readonly remotes = new Map<string, PipeFiles>();
+  private readonly clients = new Map<string, WorkerRexClient>();
+  rexClientFor(machineId: string) { return this.clients.get(machineId); }
   constructor(private readonly machineId: string, private readonly local: PipeFiles, routes: RemoteRuntimeRoutes) {
-    for (const host of routes.hosts) for (const fd of [host.readFd, host.writeFd, host.controlFd]) {
+    for (const host of routes.hosts) for (const fd of [host.readFd, host.writeFd, host.controlFd, ...(host.rexClient ? [host.clientReadFd!, host.clientWriteFd!] : [])]) {
       const stat = fstatSync(fd); if (!stat.isFIFO() && !stat.isSocket()) throw new Error("Invalid native worker pipe");
     }
-    try { for (const host of routes.hosts) this.remotes.set(host.machineId, new PipeFiles(host.readFd, host.writeFd, host.controlFd, true)); }
+    try { for (const host of routes.hosts) { this.remotes.set(host.machineId, new PipeFiles(host.readFd, host.writeFd, host.controlFd, true)); if (host.rexClient) this.clients.set(host.machineId, host.rexClient); } }
     catch (error) { for (const remote of this.remotes.values()) void remote.close(); throw error; }
   }
   call(binding: Binding, id: string, operation: string, args: NativeArguments, signal?: AbortSignal, onProgress?: (progress: ShellProgress) => void): Promise<FileResult> {
     if (binding.machineId === this.machineId) return this.local.call(binding, id, operation, args, signal, onProgress);
     signal?.throwIfAborted();
     const remote = this.remotes.get(binding.machineId);
-    if (!remote || !["read", "write", "edit", "bash"].includes(operation)) return Promise.resolve({ ok: false, code: "offline", output: "offline: assigned worker/capability unavailable; this attempt was not sent; earlier attempts may have happened; no local fallback" });
+    if (!remote || (!this.clients.has(binding.machineId) && !["read", "write", "edit", "bash"].includes(operation))) return Promise.resolve({ ok: false, code: "offline", output: "offline: assigned worker/capability unavailable; this attempt was not sent; earlier attempts may have happened; no local fallback" });
     return remote.call(binding, id, operation, args, signal, onProgress);
   }
   async close(): Promise<void> { await Promise.all([this.local.close(), ...[...this.remotes.values()].map(remote => remote.close())]); }

@@ -6,6 +6,7 @@ import { providers } from "./providers.js";
 import { DeckError, DeckRuntime } from "./deck.js";
 import { PipeFiles } from "./host-files.js";
 import { parseRoutes, RoutedFiles } from "./remote-files.js";
+import { serveWorkerClients } from "./remote-clients.js";
 import { serveIpc } from "./ipc.js";
 
 async function main() {
@@ -23,11 +24,13 @@ async function main() {
   try { if (routes) files = new RoutedFiles(machineId, local!, routes); }
   catch (error) { await local?.close(); throw error; }
   let runtime: DeckRuntime | undefined;
+  const clients: ReturnType<typeof serveWorkerClients>[] = [];
   let closing = false;
   const shutdown = async () => {
     if (closing) return;
     closing = true;
     process.stdin.destroy();
+    for (const client of clients) client.close();
     await provider.login?.close();
     await runtime?.close();
     await files?.close();
@@ -56,6 +59,7 @@ async function main() {
         })();
       }
     });
+    for (const host of routes?.hosts ?? []) if (host.rexClient) clients.push(serveWorkerClients(runtime, host.machineId, host.rexClient, host.clientReadFd!, host.clientWriteFd!));
     await serveIpc(runtime, process.stdin, process.stdout, provider.login);
   } finally { await shutdown(); }
 }

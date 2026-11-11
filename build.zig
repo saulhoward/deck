@@ -32,5 +32,8 @@ pub fn build(b: *std.Build) void {
     b.step("run", "Run the bootstrap CLI").dependOn(&run.step);
     const tests = b.addTest(.{ .root_module = module });
     const run_tests = b.addRunArtifact(tests);
+    // Socket/process tests and opt-in Rex checks depend on the live environment.
+    // A cached ordinary run must not stand in for an explicitly enabled check.
+    run_tests.has_side_effects = true;
     b.step("test", "Run Zig tests").dependOn(&run_tests.step);
 }

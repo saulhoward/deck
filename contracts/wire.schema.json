@@ -35,10 +35,14 @@
     "TailPeer": { "type": "object", "additionalProperties": false, "properties": { "nodeId": { "$ref": "#/$defs/TailNodeId" }, "userId": { "$ref": "#/$defs/TailUserId" } }, "required": ["nodeId", "userId"] },
     "WorkerCapability": { "enum": ["files", "bash", "rex"] },
     "WorkerCapabilities": { "type": "array", "minItems": 1, "maxItems": 3, "items": { "$ref": "#/$defs/WorkerCapability" } },
+    "WorkerRexClient": { "type": "object", "additionalProperties": false, "properties": { "executable": { "type": "string", "minLength": 1, "maxLength": 4096 }, "socket": { "type": "string", "minLength": 1, "maxLength": 100 } }, "required": ["executable", "socket"] },
+    "TaskClientScope": { "type": "object", "additionalProperties": false, "properties": { "hubId": { "$ref": "#/$defs/RexUuid" }, "chatId": { "$ref": "#/$defs/PiId" }, "allocationId": { "$ref": "#/$defs/RexUuid" }, "blockId": { "$ref": "#/$defs/RexBlockId" } }, "required": ["hubId", "chatId", "allocationId", "blockId"] },
+    "TaskClientRequest": { "type": "object", "additionalProperties": false, "properties": { "scope": { "$ref": "#/$defs/TaskClientScope" }, "body": { "type": "string", "minLength": 1, "maxLength": 1048576 } }, "required": ["scope", "body"] },
+    "TaskRelayFrame": { "type": "object", "additionalProperties": false, "properties": { "connectionId": { "$ref": "#/$defs/Sha256" }, "id": { "$ref": "#/$defs/Sha256" }, "scope": { "$ref": "#/$defs/TaskClientScope" }, "body": { "type": "string", "minLength": 1, "maxLength": 1048576 } }, "required": ["connectionId", "id", "scope", "body"] },
     "RemoteHost": {
       "description": "Local operator registration, not a peer claim. Worker implementation and capabilities must occur together; client-only registrations omit both.",
       "type": "object", "additionalProperties": false,
-      "properties": { "machineId": { "$ref": "#/$defs/MachineIdentity" }, "peer": { "$ref": "#/$defs/TailPeer" }, "client": { "type": "boolean" }, "implementation": { "$ref": "#/$defs/Sha256" }, "capabilities": { "$ref": "#/$defs/WorkerCapabilities" }, "listen": { "type": "string", "minLength": 1, "maxLength": 128 } }, "required": ["machineId", "peer", "client"]
+      "properties": { "machineId": { "$ref": "#/$defs/MachineIdentity" }, "peer": { "$ref": "#/$defs/TailPeer" }, "client": { "type": "boolean" }, "implementation": { "$ref": "#/$defs/Sha256" }, "capabilities": { "$ref": "#/$defs/WorkerCapabilities" }, "listen": { "type": "string", "minLength": 1, "maxLength": 128 }, "rexClient": { "$ref": "#/$defs/WorkerRexClient" } }, "required": ["machineId", "peer", "client"]
     },
     "RemoteRegistry": {
       "description": "Explicit pinned authority for one hub. Semantic validation rejects duplicate machine/node IDs, missing roles and noncanonical capabilities. Not network enrollment.",
@@ -53,19 +57,19 @@
     "RemoteWorkerHello": {
       "description": "A claim on an already peer-verified connection; never proof of identity. connectionId must match a fresh hub-issued challenge.",
       "type": "object", "additionalProperties": false,
-      "properties": { "version": { "const": 1 }, "hubId": { "$ref": "#/$defs/TransportId" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "connectionId": { "$ref": "#/$defs/Sha256" }, "implementation": { "$ref": "#/$defs/Sha256" }, "capabilities": { "$ref": "#/$defs/WorkerCapabilities" } }, "required": ["version", "hubId", "machineId", "connectionId", "implementation", "capabilities"]
+      "properties": { "version": { "const": 1 }, "hubId": { "$ref": "#/$defs/TransportId" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "connectionId": { "$ref": "#/$defs/Sha256" }, "implementation": { "$ref": "#/$defs/Sha256" }, "capabilities": { "$ref": "#/$defs/WorkerCapabilities" }, "rexClient": { "$ref": "#/$defs/WorkerRexClient" } }, "required": ["version", "hubId", "machineId", "connectionId", "implementation", "capabilities"]
     },
     "RemoteWorkerConfig": {
       "type": "object", "additionalProperties": false,
-      "properties": { "version": { "const": 1 }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "hubId": { "$ref": "#/$defs/TransportId" }, "hubPeer": { "$ref": "#/$defs/TailPeer" }, "hubAddress": { "type": "string", "minLength": 1, "maxLength": 128 } }, "required": ["version", "machineId", "hubId", "hubPeer", "hubAddress"]
+      "properties": { "version": { "const": 1 }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "hubId": { "$ref": "#/$defs/TransportId" }, "hubPeer": { "$ref": "#/$defs/TailPeer" }, "hubAddress": { "type": "string", "minLength": 1, "maxLength": 128 }, "rexClient": { "$ref": "#/$defs/WorkerRexClient" } }, "required": ["version", "machineId", "hubId", "hubPeer", "hubAddress"]
     },
     "RemoteRuntimeRoutes": {
       "type": "object", "additionalProperties": false,
-      "properties": { "hubId": { "$ref": "#/$defs/TransportId" }, "hosts": { "type": "array", "maxItems": 8, "items": { "type": "object", "additionalProperties": false, "properties": { "machineId": { "$ref": "#/$defs/MachineIdentity" }, "readFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "writeFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "controlFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 } }, "required": ["machineId", "readFd", "writeFd", "controlFd"] } } }, "required": ["hubId", "hosts"]
+      "properties": { "hubId": { "$ref": "#/$defs/TransportId" }, "hosts": { "type": "array", "maxItems": 8, "items": { "type": "object", "additionalProperties": false, "properties": { "machineId": { "$ref": "#/$defs/MachineIdentity" }, "readFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "writeFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "controlFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "clientReadFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "clientWriteFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "rexClient": { "$ref": "#/$defs/WorkerRexClient" } }, "required": ["machineId", "readFd", "writeFd", "controlFd"] } } }, "required": ["hubId", "hosts"]
     },
     "RemoteLinkHeader": {
       "type": "object", "additionalProperties": false,
-      "properties": { "version": { "const": 1 }, "channel": { "enum": ["data", "control"] }, "hubId": { "$ref": "#/$defs/TransportId" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "connectionId": { "$ref": "#/$defs/Sha256" } }, "required": ["version", "channel", "hubId", "machineId"]
+      "properties": { "version": { "const": 1 }, "channel": { "enum": ["data", "control", "clients"] }, "hubId": { "$ref": "#/$defs/TransportId" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "connectionId": { "$ref": "#/$defs/Sha256" } }, "required": ["version", "channel", "hubId", "machineId"]
     },
     "NativeOperation": { "enum": ["read", "write", "edit", "bash", "bash_progress", "rex_allocate", "rex_inspect", "rex_resolve", "rex_allocation_receipt"] },
     "NativeCorrelationId": { "type": "string", "minLength": 1, "maxLength": 32 },
@@ -442,6 +446,7 @@
         "hostId": { "$ref": "#/$defs/RexUuid" },
         "instanceId": { "$ref": "#/$defs/RexUuid" },
         "client": { "type": "string", "minLength": 1, "maxLength": 4096 },
+        "workerSocket": { "type": "string", "minLength": 1, "maxLength": 100 },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "hubId": { "$ref": "#/$defs/RexUuid" },
         "chatId": { "$ref": "#/$defs/ChatId" },
@@ -548,10 +553,11 @@
       "required": ["version", "operationId", "requestHash", "state", "creation"],
       "additionalProperties": false
     },
+    "TaskCreationTarget": { "type": "object", "additionalProperties": false, "properties": { "machineId": { "$ref": "#/$defs/MachineIdentity" }, "cwd": { "$ref": "#/$defs/NativePath" }, "title": { "type": "string", "minLength": 1, "maxLength": 200 } }, "required": ["machineId", "cwd", "title"] },
     "TuiRequest": {
       "description": "Client-only renderer bridge, never a Pi execution channel. One outstanding request; no replay on loss.",
       "type": "object", "additionalProperties": false,
-      "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "action": { "enum": ["poll", "older", "latest", "send", "retry", "discard", "stop", "models", "configure", "tasks", "select", "create", "rexStatus", "rexInspect", "rexOpen"] }, "chatId": { "$ref": "#/$defs/PiId" }, "after": { "$ref": "#/$defs/PiId" }, "configuration": { "$ref": "#/$defs/ModelSettingsChange" }, "text": { "type": "string", "maxLength": 16384 }, "hold": { "type": "boolean" } }, "required": ["version", "id", "action"]
+      "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "action": { "enum": ["poll", "older", "latest", "send", "retry", "discard", "stop", "models", "configure", "tasks", "select", "create", "rexStatus", "rexInspect", "rexOpen"] }, "chatId": { "$ref": "#/$defs/PiId" }, "after": { "$ref": "#/$defs/PiId" }, "configuration": { "$ref": "#/$defs/ModelSettingsChange" }, "taskTarget": { "$ref": "#/$defs/TaskCreationTarget" }, "text": { "type": "string", "maxLength": 16384 }, "hold": { "type": "boolean" } }, "required": ["version", "id", "action"]
     },
     "TuiEntry": { "type": "object", "additionalProperties": false, "properties": { "id": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "role": { "enum": ["user", "assistant", "tool", "note"] }, "text": { "type": "string", "maxLength": 8192 } }, "required": ["id", "role", "text"] },
     "TuiDraft": { "description": "Display-only preview. Retry always uses the original DraftStore request, never this preview.", "type": "object", "additionalProperties": false, "properties": { "requestId": { "$ref": "#/$defs/DurableRequestId" }, "kind": { "enum": ["input", "task", "instructions"] }, "saved": { "type": "boolean" }, "text": { "type": "string", "maxLength": 16384 }, "clipped": { "type": "boolean" } }, "required": ["requestId", "kind", "saved", "text", "clipped"] },

@@ -7,6 +7,7 @@ const boundary = @import("native_contracts.zig");
 const trust = @import("remote_contracts.zig");
 const tcp = @import("remote_io.zig");
 const a = tcp.a;
+const relay = @import("task_relay.zig");
 pub const Verify = *const fn (Native, std.mem.Allocator, []const u8, std.Io.net.IpAddress, *std.atomic.Value(bool)) anyerror!std.json.Parsed(wire.TailPeer);
 pub const Link = struct {
     native: Native,
@@ -18,6 +19,7 @@ pub const Link = struct {
     input: tcp.fd_t,
     output: tcp.fd_t,
     control: tcp.fd_t,
+    clients: ?relay.Pipes = null,
     const Pending = struct {
         body: []u8,
         request: std.json.Parsed(wire.NativeRequest),
@@ -30,12 +32,17 @@ pub const Link = struct {
     const Connection = struct {
         data: tcp.fd_t,
         control: tcp.fd_t,
+        clients: ?tcp.fd_t = null,
         ticket: trust.Gate.Ticket,
         fn close(self: @This()) void {
             tcp.shutdown(self.data);
             tcp.shutdown(self.control);
             Native.close(self.data);
             Native.close(self.control);
+            if (self.clients) |fd| {
+                tcp.shutdown(fd);
+                Native.close(fd);
+            }
         }
     };
     fn verified(self: *Link, fd: tcp.fd_t) !void {
@@ -58,7 +65,7 @@ pub const Link = struct {
         if (intro.value.channel != .data or intro.value.connectionId != null or !std.mem.eql(u8, intro.value.hubId, self.registry.hubId) or !std.mem.eql(u8, intro.value.machineId, host.machineId)) return error.InvalidHandshake;
         const ticket = try gate.challenge(host.peer, host.machineId);
         errdefer _ = gate.disconnect(ticket);
-        const challenge: wire.RemoteWorkerHello = .{ .version = 1, .hubId = self.registry.hubId, .machineId = host.machineId, .connectionId = &ticket.connection, .implementation = host.implementation.?, .capabilities = host.capabilities.? };
+        const challenge: wire.RemoteWorkerHello = .{ .version = 1, .hubId = self.registry.hubId, .machineId = host.machineId, .connectionId = &ticket.connection, .implementation = host.implementation.?, .capabilities = host.capabilities.?, .rexClient = host.rexClient };
         try tcp.send(self.native.io, fd, challenge);
         const answer = try tcp.receive(self.native.io, fd);
         defer a.free(answer);
@@ -66,27 +73,38 @@ pub const Link = struct {
         defer hello.deinit();
         try gate.accept(host.peer, ticket, hello.value);
         try tcp.send(self.native.io, fd, wire.RemoteLinkHeader{ .version = 1, .channel = .data, .hubId = challenge.hubId, .machineId = challenge.machineId, .connectionId = challenge.connectionId });
-        var poll = [_]std.posix.pollfd{.{ .fd = self.listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
-        if (try std.posix.poll(&poll, 20000) == 0) return error.ControlUnavailable;
-        const control = try tcp.accept(self.listener.socket.handle);
+        const control = try self.pair(.control, ticket);
         errdefer Native.close(control);
-        try tcp.timeout(control);
-        try self.verified(control);
-        const control_bytes = try tcp.receive(self.native.io, control);
-        defer a.free(control_bytes);
-        const header = try wire.parseRemoteLinkHeader(a, control_bytes);
-        defer header.deinit();
-        if (header.value.channel != .control or header.value.connectionId == null or !std.mem.eql(u8, header.value.connectionId.?, &ticket.connection) or !std.mem.eql(u8, header.value.hubId, challenge.hubId) or !std.mem.eql(u8, header.value.machineId, host.machineId)) return error.InvalidHandshake;
-        try tcp.send(self.native.io, control, header.value);
+        const clients = if (host.rexClient != null) try self.pair(.clients, ticket) else null;
+        errdefer if (clients) |socket| Native.close(socket);
         try tcp.nonblock(fd, true);
-        try tcp.nonblock(control, true);
-        return .{ .data = fd, .control = control, .ticket = ticket };
+        return .{ .data = fd, .control = control, .clients = clients, .ticket = ticket };
+    }
+    fn pair(self: *Link, channel: @FieldType(wire.RemoteLinkHeader, "channel"), ticket: trust.Gate.Ticket) !tcp.fd_t {
+        var poll = [_]std.posix.pollfd{.{ .fd = self.listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
+        if (try std.posix.poll(&poll, 20000) == 0) return error.ChannelUnavailable;
+        const fd = try tcp.accept(self.listener.socket.handle);
+        errdefer Native.close(fd);
+        try tcp.timeout(fd);
+        try self.verified(fd);
+        const bytes = try tcp.receive(self.native.io, fd);
+        defer a.free(bytes);
+        const header = try wire.parseRemoteLinkHeader(a, bytes);
+        defer header.deinit();
+        if (header.value.channel != channel or header.value.connectionId == null or !std.mem.eql(u8, header.value.connectionId.?, &ticket.connection) or !std.mem.eql(u8, header.value.hubId, self.registry.hubId) or !std.mem.eql(u8, header.value.machineId, self.registry.hosts[self.index].machineId)) return error.InvalidHandshake;
+        try tcp.send(self.native.io, fd, header.value);
+        try tcp.nonblock(fd, true);
+        return fd;
     }
     pub fn serve(self: *Link) void {
         defer self.listener.deinit(self.native.io);
         defer Native.close(self.input);
         defer Native.close(self.output);
         defer Native.close(self.control);
+        defer if (self.clients) |pipes| {
+            Native.close(pipes.input);
+            Native.close(pipes.output);
+        };
         self.loop() catch {}; // Only this host's private pipes fence on local failure.
     }
     fn failure(queue: *tcp.Queue, request: wire.NativeRequest, uncertain: bool) !void {
@@ -102,6 +120,8 @@ pub const Link = struct {
         const io = self.native.io;
         for ([_]tcp.fd_t{ self.input, self.output, self.control, self.listener.socket.handle }) |fd| try tcp.nonblock(fd, true);
         var gate = trust.Gate.init(io, self.registry);
+        var client_relay: ?relay.Hub = if (self.clients) |pipes| try relay.Hub.init(pipes) else null;
+        defer if (client_relay) |*r| r.deinit();
         var connection: ?Connection = null;
         defer if (connection) |c| c.close();
         var input: tcp.Reader = .{};
@@ -135,6 +155,9 @@ pub const Link = struct {
                 .{ .fd = self.output, .events = if (to_pi.items.items.len > 0) std.posix.POLL.OUT else 0, .revents = 0 },
                 .{ .fd = if (connection) |c| c.data else -1, .events = std.posix.POLL.IN | (if (to_worker.items.items.len > 0) @as(i16, std.posix.POLL.OUT) else 0), .revents = 0 },
                 .{ .fd = if (connection) |c| c.control else -1, .events = std.posix.POLL.IN | (if (control_used > 0) @as(i16, std.posix.POLL.OUT) else 0), .revents = 0 },
+                .{ .fd = if (connection) |c| c.clients orelse -1 else -1, .events = std.posix.POLL.IN | (if (client_relay != null and client_relay.?.to_worker.items.items.len > 0) @as(i16, std.posix.POLL.OUT) else 0), .revents = 0 },
+                .{ .fd = if (self.clients) |p| p.input else -1, .events = std.posix.POLL.IN, .revents = 0 },
+                .{ .fd = if (self.clients) |p| p.output else -1, .events = if (client_relay != null and client_relay.?.to_pi.items.items.len > 0) std.posix.POLL.OUT else 0, .revents = 0 },
             };
             _ = try std.posix.poll(&polls, 100);
             // Always service cancellations independently of data/result pressure.
@@ -157,6 +180,10 @@ pub const Link = struct {
             }
             try to_pi.flush(self.output, null);
             var lost = false;
+            if (client_relay) |*r| r.step(io, if (connection) |c| c.clients else null, if (connection) |c| &c.ticket.connection else null) catch |err| {
+                if (err == error.ClientPipeFailed) return err;
+                lost = true;
+            };
             if (connection) |c| {
                 if (!gate.connected(c.ticket)) return error.StaleConnection;
                 if (tcp.now(io) - last_ping >= 1000 and control_used + 8 <= controls.len) {
@@ -218,6 +245,7 @@ pub const Link = struct {
                 }
                 if (lost) {
                     c.close();
+                    if (client_relay) |*r| r.disconnect();
                     connection = null;
                     _ = gate.disconnect(c.ticket);
                     to_worker.clear();
@@ -260,7 +288,7 @@ pub const Link = struct {
                         if (std.mem.eql(u8, p.request.value.id, request.id)) duplicate = true;
                     }
                     if (duplicate) return error.DuplicateRequest;
-                    if (connection == null or !std.mem.eql(u8, request.machineId, self.registry.hosts[self.index].machineId) or !supported(request.operation)) {
+                    if (connection == null or !std.mem.eql(u8, request.machineId, self.registry.hosts[self.index].machineId) or (!supported(request.operation) and self.clients == null)) {
                         try failure(&to_pi, request, false);
                     } else {
                         try to_worker.append(copy);

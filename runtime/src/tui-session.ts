@@ -20,12 +20,15 @@ export function displayText(value: string, bytes: number): string {
   for (const cp of clean) { const n = Buffer.byteLength(cp); if (used + n > bytes - 16) break; used += n; result += cp; }
   return result + "\n[view clipped]";
 }
+import { validTaskTarget } from "./task-target.js";
+
 export function validRequest(value: unknown): value is TuiRequest {
   if (!validTuiRequest(value)) return false;
   if (value.action === "select" ? !validSafePiId(value.chatId) : value.chatId !== undefined) return false;
   if (value.after !== undefined && (value.action !== "tasks" || !validSafePiId(value.after))) return false;
   if (value.hold !== undefined && value.action !== "poll") return false;
   if (value.action === "configure" ? value.configuration === undefined : value.configuration !== undefined) return false;
+  if (value.taskTarget !== undefined) return value.action === "create" && value.text === undefined && validTaskTarget(value.taskTarget);
   if (value.action === "send" || value.action === "create") return typeof value.text === "string" && value.text.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "").length > 0 && Buffer.byteLength(value.text) <= (value.action === "send" ? 16384 : 200);
   return value.text === undefined;
 }
@@ -195,8 +198,8 @@ export class TuiSession {
       case "create":
         if (!this.supportsRex) throw new Error("Rex support is required to create a task; no request sent");
         if (this.active || this.settingsUncertain) throw new Error("Resolve saved requests/settings before creating a task");
-        if (!this.binding) throw new Error("Saved workspace binding unavailable; no task requested");
-        this.active = { kind: "task", chatId: this.chatId!, requestId: randomUUID(), title: request.text!, ...this.binding }; this.activeSaved = false;
+        if (!request.taskTarget && !this.binding) throw new Error("Saved workspace binding unavailable; no task requested");
+        this.active = { kind: "task", chatId: this.chatId!, requestId: randomUUID(), title: request.text!, ...(request.taskTarget ?? this.binding!) }; this.activeSaved = false;
         await this.deliver(); break;
       case "rexStatus":
       case "rexInspect": {

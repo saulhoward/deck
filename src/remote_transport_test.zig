@@ -28,24 +28,32 @@ const Fixture = struct {
     output: tcp.fd_t,
     control: tcp.fd_t,
     a: std.mem.Allocator,
+    clients: ?[2]tcp.fd_t = null,
     fn init(a: std.mem.Allocator) !Fixture {
+        return initClient(a, null);
+    }
+    fn initClient(a: std.mem.Allocator, client: ?wire.WorkerRexClient) !Fixture {
         tcp.ignorePipe();
         const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
         const listener = try address.listen(io, .{ .reuse_address = true });
         const requests = try Native.pipe();
         const response = try Native.pipe();
         const control = try Native.pipe();
+        const client_requests = if (client != null) try Native.pipe() else null;
+        const client_replies = if (client != null) try Native.pipe() else null;
         const hosts = try a.alloc(wire.RemoteHost, 1);
-        hosts[0] = .{ .machineId = machine, .peer = peer, .client = false, .implementation = implementation, .capabilities = &worker.capabilities };
+        hosts[0] = .{ .machineId = machine, .peer = peer, .client = false, .implementation = implementation, .capabilities = worker.capabilitiesFor(client), .rexClient = client };
         const link = try a.create(Link);
-        link.* = .{ .native = Native.testing(), .registry = .{ .version = 1, .hubId = "hub", .hosts = hosts }, .index = 0, .tailscale = "test-only", .listener = listener, .verify = verified, .input = requests[0], .output = response[1], .control = control[0] };
+        link.* = .{ .native = Native.testing(), .registry = .{ .version = 1, .hubId = "hub", .hosts = hosts }, .index = 0, .tailscale = "test-only", .listener = listener, .verify = verified, .input = requests[0], .output = response[1], .control = control[0], .clients = if (client_requests) |r| .{ .output = r[1], .input = client_replies.?[0] } else null };
         const thread = try std.Thread.spawn(.{}, Link.serve, .{link});
         try tcp.nonblock(response[0], true);
-        return .{ .a = a, .link = link, .address = listener.socket.address, .thread = thread, .input = requests[1], .output = response[0], .control = control[1] };
+        if (client_requests) |r| try tcp.nonblock(r[0], true);
+        return .{ .a = a, .link = link, .address = listener.socket.address, .thread = thread, .input = requests[1], .output = response[0], .control = control[1], .clients = if (client_requests) |r| .{ r[0], client_replies.?[1] } else null };
     }
     fn deinit(self: *Fixture) void {
         Native.close(self.control);
         Native.close(self.input);
+        if (self.clients) |fds| for (fds) |fd| Native.close(fd);
         self.thread.join();
         Native.close(self.output);
     }
@@ -83,8 +91,10 @@ const Runner = struct {
     stop: std.atomic.Value(bool) = .init(false),
     thread: ?std.Thread = null,
     error_seen: ?anyerror = null,
+    client: ?wire.WorkerRexClient = null,
+    hub_id: []const u8 = "hub",
     fn run(self: *Runner) void {
-        worker.session(Native.testing(), .{ .version = 1, .hubId = "hub", .machineId = machine, .hubPeer = peer, .hubAddress = "test-injected-address" }, implementation, "test-only", self.journal, self.address, verified, &self.stop) catch |err| {
+        worker.session(Native.testing(), .{ .version = 1, .hubId = self.hub_id, .machineId = machine, .hubPeer = peer, .hubAddress = "test-injected-address", .rexClient = self.client }, implementation, "test-only", self.journal, self.address, verified, &self.stop) catch |err| {
             self.error_seen = err;
         };
     }
@@ -92,7 +102,7 @@ const Runner = struct {
         const previous = checks.load(.monotonic);
         self.thread = try std.Thread.spawn(.{}, run, .{self});
         const start_time = tcp.now(io);
-        while (checks.load(.monotonic) < previous + 4) {
+        while (checks.load(.monotonic) < previous + (if (self.client != null) @as(usize, 6) else 4)) {
             if (tcp.now(io) - start_time > 5000) return error.TestTimeout;
             try io.sleep(.fromMilliseconds(10), .awake);
         }
@@ -401,6 +411,255 @@ test "remote peer mismatch refuses before any handshake authority or native effe
     defer fixture.deinit();
     var stop_flag = std.atomic.Value(bool).init(false);
     try std.testing.expectError(error.PeerIdentityMismatch, worker.session(Native.testing(), .{ .version = 1, .hubId = "hub", .machineId = machine, .hubPeer = peer, .hubAddress = "test-only" }, implementation, "test-only", "/unused", fixture.address, wrongPeer, &stop_flag));
+    try fixture.send(try fixture.request("1", "/tmp", "write", .{ .path = "must-not-run", .content = "no" }));
+    try std.testing.expectEqualStrings("offline", (try fixture.reply()).object.get("code").?.string);
+}
+
+fn relayTemp(a: std.mem.Allocator) ![]const u8 {
+    var random: [8]u8 = undefined;
+    io.random(&random);
+    const name = try std.fmt.allocPrint(a, "dcr-{s}", .{std.fmt.bytesToHex(random, .lower)});
+    const root = try std.fs.path.join(a, &.{ Native.testing().environ.getPosix("TMPDIR") orelse "/tmp", name });
+    try std.Io.Dir.cwd().createDir(io, root, .fromMode(0o700));
+    return root;
+}
+fn clientConnect(path: []const u8) !std.Io.net.Stream {
+    const address = try std.Io.net.UnixAddress.init(path);
+    const deadline = tcp.now(io) + 5000;
+    while (tcp.now(io) < deadline) {
+        const stream = address.connect(io) catch {
+            try io.sleep(.fromMilliseconds(10), .awake);
+            continue;
+        };
+        errdefer stream.close(io);
+        try tcp.nonblock(stream.socket.handle, true);
+        return stream;
+    }
+    return error.TestTimeout;
+}
+fn relayRequest(a: std.mem.Allocator, fd: tcp.fd_t) !std.json.Parsed(wire.TaskRelayFrame) {
+    var reader: tcp.Reader = .{};
+    defer reader.deinit();
+    const deadline = tcp.now(io) + 5000;
+    while (tcp.now(io) < deadline) {
+        if (try reader.read(io, fd)) |bytes| return std.json.parseFromSlice(wire.TaskRelayFrame, a, bytes, .{ .allocate = .alloc_always });
+        try io.sleep(.fromMilliseconds(5), .awake);
+    }
+    return error.TestTimeout;
+}
+fn relayReply(a: std.mem.Allocator, fd: tcp.fd_t, request: wire.TaskRelayFrame, body: []const u8) !void {
+    var reply = request;
+    reply.body = body;
+    const bytes = try std.json.Stringify.valueAlloc(a, reply, .{});
+    defer a.free(bytes);
+    var header: [4]u8 = undefined;
+    std.mem.writeInt(u32, &header, @intCast(bytes.len), .big);
+    try tcp.writeAll(io, fd, &header);
+    try tcp.writeAll(io, fd, bytes);
+}
+test "verified third channel relays exact task calls; detach/reconnect never replays and stale results cannot reach successors" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const journal = try tmp.dir.realPathFileAlloc(io, ".", a);
+    const root = try relayTemp(a);
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    const client: wire.WorkerRexClient = .{ .executable = "/bin/echo", .socket = try std.fs.path.join(a, &.{ root, "client.sock" }) };
+    var fixture = try Fixture.initClient(a, client);
+    defer fixture.deinit();
+    var runner: Runner = .{ .address = fixture.address, .journal = journal, .client = client };
+    defer runner.end();
+    const before = checks.load(.monotonic);
+    try runner.start();
+    const local = try clientConnect(client.socket);
+    defer local.close(io);
+    try std.testing.expect(checks.load(.monotonic) >= before + 6); // both ends, all three actual sockets
+    const scope: wire.TaskClientScope = .{ .hubId = "12345678-1234-1234-1234-123456789abc", .chatId = "17", .allocationId = "12345678-1234-1234-1234-123456789abc", .blockId = "block:12345678-1234-1234-1234-123456789abc" };
+    // A full local frame that cannot fit the larger network envelope is refused
+    // locally; it must not fence native effects or other task clients.
+    const empty = try std.json.Stringify.valueAlloc(a, wire.TaskClientRequest{ .scope = scope, .body = "" }, .{});
+    const large = try a.alloc(u8, tcp.cap - empty.len);
+    @memset(large, 'x');
+    const oversized = try clientConnect(client.socket);
+    defer oversized.close(io);
+    const large_frame = try std.json.Stringify.valueAlloc(a, wire.TaskClientRequest{ .scope = scope, .body = large }, .{});
+    try std.testing.expectEqual(tcp.cap, large_frame.len);
+    var large_header: [4]u8 = undefined;
+    std.mem.writeInt(u32, &large_header, @intCast(large_frame.len), .big);
+    const deadline = tcp.now(io) + 5000;
+    try tcp.writeUntil(io, oversized.socket.handle, &large_header, deadline);
+    try tcp.writeUntil(io, oversized.socket.handle, large_frame, deadline);
+    var eof: [1]u8 = undefined;
+    try std.testing.expectError(error.EndOfStream, tcp.readUntil(io, oversized.socket.handle, &eof, tcp.now(io) + 5000));
+    const original = " \n{\"version\":1,\"id\":\"command\",\"command\":\"admit\",\"args\":{\"text\":\" exact 🧪 bytes \",\"requestId\":\"saved\"}}\n";
+    try tcp.send(io, local.socket.handle, wire.TaskClientRequest{ .scope = scope, .body = original });
+    const first = try relayRequest(a, fixture.clients.?[0]);
+    try std.testing.expectEqualStrings(original, first.value.body);
+    // Fill all eight client correlations without releasing a hub reply.
+    var additional: std.ArrayList(struct { stream: std.Io.net.Stream, request: wire.TaskRelayFrame }) = .empty;
+    defer {
+        for (additional.items) |item| item.stream.close(io);
+        additional.deinit(a);
+    }
+    for (0..7) |_| {
+        const stream = try clientConnect(client.socket);
+        errdefer stream.close(io);
+        try tcp.send(io, stream.socket.handle, wire.TaskClientRequest{ .scope = scope, .body = "{\"read\":true}" });
+        const request = try relayRequest(a, fixture.clients.?[0]);
+        try additional.append(a, .{ .stream = stream, .request = request.value });
+    }
+    // Independent effects/control still work with client capacity exhausted.
+    try fixture.send(try fixture.request("1", journal, "write", .{ .path = "parallel", .content = "native" }));
+    try std.testing.expect((try fixture.reply()).object.get("ok").?.bool);
+    const wrong_client = try std.json.Stringify.valueAlloc(a, wire.RexAllocationPlan{ .executable = "/bin/sh", .server = "unix:///tmp/not-contacted.sock", .hostId = scope.hubId, .instanceId = scope.hubId, .client = "/bin/false", .workerSocket = client.socket, .port = 52800, .hubId = scope.hubId, .chatId = scope.chatId, .label = "test", .allocationId = scope.allocationId }, .{});
+    try fixture.send(try fixture.request("2", journal, "rex_allocate", .{ .plan = wrong_client }));
+    try std.testing.expectEqualStrings("invalid", (try fixture.reply()).object.get("code").?.string);
+    try fixture.send(try fixture.request("3", journal, "bash", .{ .command = "sleep 20", .timeout = 30 }));
+    try fixture.cancel(3);
+    try std.testing.expectEqualStrings("cancelled", (try fixture.reply()).object.get("code").?.string);
+    for (additional.items) |item| {
+        try relayReply(a, fixture.clients.?[1], item.request, "{\"read\":true}");
+        const result = try tcp.receive(io, item.stream.socket.handle);
+        tcp.a.free(result);
+    }
+    runner.end();
+    try std.testing.expectError(error.FileNotFound, std.Io.Dir.cwd().statFile(io, client.socket, .{ .follow_symlinks = false }));
+    // Cleanup owns the original inode, not a later socket or regular-file replacement.
+    for ([_]bool{ false, true }) |replace_socket| {
+        var abandoned = try (try std.Io.net.UnixAddress.init(client.socket)).listen(io, .{ .kernel_backlog = 1 });
+        var abandoned_owned = true;
+        defer if (abandoned_owned) abandoned.deinit(io);
+        const inode = (try std.Io.Dir.cwd().statFile(io, client.socket, .{ .follow_symlinks = false })).inode;
+        try std.Io.Dir.cwd().deleteFile(io, client.socket);
+        var replacement: ?std.Io.net.Server = null;
+        defer if (replacement) |*server| server.deinit(io);
+        if (replace_socket) replacement = try (try std.Io.net.UnixAddress.init(client.socket)).listen(io, .{ .kernel_backlog = 1 }) else try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = client.socket, .data = "replacement" });
+        const replaced = try std.Io.Dir.cwd().statFile(io, client.socket, .{ .follow_symlinks = false });
+        if (replace_socket) try std.testing.expect(replaced.inode != inode);
+        @import("task_relay.zig").closeLocal(io, &abandoned, client.socket, inode);
+        abandoned_owned = false;
+        try std.testing.expectEqual(replaced.inode, (try std.Io.Dir.cwd().statFile(io, client.socket, .{ .follow_symlinks = false })).inode);
+        try std.Io.Dir.cwd().deleteFile(io, client.socket);
+    }
+    var dead: [1]u8 = undefined;
+    try std.testing.expectError(error.EndOfStream, tcp.readUntil(io, local.socket.handle, &dead, tcp.now(io) + 1000));
+    runner.stop.store(false, .release);
+    try runner.start();
+    const next = try clientConnect(client.socket);
+    defer next.close(io);
+    // The old original command may have committed at Pi. Its late reply must be
+    // consumed as old evidence, never sent to the new generation or re-executed.
+    try relayReply(a, fixture.clients.?[1], first.value, "{\"old\":true}");
+    try tcp.send(io, next.socket.handle, wire.TaskClientRequest{ .scope = scope, .body = "{\"read\":true}" });
+    const second = try relayRequest(a, fixture.clients.?[0]);
+    try std.testing.expectEqualStrings("{\"read\":true}", second.value.body);
+    try std.testing.expect(!std.mem.eql(u8, first.value.connectionId, second.value.connectionId));
+    try std.testing.expect(!std.mem.eql(u8, first.value.id, second.value.id));
+    try relayReply(a, fixture.clients.?[1], second.value, "{\"new\":true}");
+    const response = try tcp.receive(io, next.socket.handle);
+    defer tcp.a.free(response);
+    try std.testing.expectEqualStrings("{\"new\":true}", response);
+    // A forged response scope fences this host instead of delivering other-task data.
+    const forged_client = try clientConnect(client.socket);
+    defer forged_client.close(io);
+    try tcp.send(io, forged_client.socket.handle, wire.TaskClientRequest{ .scope = scope, .body = "{\"read\":true}" });
+    var third = (try relayRequest(a, fixture.clients.?[0])).value;
+    third.scope.chatId = "18";
+    try relayReply(a, fixture.clients.?[1], third, "{\"private\":true}");
+    try std.testing.expectError(error.EndOfStream, tcp.readUntil(io, forged_client.socket.handle, &dead, tcp.now(io) + 5000));
+}
+
+test "opt-in isolated Rex uses inherited client routes through actual verified worker sockets" {
+    const native = Native.testing();
+    if (native.environ.getPosix("DECK_TEST_REX") == null) return error.SkipZigTest;
+    const binary = native.environ.getPosix("DECK_TEST_BINARY") orelse return error.SkipZigTest;
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const root = try relayTemp(a);
+    defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+    var dir = try std.Io.Dir.cwd().openDir(io, root, .{});
+    defer dir.close(io);
+    try dir.createDir(io, "worker", .fromMode(0o700));
+    try dir.createDir(io, "ops", .fromMode(0o700));
+    const entry = "runtime/dist/task-relay.test.fixture.js";
+    var bootstrap = try std.process.spawn(io, .{ .argv = &.{ "node", entry, "init", root }, .stdin = .ignore, .stdout = .pipe, .stderr = .inherit });
+    defer {
+        if (bootstrap.id != null) bootstrap.kill(io);
+        Native.closeStreams(io, &bootstrap);
+    }
+    const id_bytes = try Native.readAll(io, bootstrap.stdout.?, a, 512);
+    const term = try bootstrap.wait(io);
+    bootstrap.id = null;
+    try std.testing.expect(term == .exited and term.exited == 0);
+    const hub_id = std.mem.trim(u8, id_bytes, "\r\n");
+    try std.testing.expect(wire.validRexUuid(.{ .string = hub_id }));
+    const client: wire.WorkerRexClient = .{ .executable = binary, .socket = try std.fs.path.join(a, &.{ root, "worker", "client.sock" }) };
+    const hosts = [_]wire.RemoteHost{.{ .machineId = machine, .peer = peer, .client = false, .implementation = implementation, .capabilities = worker.capabilitiesFor(client), .rexClient = client, .listen = "100.64.0.1:52901" }};
+    const registry = try std.json.Stringify.valueAlloc(a, wire.RemoteRegistry{ .version = 1, .hubId = hub_id, .hosts = &hosts }, .{});
+    const file = try dir.createFile(io, "registry.json", .{ .permissions = .fromMode(0o600) });
+    try file.writeStreamingAll(io, registry);
+    file.close(io);
+    const Loopback = struct {
+        fn bind(n: Native, _: std.Io.net.IpAddress) !std.Io.net.Server {
+            return (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(n.io, .{});
+        }
+    };
+    var hub = try @import("remote_hub.zig").Hub.initUsing(native, try std.fs.path.join(a, &.{ root, "registry.json" }), "test-only", "cccccccccccccccccccccccccccccccc", Loopback.bind);
+    defer hub.deinit();
+    hub.links.items[0].verify = verified;
+    try hub.start();
+    var runner: Runner = .{ .address = hub.links.items[0].listener.socket.address, .journal = try std.fs.path.join(a, &.{ root, "ops" }), .client = client, .hub_id = hub_id };
+    defer runner.end();
+    try runner.start();
+    const config = try hub.json();
+    defer tcp.a.free(config);
+    var child = try std.process.spawn(io, .{ .argv = &.{ "node", entry, "run", root, config }, .stdin = .ignore, .stdout = .pipe, .stderr = .inherit, .inherit_files = hub.inherit.items });
+    defer {
+        if (child.id) |pid| {
+            std.posix.kill(pid, .TERM) catch {};
+            _ = child.wait(io) catch {};
+            child.id = null;
+        }
+        Native.closeStreams(io, &child);
+    }
+    hub.closeChildEnds();
+    try waitFile(dir, "disconnect");
+    runner.end();
+    try waitFile(dir, "can-reconnect");
+    runner.stop.store(false, .release);
+    try runner.start();
+    try dir.writeFile(io, .{ .sub_path = "reconnected", .data = "" });
+    const output = try Native.readAll(io, child.stdout.?, a, 4096);
+    const finished = try child.wait(io);
+    child.id = null;
+    try std.testing.expect(finished == .exited and finished.exited == 0);
+    try std.testing.expectEqualStrings("verified native relay/Rex acceptance passed\n", output);
+}
+
+test "the worker independently refuses a wrong peer on its third socket before publishing a local client endpoint" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const client: wire.WorkerRexClient = .{ .executable = "/bin/echo", .socket = "/tmp/deck-must-not-listen/client.sock" };
+    var fixture = try Fixture.initClient(a, client);
+    defer fixture.deinit();
+    const Third = struct {
+        var count = std.atomic.Value(usize).init(0);
+        fn verify(n: Native, alloc: std.mem.Allocator, path: []const u8, address: std.Io.net.IpAddress, stop_flag: *std.atomic.Value(bool)) !std.json.Parsed(wire.TailPeer) {
+            const seen = try verified(n, alloc, path, address, stop_flag);
+            if (count.fetchAdd(1, .monotonic) == 2) {
+                seen.deinit();
+                return wrongPeer(n, alloc, path, address, stop_flag);
+            }
+            return seen;
+        }
+    };
+    var stop_flag = std.atomic.Value(bool).init(false);
+    try std.testing.expectError(error.PeerIdentityMismatch, worker.session(Native.testing(), .{ .version = 1, .hubId = "hub", .machineId = machine, .hubPeer = peer, .hubAddress = "test-only", .rexClient = client }, implementation, "test-only", "/unused", fixture.address, Third.verify, &stop_flag));
+    try std.testing.expectEqual(@as(usize, 3), Third.count.load(.monotonic));
     try fixture.send(try fixture.request("1", "/tmp", "write", .{ .path = "must-not-run", .content = "no" }));
     try std.testing.expectEqualStrings("offline", (try fixture.reply()).object.get("code").?.string);
 }

@@ -8,6 +8,10 @@ const tcp = @import("remote_io.zig");
 const state = @import("state.zig");
 const a = tcp.a;
 pub const capabilities = [_]wire.WorkerCapability{ .files, .bash };
+const rex_capabilities = [_]wire.WorkerCapability{ .files, .bash, .rex };
+pub fn capabilitiesFor(client: ?wire.WorkerRexClient) []const wire.WorkerCapability {
+    return if (client != null) &rex_capabilities else &capabilities;
+}
 var stopping = std.atomic.Value(bool).init(false);
 fn stop(_: std.posix.SIG) callconv(.c) void {
     stopping.store(true, .release);
@@ -39,6 +43,7 @@ pub fn load(native: Native, path: []const u8) !std.json.Parsed(wire.RemoteWorker
     const peer_value = try std.json.parseFromSlice(std.json.Value, a, bytes, .{});
     defer peer_value.deinit();
     if (!trust.validPeer(peer_value.value.object.get("hubPeer").?)) return error.InvalidWorkerConfig;
+    if (peer_value.value.object.get("rexClient")) |client| if (!trust.validRexClient(client)) return error.InvalidWorkerConfig;
     _ = try tailscale.endpoint(raw.value.hubAddress);
     return std.json.parseFromSlice(wire.RemoteWorkerConfig, a, bytes, .{ .allocate = .alloc_always });
 }
@@ -106,7 +111,7 @@ pub fn session(native: Native, config: wire.RemoteWorkerConfig, implementation: 
     const challenge = try wire.parseRemoteWorkerHello(a, bytes);
     defer challenge.deinit();
     const hello = challenge.value;
-    if (!std.mem.eql(u8, hello.hubId, config.hubId) or !std.mem.eql(u8, hello.machineId, config.machineId) or !std.mem.eql(u8, hello.implementation, implementation) or !std.mem.eql(wire.WorkerCapability, hello.capabilities, &capabilities)) return error.RegistrationMismatch;
+    if (!std.mem.eql(u8, hello.hubId, config.hubId) or !std.mem.eql(u8, hello.machineId, config.machineId) or !std.mem.eql(u8, hello.implementation, implementation) or !std.mem.eql(wire.WorkerCapability, hello.capabilities, capabilitiesFor(config.rexClient)) or !trust.sameRexClient(hello.rexClient, config.rexClient)) return error.RegistrationMismatch;
     try tcp.send(native.io, data, hello);
     var header: wire.RemoteLinkHeader = .{ .version = 1, .channel = .data, .hubId = config.hubId, .machineId = config.machineId, .connectionId = hello.connectionId };
     try ack(native.io, data, header);
@@ -116,6 +121,19 @@ pub fn session(native: Native, config: wire.RemoteWorkerConfig, implementation: 
     header.channel = .control;
     try tcp.send(native.io, control, header);
     try ack(native.io, control, header);
+    const clients = if (config.rexClient != null) try tcp.connect(address) else null;
+    defer if (clients) |fd| Native.close(fd);
+    if (clients) |fd| {
+        try verified(native, executable, fd, config.hubPeer, verify, stop_flag);
+        header.channel = .clients;
+        try tcp.send(native.io, fd, header);
+        try ack(native.io, fd, header);
+    }
+    var listener = if (config.rexClient) |client| try clientListener(native, client.socket) else null;
+    var listener_owned = true;
+    defer if (listener_owned) {
+        if (listener) |*local| @import("task_relay.zig").closeLocal(native.io, &local.server, config.rexClient.?.socket, local.inode);
+    };
     const pipe = try Native.pipe();
     var owned = true;
     defer if (owned) {
@@ -131,24 +149,64 @@ pub fn session(native: Native, config: wire.RemoteWorkerConfig, implementation: 
     var controller: Controller = .{ .native = native, .data = data, .remote = control, .local = pipe[1], .stop_flag = stop_flag };
     const thread = try std.Thread.spawn(.{}, Controller.run, .{&controller});
     owned = false;
-    input_owned = false;
-    output_owned = false;
+    var local_owned = true;
+    defer if (local_owned) Native.close(pipe[0]);
     defer {
         controller.done.store(true, .release);
         thread.join();
     }
-    std.Io.File.stderr().writeStreamingAll(native.io, "deck: worker connected (files/bash only; no Pi runtime)\n") catch {};
-    @import("worker.zig").serveRemote(native, input, output, pipe[0], journal, config.machineId);
+    const Relay = @import("task_relay.zig").Worker;
+    var relay: Relay = undefined;
+    var relay_thread: ?std.Thread = null;
+    if (clients) |fd| {
+        relay = .{ .native = native, .socket = fd, .listener = listener.?.server, .local_path = config.rexClient.?.socket, .local_inode = listener.?.inode, .generation = hello.connectionId, .stopping = &controller.done, .data = data, .control = control };
+        relay_thread = try std.Thread.spawn(.{}, Relay.serve, .{&relay});
+        listener_owned = false;
+    }
+    defer {
+        controller.done.store(true, .release);
+        if (clients) |fd| tcp.shutdown(fd);
+        if (relay_thread) |t| t.join();
+    }
+    input_owned = false;
+    output_owned = false;
+    local_owned = false;
+    std.Io.File.stderr().writeStreamingAll(native.io, if (clients != null) "deck: worker connected (files/bash/Rex task relay; no Pi runtime)\n" else "deck: worker connected (files/bash only; no Pi runtime)\n") catch {};
+    if (config.rexClient) |client| @import("worker.zig").serveRemoteClient(native, input, output, pipe[0], journal, config.machineId, client) else @import("worker.zig").serveRemote(native, input, output, pipe[0], journal, config.machineId);
+}
+const LocalListener = struct { server: std.Io.net.Server, inode: std.Io.File.INode };
+fn clientListener(native: Native, path: []const u8) !LocalListener {
+    const parent = try std.Io.Dir.cwd().statFile(native.io, std.fs.path.dirname(path) orelse return error.UnsafeClientSocket, .{ .follow_symlinks = false });
+    if (parent.kind != .directory or parent.permissions.toMode() & 0o077 != 0) return error.UnsafeClientSocket;
+    const previous = std.Io.Dir.cwd().statFile(native.io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+    if (previous) |s| {
+        if (s.kind != .unix_domain_socket) return error.UnsafeClientSocket;
+        try std.Io.Dir.cwd().deleteFile(native.io, path);
+    }
+    var server = try (try std.Io.net.UnixAddress.init(path)).listen(native.io, .{ .kernel_backlog = 8 });
+    var inode: ?std.Io.File.INode = null;
+    errdefer if (inode) |n| @import("task_relay.zig").closeLocal(native.io, &server, path, n) else server.deinit(native.io);
+    const observed = try std.Io.Dir.cwd().statFile(native.io, path, .{ .follow_symlinks = false });
+    if (observed.kind != .unix_domain_socket) return error.UnsafeClientSocket;
+    inode = observed.inode;
+    _ = try Native.fcntl(server.socket.handle, std.posix.F.SETFD, std.posix.FD_CLOEXEC);
+    try std.Io.Dir.cwd().setFilePermissions(native.io, path, .fromMode(0o600), .{});
+    return .{ .server = server, .inode = inode.? };
 }
 pub fn run(native: Native, args: []const []const u8) !void {
     if (args.len == 1 and std.mem.eql(u8, args[0], "--help")) {
         try std.Io.File.stdout().writeStreamingAll(native.io,
             \\deck-worker (also available as deck worker):
             \\  peer --tailscale ABSOLUTE_EXECUTABLE
-            \\  init --directory NEW_ABSOLUTE_DIRECTORY --hub-id HUB_ID --hub-address TAILSCALE_IP:PORT --hub-node STABLE_NODE_ID --hub-user DECIMAL_USER_ID
+            \\  init --directory NEW_ABSOLUTE_DIRECTORY --hub-id HUB_ID --hub-address TAILSCALE_IP:PORT --hub-node STABLE_NODE_ID --hub-user DECIMAL_USER_ID [--client /absolute/deck]
             \\  identity|run --directory ABSOLUTE_DIRECTORY --tailscale ABSOLUTE_EXECUTABLE
-            \\Explicit peer/implementation approval is required on the hub. Files/bash only.
-            \\No Pi store, inference, remote TUI, Rex allocation, or automatic effect replay.
+            \\Explicit peer/implementation approval is required. Default: files/bash only.
+            \\--client opts into Rex (local Unix, API 8/10) and a private task relay socket.
+            \\Approve its exact client path/socket and files,bash,rex capabilities on the hub.
+            \\No Pi store, inference, provider login, inbound TCP listener, or effect replay.
             \\
         );
         return;
@@ -160,15 +218,16 @@ pub fn run(native: Native, args: []const []const u8) !void {
     var hub_address: ?[]const u8 = null;
     var node: ?[]const u8 = null;
     var user: ?[]const u8 = null;
+    var client: ?[]const u8 = null;
     var i: usize = 1;
     while (i < args.len) : (i += 2) {
         if (i + 1 == args.len or args[i + 1].len == 0) return error.InvalidArguments;
-        const slot = if (std.mem.eql(u8, args[i], "--directory")) &directory else if (std.mem.eql(u8, args[i], "--tailscale")) &executable else if (std.mem.eql(u8, args[i], "--hub-id")) &hub_id else if (std.mem.eql(u8, args[i], "--hub-address")) &hub_address else if (std.mem.eql(u8, args[i], "--hub-node")) &node else if (std.mem.eql(u8, args[i], "--hub-user")) &user else return error.InvalidArguments;
+        const slot = if (std.mem.eql(u8, args[i], "--directory")) &directory else if (std.mem.eql(u8, args[i], "--tailscale")) &executable else if (std.mem.eql(u8, args[i], "--hub-id")) &hub_id else if (std.mem.eql(u8, args[i], "--hub-address")) &hub_address else if (std.mem.eql(u8, args[i], "--hub-node")) &node else if (std.mem.eql(u8, args[i], "--hub-user")) &user else if (std.mem.eql(u8, args[i], "--client")) &client else return error.InvalidArguments;
         if (slot.* != null) return error.InvalidArguments;
         slot.* = args[i + 1];
     }
     if (std.mem.eql(u8, args[0], "peer")) {
-        if (directory != null or hub_id != null or hub_address != null or node != null or user != null) return error.InvalidArguments;
+        if (directory != null or hub_id != null or hub_address != null or node != null or user != null or client != null) return error.InvalidArguments;
         const identity = try tailscale.localPeer(native, a, executable orelse return error.InvalidArguments);
         defer identity.deinit();
         const bytes = try std.json.Stringify.valueAlloc(a, identity.value, .{});
@@ -181,6 +240,8 @@ pub fn run(native: Native, args: []const []const u8) !void {
     if (!std.fs.path.isAbsolute(path)) return error.InvalidArguments;
     const initializing = std.mem.eql(u8, args[0], "init");
     if (!initializing and !std.mem.eql(u8, args[0], "identity") and !std.mem.eql(u8, args[0], "run")) return error.InvalidArguments;
+    const client_socket = try std.fs.path.join(a, &.{ path, "client.sock" });
+    defer a.free(client_socket);
     var initial: ?[]u8 = null;
     defer if (initial) |bytes| a.free(bytes);
     if (initializing) {
@@ -188,9 +249,14 @@ pub fn run(native: Native, args: []const []const u8) !void {
         var random: [16]u8 = undefined;
         native.io.random(&random);
         const machine = std.fmt.bytesToHex(random, .lower);
-        const config: wire.RemoteWorkerConfig = .{ .version = 1, .machineId = &machine, .hubId = hub_id.?, .hubAddress = hub_address.?, .hubPeer = .{ .nodeId = node.?, .userId = user.? } };
+        const config: wire.RemoteWorkerConfig = .{ .version = 1, .machineId = &machine, .hubId = hub_id.?, .hubAddress = hub_address.?, .hubPeer = .{ .nodeId = node.?, .userId = user.? }, .rexClient = if (client) |c| .{ .executable = c, .socket = client_socket } else null };
+        if (client) |c| {
+            try tailscale.validateExecutable(native, c);
+            if (client_socket.len > 100 or std.mem.indexOfAny(u8, c, "\x00\r\n") != null) return error.InvalidArguments;
+        }
         const bytes = try std.json.Stringify.valueAlloc(a, config, .{});
         initial = bytes;
+        if (bytes.len > 4096) return error.InvalidWorkerConfig;
         const parsed = try wire.parseRemoteWorkerConfig(a, bytes);
         defer parsed.deinit();
         const peer_json = try std.json.Stringify.valueAlloc(a, config.hubPeer, .{});
@@ -200,7 +266,7 @@ pub fn run(native: Native, args: []const []const u8) !void {
         if (!trust.validPeer(checked.value)) return error.InvalidPeer;
         _ = try tailscale.endpoint(config.hubAddress);
         try std.Io.Dir.cwd().createDir(native.io, path, .fromMode(0o700));
-    } else if (executable == null or hub_id != null or hub_address != null or node != null or user != null) return error.InvalidArguments;
+    } else if (executable == null or hub_id != null or hub_address != null or node != null or user != null or client != null) return error.InvalidArguments;
     const stat = try std.Io.Dir.cwd().statFile(native.io, path, .{ .follow_symlinks = false });
     if (stat.kind != .directory or stat.permissions.toMode() & 0o077 != 0) return error.UnsafeWorkerDirectory;
     var dir = try std.Io.Dir.cwd().openDir(native.io, path, .{});
@@ -220,13 +286,17 @@ pub fn run(native: Native, args: []const []const u8) !void {
     defer a.free(config_path);
     const config = try load(native, config_path);
     defer config.deinit();
+    if (config.value.rexClient) |c| {
+        if (!std.mem.eql(u8, c.socket, client_socket)) return error.UnsafeClientSocket;
+        try tailscale.validateExecutable(native, c.executable);
+    }
     const cli = executable orelse return error.InvalidArguments;
     try tailscale.validateExecutable(native, cli);
     const implementation = try digest(native);
     if (std.mem.eql(u8, args[0], "identity")) {
         const peer = try tailscale.localPeer(native, a, cli);
         defer peer.deinit();
-        const output = try std.json.Stringify.valueAlloc(a, wire.RemoteHost{ .machineId = config.value.machineId, .peer = peer.value, .client = false, .implementation = &implementation, .capabilities = &capabilities }, .{});
+        const output = try std.json.Stringify.valueAlloc(a, wire.RemoteHost{ .machineId = config.value.machineId, .peer = peer.value, .client = false, .implementation = &implementation, .capabilities = capabilitiesFor(config.value.rexClient), .rexClient = config.value.rexClient }, .{});
         defer a.free(output);
         try std.Io.File.stdout().writeStreamingAll(native.io, output);
         try std.Io.File.stdout().writeStreamingAll(native.io, "\n");

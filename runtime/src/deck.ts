@@ -51,6 +51,8 @@ function positiveId(id: string, kind: string): number {
 }
 function chatId(id: string): ConversationId { return positiveId(id, "conversation") as ConversationId; }
 export type Input = { requestId: string; text: string; mode: "steer" | "followUp"; origin?: { kind: "task-tool"; chatId: string; taskId: string } };
+import { AsyncLocalStorage } from "node:async_hooks";
+
 export type RuntimeOptions = {
   models: Models;
   model: { provider: string; modelId: string };
@@ -70,8 +72,15 @@ export type RuntimeOptions = {
 
 export class DeckRuntime {
   private tail: Promise<unknown> = Promise.resolve();
+  private readonly commandGuard = new AsyncLocalStorage<() => Promise<void>>();
+  async guardedCommand<T>(guard: () => Promise<void>, fn: () => Promise<T>): Promise<T> {
+    return this.commandGuard.run(guard, async () => { await guard(); const value = await fn(); await guard(); return value; });
+  }
+  requestStop(id: string): Promise<void> {
+    return this.serial(async () => { const chat = await this.chat(id); void chat.abort(context).catch(() => { process.stderr.write("deck runtime: stop failed; inspect activity\n"); }); });
+  }
   private readonly inspector: RexInspector;
-  private constructor(readonly harness: Harness, readonly main: Conversation, private readonly guard: () => Promise<void>, readonly localFiles: boolean, readonly hubId: string, readonly implementation: string, private readonly instructionTask: ReturnType<typeof instructionImport>["task"], private readonly rexTask: ReturnType<typeof rexAllocation>["task"], private readonly reconcileTask: ReturnType<typeof rexReconciliation>["task"], private readonly models: Models, private readonly defaultModel: ModelRef, host?: HostFiles, readonly rexClient?: string) { this.inspector = new RexInspector(this, host); }
+  private constructor(readonly harness: Harness, readonly main: Conversation, private readonly guard: () => Promise<void>, readonly localFiles: boolean, readonly hubId: string, readonly implementation: string, private readonly instructionTask: ReturnType<typeof instructionImport>["task"], private readonly rexTask: ReturnType<typeof rexAllocation>["task"], private readonly reconcileTask: ReturnType<typeof rexReconciliation>["task"], private readonly models: Models, private readonly defaultModel: ModelRef, private readonly host?: HostFiles, readonly rexClient?: string, private readonly localMachineId?: string) { this.inspector = new RexInspector(this, host); }
 
   static async open(path: string, options: RuntimeOptions): Promise<DeckRuntime> {
     let runtime: DeckRuntime | undefined;
@@ -129,7 +138,7 @@ export class DeckRuntime {
       }
       const hubId = await harness.commit(async (tx) => (await tx.doc(Identity)).id, context);
       // Bind Deck tool callbacks before recovered Pi tool tasks can run.
-      runtime = new DeckRuntime(harness, main, options.admissionGuard ?? (async () => {}), !!options.hostFiles, hubId, implementation, importer.task, rex.task, reconciler.task, options.models, { provider: options.model.provider, modelId: options.model.modelId }, options.hostFiles, options.rexClient);
+      runtime = new DeckRuntime(harness, main, options.admissionGuard ?? (async () => {}), !!options.hostFiles, hubId, implementation, importer.task, rex.task, reconciler.task, options.models, { provider: options.model.provider, modelId: options.model.modelId }, options.hostFiles, options.rexClient, options.binding.machineId);
       harness.resume();
       return runtime;
     } catch (error) {
@@ -140,7 +149,12 @@ export class DeckRuntime {
 
   // Serializes only admission/configuration commits, never generation or host effects.
   private serial<T>(fn: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(fn);
+    const guard = this.commandGuard.getStore();
+    const result = this.tail.then(async () => {
+      await guard?.();
+      // Scope this command's admission, not Pi-owned work it may schedule.
+      return this.commandGuard.exit(fn);
+    });
     this.tail = result.catch(() => {});
     return result;
   }
@@ -328,7 +342,11 @@ export class DeckRuntime {
     // Only first open resolves defaults. Never silently retarget saved attempts
     // after PATH/default server changes, nor resolve on the client's computer.
     const target = original?.plan ?? (validResolvedTarget(args.target) ? args.target : await this.inspector.resolveTarget(args.chatId, args.target ?? {}));
-    const saved = rexTarget({ ...target, client: this.rexClient, port: args.port });
+    const machine = (await this.harness.snapshot(ChatDoc, chat.id, context))?.machineId;
+    if (!machine) throw new DeckError("invalid", "Task has no saved execution binding");
+    const remote = machine === this.localMachineId ? undefined : this.host?.rexClientFor?.(machine);
+    if (machine !== this.localMachineId && !remote) throw new DeckError("offline", "Assigned worker lacks a registered task client; no local fallback");
+    const saved = rexTarget({ ...target, client: remote?.executable ?? this.rexClient, port: args.port, ...(remote ? { workerSocket: remote.socket } : {}) });
     const ack = (taskId: number, status: RexOpenAck["status"]): RexOpenAck => ({ version: 1, chatId: args.chatId, requestId: args.requestId, taskId: String(taskId), status, completion: "not_waited", bestEffort: true });
     // Retrieving an admitted request does not inspect/create or rewrite its plan.
     const receipt = await this.harness.snapshot(RexRequest, chat.id, args.requestId, context);

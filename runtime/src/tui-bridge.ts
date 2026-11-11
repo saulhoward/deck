@@ -1,10 +1,11 @@
 import { once } from "node:events";
 import { FrameDecoder, encodeFrame } from "./protocol.js";
-import { displayText, localSession, validRequest, validReply } from "./tui-session.js";
+import { taskCommand, taskScope } from "./task-client.js";
+import { displayText, TuiSession, localSession, validRequest, validReply } from "./tui-session.js";
 import { validRexUuid } from "./generated/contracts.js";
 import { validMutationArgs } from "./mutation-contracts.js";
 
-const args = process.argv.slice(2); let port = 52800, chatId: string | undefined, hubId: string | undefined, allocationId: string | undefined;
+const args = process.argv.slice(2); let port = 52800, chatId: string | undefined, hubId: string | undefined, allocationId: string | undefined, workerSocket: string | undefined;
 try {
   for (let i = 0; i < args.length; i++) {
     const key = args[i], value = args[++i];
@@ -13,16 +14,19 @@ try {
     else if (key === "--task" && /^[1-9]\d*$/.test(value) && Number.isSafeInteger(Number(value))) chatId = value;
     else if (key === "--hub-id" && value.length <= 200) hubId = value;
     else if (key === "--rex-allocation" && validRexUuid(value)) allocationId = value;
+    else if (key === "--worker-socket") workerSocket = value;
     else throw new Error();
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error();
+  if (workerSocket) taskScope(hubId, chatId, allocationId, process.env.REX_BLOCK);
   if (allocationId && (!hubId || !validMutationArgs("rex_startup", { chatId, allocationId, blockId: process.env.REX_BLOCK }))) throw new Error();
 } catch { process.exit(2); }
 const abort = new AbortController();
 const decoder = process.stdin.pipe(new FrameDecoder());
 const stop = () => { abort.abort(); decoder.destroy(); };
 process.stdin.on("end", stop); process.stdin.on("error", stop); process.stdout.on("error", stop);
-const session = localSession(port, chatId, hubId, abort.signal);
+const scope = workerSocket ? taskScope(hubId, chatId, allocationId, process.env.REX_BLOCK) : undefined;
+const session = scope ? new TuiSession((name, args, expected) => taskCommand(workerSocket!, scope, name, args, expected, abort.signal), chatId, hubId, undefined, port) : localSession(port, chatId, hubId, abort.signal);
 const mode = allocationId ? "task" : "hub";
 let hubChatId: string | undefined;
 try {

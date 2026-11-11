@@ -34,7 +34,7 @@ pub const Hub = struct {
                 if (host.listen != null) return error.InvalidWorkerListener;
                 continue;
             }
-            if (std.mem.eql(u8, host.machineId, local_machine) or !std.mem.eql(wire.WorkerCapability, host.capabilities.?, &@import("remote_worker.zig").capabilities)) return error.InvalidWorkerRegistration;
+            if (std.mem.eql(u8, host.machineId, local_machine) or !std.mem.eql(wire.WorkerCapability, host.capabilities.?, @import("remote_worker.zig").capabilitiesFor(host.rexClient))) return error.InvalidWorkerRegistration;
             const address = try @import("tailscale.zig").endpoint(host.listen orelse return error.MissingWorkerListener);
             for (self.registry.value.hosts[0..index]) |prior| if (prior.listen) |listen| {
                 if (std.meta.eql(address, try @import("tailscale.zig").endpoint(listen))) return error.DuplicateWorkerListener;
@@ -43,7 +43,7 @@ pub const Hub = struct {
             if (count > 8) return error.WorkerCapacity;
         }
         try self.links.ensureTotalCapacity(a, count);
-        try self.inherit.ensureTotalCapacity(a, count * 3);
+        try self.inherit.ensureTotalCapacity(a, count * 5);
         try self.routes.ensureTotalCapacity(a, count);
         try self.threads.ensureTotalCapacity(a, count);
         for (self.registry.value.hosts, 0..) |host, index| {
@@ -58,10 +58,15 @@ pub const Hub = struct {
             errdefer for (results) |fd| Native.close(fd);
             const controls = try Native.pipe();
             errdefer for (controls) |fd| Native.close(fd);
+            const client_requests = if (host.rexClient != null) try Native.pipe() else null;
+            errdefer if (client_requests) |fds| for (fds) |fd| Native.close(fd);
+            const client_replies = if (host.rexClient != null) try Native.pipe() else null;
+            errdefer if (client_replies) |fds| for (fds) |fd| Native.close(fd);
             const link = try a.create(Link);
-            link.* = .{ .native = native, .registry = self.registry.value, .index = index, .tailscale = executable, .listener = listener, .input = requests[0], .output = results[1], .control = controls[0] };
+            link.* = .{ .native = native, .registry = self.registry.value, .index = index, .tailscale = executable, .listener = listener, .input = requests[0], .output = results[1], .control = controls[0], .clients = if (client_requests) |r| .{ .input = client_replies.?[0], .output = r[1] } else null };
             self.links.appendAssumeCapacity(link);
-            self.routes.appendAssumeCapacity(.{ .machineId = host.machineId, .readFd = results[0], .writeFd = requests[1], .controlFd = controls[1] });
+            self.routes.appendAssumeCapacity(.{ .machineId = host.machineId, .readFd = results[0], .writeFd = requests[1], .controlFd = controls[1], .rexClient = host.rexClient, .clientReadFd = if (client_requests) |r| r[0] else null, .clientWriteFd = if (client_replies) |r| r[1] else null });
+            if (client_requests) |r| for ([_]tcp.fd_t{ r[0], client_replies.?[1] }) |fd| self.inherit.appendAssumeCapacity(.{ .handle = fd, .flags = .{ .nonblocking = false } });
             for ([_]tcp.fd_t{ results[0], requests[1], controls[1] }) |fd| self.inherit.appendAssumeCapacity(.{ .handle = fd, .flags = .{ .nonblocking = false } });
         }
         return self;
@@ -84,6 +89,10 @@ pub const Hub = struct {
                 Native.close(link.input);
                 Native.close(link.output);
                 Native.close(link.control);
+                if (link.clients) |p| {
+                    Native.close(p.input);
+                    Native.close(p.output);
+                }
             }
             a.destroy(link);
         }

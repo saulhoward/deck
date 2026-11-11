@@ -16,6 +16,18 @@ fn ordered(values: std.json.Value) bool {
     }
     return true;
 }
+pub fn validRexClient(value: std.json.Value) bool {
+    if (!wire.validWorkerRexClient(value)) return false;
+    for ([_][]const u8{ "executable", "socket" }) |key| {
+        const s = value.object.get(key).?.string;
+        if (!std.fs.path.isAbsolute(s) or std.mem.indexOfAny(u8, s, "\x00\r\n") != null or s.len > (if (std.mem.eql(u8, key, "socket")) @as(usize, 100) else 4096)) return false;
+    }
+    return true;
+}
+pub fn sameRexClient(left: ?wire.WorkerRexClient, right: ?wire.WorkerRexClient) bool {
+    if (left == null or right == null) return left == null and right == null;
+    return std.mem.eql(u8, left.?.executable, right.?.executable) and std.mem.eql(u8, left.?.socket, right.?.socket);
+}
 pub fn validRegistry(value: std.json.Value) bool {
     if (!wire.validRemoteRegistry(value)) return false;
     const hosts = value.object.get("hosts").?.array.items;
@@ -26,6 +38,11 @@ pub fn validRegistry(value: std.json.Value) bool {
         const capabilities = host.object.get("capabilities");
         if (implementation != (capabilities != null) or (!host.object.get("client").?.bool and !implementation)) return false;
         if (capabilities) |caps| if (!ordered(caps)) return false;
+        if (host.object.get("rexClient")) |client| {
+            if (!implementation or !validRexClient(client)) return false;
+            const caps = capabilities.?.array.items;
+            if (caps.len != 3 or !std.mem.eql(u8, caps[2].string, "rex")) return false;
+        }
         for (hosts[0..i]) |other| {
             if (std.mem.eql(u8, host.object.get("machineId").?.string, other.object.get("machineId").?.string) or
                 std.mem.eql(u8, peer.object.get("nodeId").?.string, other.object.get("peer").?.object.get("nodeId").?.string)) return false;
@@ -34,7 +51,9 @@ pub fn validRegistry(value: std.json.Value) bool {
     return true;
 }
 pub fn validHello(value: std.json.Value) bool {
-    return wire.validRemoteWorkerHello(value) and ordered(value.object.get("capabilities").?);
+    if (!wire.validRemoteWorkerHello(value) or !ordered(value.object.get("capabilities").?)) return false;
+    if (value.object.get("rexClient")) |client| if (!validRexClient(client) or value.object.get("capabilities").?.array.items.len != 3) return false;
+    return true;
 }
 
 // Borrowed registered configuration, owned connection slots. The network owner
@@ -91,7 +110,7 @@ pub const Gate = struct {
         if (hello.version != 1 or !samePeer(registered.peer, peer) or !std.mem.eql(u8, self.registry.hubId, hello.hubId) or
             !std.mem.eql(u8, registered.machineId, hello.machineId) or !std.mem.eql(u8, &ticket.connection, hello.connectionId) or
             !std.mem.eql(u8, registered.implementation.?, hello.implementation) or
-            !std.mem.eql(wire.WorkerCapability, registered.capabilities.?, hello.capabilities)) return error.IdentityMismatch;
+            !std.mem.eql(wire.WorkerCapability, registered.capabilities.?, hello.capabilities) or !sameRexClient(registered.rexClient, hello.rexClient)) return error.IdentityMismatch;
         self.slots[ticket.index].phase = .connected;
     }
     pub fn connected(self: *const Gate, ticket: Ticket) bool {

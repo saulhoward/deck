@@ -34,7 +34,7 @@ const help =
     \\  deck --help | --version
     \\
     \\The chat API binds only 127.0.0.1. --stdio selects private framed IPC instead.
-    \\--workers enables separate pinned Tailscale listeners for files/bash workers only.
+    \\--workers enables pinned Tailscale links; Rex/task relay needs explicit worker opt-in.
     \\--workspace PATH sets the initial hub workspace (saved chats keep their binding).
     \\Native read/write/exact-edit/bash tools run as your user, without a sandbox.
     \\The mock provider does not perform inference.
@@ -65,11 +65,13 @@ const help =
     \\Duplicates after races/lost replies need manual cleanup. No GUI focus/attach.
     \\Plain /rex open|reopen|status|inspect uses the selected task and defaults/saved target.
     \\Hub TUI /tasks and /select CHAT_ID inspect read-only; /hub returns to hub.
-    \\Hub /task TITLE creates and requests Rex; no non-Rex task participation.
+    \\Hub /task TITLE uses its saved workspace; /task-at JSON selects {machineId,cwd,title}.
+    \\Both save creation before requesting Rex; no non-Rex task participation.
     \\TUI /rex shows selected-task status; i inspects, o explicitly opens/reopens.
     \\Rex task clients are allocation-verified and locked to one task.
     \\Direct --task launches are read-only, including plain and one-shot paths.
-    \\Remote Rex/TUI access and scheduled jobs are not yet available.
+    \\Remote task clients reuse the verified worker link; no extra login or exposed HTTP.
+    \\Rex uses worker-local Unix endpoints (API 8/10 only). Jobs/child terminals remain future.
     \\
 ;
 

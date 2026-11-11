@@ -6,7 +6,19 @@ Test counts below are **recorded evidence for the named implementation stage**. 
 
 ## Unreleased source-tree work
 
-The work below records development since `17c2ff9`, including the documentation consolidation and subsequent task-navigation work. The latest worker slice follows `7ec363e`:
+The work below records development since `17c2ff9`, including the documentation consolidation and subsequent task-navigation work. The files/bash worker slice follows `7ec363e`; the task-relay stage follows `1d4001c`:
+
+### Verified worker-link task clients and assigned-host Rex
+
+- Added an opt-in third, independently peer-verified socket to the existing worker generation, with separate bounded task-client capacity and inherited hub RPC pipes. No additional user login, public HTTP API, worker Pi runtime, transcript replica, or execution queue.
+- Added a private worker-local Unix proxy and allocation-scoped hub dispatch. Hub, task, machine/cwd, ownership, allocation, block and approved client/socket are checked before dispatch and again at mutation admission. Status omits global inspection; remote task clients cannot log in, navigate/create tasks, enter the hub chat or allocate replacements.
+- Added `worker init --client`, exact registry/hello client configuration matching, and assigned-host Rex resolution/allocation/inspection/receipt routing. Default workers remain files/bash-only. The standalone worker still has no Node/Pi/renderer dependency; the full TUI client is installed separately. API 8/10 and worker-local Unix endpoint gates remain intact; selected API 9/HTTPS access is not enabled.
+- Added hub-only `/task-at` JSON targets to both clients, preserving exact host/cwd/title and existing durable creation drafts. Creation ACK precedes separate best-effort Rex opening; lost open replies do not recreate tasks. Existing bindings are never migrated or executed locally as fallback.
+- Added real isolated three-channel socket/FIFO tests, including exact forwarding, exhausted client capacity with independent native cancellation, wrong third-socket peer refusal, and stale-generation/scope reply fencing. Hub runtime tests cover scope revocation at serialized admission, role refusal, non-draining stop ACKs, exact lost-ACK drafts and explicit deduplication.
+- Added opt-in end-to-end tests using one central Pi store, the actual native transport/Unix proxy, a private Rex API 10 server and a real Zig TUI. Verified managed startup/input, same-PID worker-link reconnect, unchanged canonical history, terminal exit and explicit reopening of the same conversation.
+- Initial validation caught terminal-test assumptions (combining Escape/command bytes and expecting quiet polls to erase retained error notices) and an unnecessary change to trusted-local stop dispatch exposed by its test double. Split Escape/readiness, observed actual freshness rather than notice dismissal, and restored the original independent local stop path. A package run also exposed the native cancellation test assuming a fenced request pipe remained writable: it now accepts `EPIPE` as well as EOF teardown, while still requiring the cancelled receipt and no subsequent effect. Production deadlines and no-queue rules were not widened.
+- Tightened Unix endpoint ownership: capture its inode once, transfer listener ownership to the relay thread, and preserve replacement files/sockets during cleanup. Native tests now verify cleanup and execute uncached so changing opt-in integration environment cannot reuse a skipped/cached test run.
+- All live hub/remote-machine configuration and sessions were left alone. Isolated tests inject socket-peer verification; real two-machine Tailscale acceptance, named child terminals and captured scheduled jobs remain pending. This work does not perform deployment or enrollment.
 
 ### Registered native files/bash workers
 
@@ -16,7 +28,7 @@ The work below records development since `17c2ff9`, including the documentation 
 - Bounded frames, handshake/control traffic, connection backoff and pending transport slots. Lost/malformed replies fence one generation, produce uncertain outcomes and never trigger effect replay or local fallback. Completed original-identity retries consult retained receipts; accepted-without-result stays uncertain.
 - Added isolated TCP tests with injected verifier identities for lost replies, receipt preservation, cancellation under saturated result pipes, live-slot refusal, identity/digest mismatch, frame deadlines and independent host progress. Verified actual anonymous pipe inheritance into evented Node sockets. These are not real two-machine Tailscale acceptance evidence.
 - A package run exposed a task-lock PTY test racing a quiet background poll. The UI correctly refused the overlapping send. Changed that test to pause polling in command mode and wait for explicit `client idle` before submitting; production behavior and deadlines were unchanged.
-- Remote Rex/TUI routing, generic read-only receipt reconciliation, child terminals and jobs remain future work. The selected remote Rex API 9 endpoint is still not enabled for Deck allocation.
+- At that stage, remote Rex/TUI routing, generic read-only receipt reconciliation, child terminals and jobs remained future work. The selected remote Rex API 9 endpoint is still not enabled for Deck allocation.
 - Verified the installed standalone package's local OS-peer projection with the running Tailscale app, read-only and without attempting a connection. Its runtime closure excludes the hub package, Node, Pi and the Zig build compiler; package checks enforce the exclusions.
 - No live hub upgrade or remote installation was performed for this implementation slice.
 
@@ -173,10 +185,11 @@ All rows below describe prior scratch-state validation on **aarch64-darwin**, us
 | Selected remote Rex peer verification | 47/47 | 448 total: 446 passed, 2 skipped | Remote/TUI/startup + package 60/60; isolated local Rex API 10 11/11; separate remote API 9 probe as described above |
 | Hub inspection and Rex task lock | 48/48 | 456 total: 454 passed, 2 skipped | Installed remote/TUI/startup + package 68/68; isolated Rex API 10 11/11; three cross-builds |
 | Registered files/bash worker transport | 55/55 | 462 total: 460 passed, 2 skipped | Installed remote/worker/hub identity/TUI + package 78/78; isolated local Rex API 10 11/11; hub and worker cross-builds for three targets |
+| Worker-link task relay / assigned-host Rex | 58/58 with opt-in Rex; otherwise 57 passed, 1 skipped | 468 total: 466 passed, 2 skipped | Actual isolated sockets/FIFOs, private Rex API 10 and real Zig task TUI; plain/PTY explicit-target creation; both executables cross-built for three targets (compile evidence only); not two-machine evidence |
 
 The recorded stages passed their generated/TypeScript checks and Nix package/flake gates. The separate polling-debounce check passed 37/37 Zig tests and 10/10 targeted TUI tests before model settings were added.
 
-Cross-builds passed for x86_64 macOS, x86_64 Linux, and aarch64 Linux at the migration, completed-foundation, TUI, model-settings, terminal-status, task-navigation, remote-verification-foundation, selected-remote-peer, hub-role, and registered-worker stages. These are compilation results, not runtime support claims.
+Cross-builds passed for x86_64 macOS, x86_64 Linux, and aarch64 Linux at the migration, completed-foundation, TUI, model-settings, terminal-status, task-navigation, remote-verification-foundation, selected-remote-peer, hub-role, registered-worker, and worker-task-relay stages. These are compilation results, not runtime support claims.
 
 Important validation details:
 
@@ -190,13 +203,13 @@ Important validation details:
 - The remote-verification foundation package is `/nix/store/v3yspah0j4hm81mc0bk0gik59n64hfb8-deck-0.1.0-dev`; the prior task-navigation build was retained at `/tmp/deck-before-remote-boundary-result`. This package does not enable remote connectivity.
 - The selected-peer verifier update is `/nix/store/64wbmzbkhy5vygw0ldskib3k5pw2q8ja-deck-0.1.0-dev`. Its predecessor was retained at `/tmp/deck-before-remote-peer-result`. It still does not enable remote Deck links or Rex API 9 allocation.
 
-The registered-worker builds are `/nix/store/gz0pmppb42qjsx4yas9ldx2pmxdhwjn1-deck-0.1.0-dev` and `/nix/store/0q3yf43c2qqylbip07qd6073xnzlkava-deck-worker-0.1.0-dev`. The preceding hub-role package is retained at `/tmp/deck-before-worker-result`. These are tested development artifacts, not deployment or a real two-machine acceptance claim.
+The registered-worker builds are `/nix/store/gz0pmppb42qjsx4yas9ldx2pmxdhwjn1-deck-0.1.0-dev` and `/nix/store/0q3yf43c2qqylbip07qd6073xnzlkava-deck-worker-0.1.0-dev`. The preceding hub-role package is retained at `/tmp/deck-before-worker-result`. These are tested development artifacts, not deployment or a real two-machine acceptance claim. Before the task-relay package builds, those worker-stage outputs were retained at `/tmp/deck-before-task-relay-result` and `/tmp/deck-before-task-relay-worker`; building is not a live upgrade.
 
 ## Manual evidence
 
 The user reported successful live API-key inference, file write/read/exact edit, bash output/cwd checks, foreground sleep cancellation, detach/reconnect, and unsent-draft recovery across client exit and hub restart. The user also confirmed the default local Rex open workflow.
 
-These reports do not establish live ChatGPT OAuth/refresh, model delegation, exhaustive crash windows, remote workers, or all terminal platforms. No external provider calls occur in the automated evidence above.
+These reports do not establish live ChatGPT OAuth/refresh, model delegation, exhaustive crash windows, real two-machine worker acceptance, or all terminal platforms. No external provider calls occur in the automated evidence above.
 
 ## Deployment boundary
 
