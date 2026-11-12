@@ -38,7 +38,7 @@ export async function hubCommand(port: number, command: string, args: Record<str
     request = JSON.parse(body);
     if (!validClientRequest(request) || request.id !== id || request.command !== command || request.hubId !== hubId) throw new Error();
   } catch {
-    const kind = command === "status" || command.startsWith("login_") ? "status/login" : command === "list_chats" ? "chat discovery" : command === "history" ? "history" : ["rex_open", "rex_status", "rex_inspect"].includes(command) ? "Rex" : ["activity", "progress", "instruction_status"].includes(command) ? "live view" : ["admit", "create_task", "import_instructions", "stop", "rex_startup"].includes(command) ? "mutation" : "command";
+    const kind = command === "status" || command.startsWith("login_") ? "status/login" : command === "list_chats" ? "chat discovery" : command === "history" ? "history" : ["rex_open", "rex_status", "rex_inspect"].includes(command) ? "Rex" : ["activity", "progress", "instruction_status"].includes(command) ? "live view" : ["admit", "create_task", "create_task_brief", "import_instructions", "stop", "rex_startup"].includes(command) ? "mutation" : "command";
     throw new HubCallError(`Invalid ${kind} arguments; no request sent`, failurePolicy(command, "", "local"));
   }
   let response: Response;

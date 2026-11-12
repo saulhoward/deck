@@ -14,9 +14,10 @@ export function validNativeRequest(value: unknown): value is wire.NativeRequest 
   const { id, operation, args } = value;
   if (operation === "bash_progress") return wire.validNativeProgressArgs(args) && safeId(args.target) && id === `progress:${args.target}`;
   if (!validCancellationId(id)) return false;
-  const ephemeral = operation === "rex_inspect" || operation === "rex_resolve";
+  const ephemeral = operation === "rex_inspect" || operation === "rex_resolve" || operation === "link_status";
   if (ephemeral !== (BigInt(id) >= 1n << 63n)) return false;
   switch (operation) {
+    case "link_status": return Object.keys(args).length === 0;
     case "read": return wire.validNativeReadArgs(args) && path(args.path);
     case "write": return wire.validNativeWriteArgs(args) && path(args.path) && bytes(args.content, 128 * 1024);
     case "edit": return wire.validNativeEditArgs(args) && path(args.path) && args.oldText.length > 0 && bytes(args.oldText, 128 * 1024) && bytes(args.newText, 128 * 1024);
@@ -41,6 +42,7 @@ export function validNativeReply(request: wire.NativeRequest, value: unknown): v
 }
 export function validNativeResult(operation: wire.NativeOperation, value: unknown): value is wire.NativeResult {
   if (!wire.validNativeResult(value) || operation === "bash_progress") return false;
+  if (operation === "link_status" && value.ok) return value.code === "link_status" && ["connected", "offline"].includes(value.output) && value.exitCode == null && value.truncated !== true;
   const shell = operation === "bash";
   const rex = operation.startsWith("rex_");
   if (!bytes(value.output, shell ? 64 * 1024 + 256 : rex ? 16 * 1024 : 128 * 1024)) return false;
@@ -49,5 +51,5 @@ export function validNativeResult(operation: wire.NativeOperation, value: unknow
   if (value.ok) return (value.code === success || (!rex && value.code === undefined)) && (!shell || value.exitCode === 0);
   // Failed processes can have produced effects, even with a confirmed exit code.
   // Unknown failure codes remain displayable but never imply safe replay.
-  return !["ok", "allocated", "rex_inspected", "rex_resolved", "rex_receipt"].includes(value.code ?? "") && (!shell || value.exitCode !== 0 || value.code !== "exit_nonzero");
+  return !["ok", "allocated", "rex_inspected", "rex_resolved", "rex_receipt", "link_status"].includes(value.code ?? "") && (!shell || value.exitCode !== 0 || value.code !== "exit_nonzero");
 }

@@ -21,6 +21,8 @@ export function displayText(value: string, bytes: number): string {
   return result + "\n[view clipped]";
 }
 import { validTaskTarget } from "./task-target.js";
+import { validForm, validBrief, taskCreationCommand } from "./task-brief.js";
+import { validHosts } from "./host-inventory.js";
 
 export function validRequest(value: unknown): value is TuiRequest {
   if (!validTuiRequest(value)) return false;
@@ -28,6 +30,7 @@ export function validRequest(value: unknown): value is TuiRequest {
   if (value.after !== undefined && (value.action !== "tasks" || !validSafePiId(value.after))) return false;
   if (value.hold !== undefined && value.action !== "poll") return false;
   if (value.action === "configure" ? value.configuration === undefined : value.configuration !== undefined) return false;
+  if (value.taskForm !== undefined) return value.action === "create" && value.text === undefined && value.taskTarget === undefined && validForm(value.taskForm);
   if (value.taskTarget !== undefined) return value.action === "create" && value.text === undefined && validTaskTarget(value.taskTarget);
   if (value.action === "send" || value.action === "create") return typeof value.text === "string" && value.text.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "").length > 0 && Buffer.byteLength(value.text) <= (value.action === "send" ? 16384 : 200);
   return value.text === undefined;
@@ -41,13 +44,15 @@ export function validReply(value: unknown, id: string, hubId?: string, chatId?: 
   if (action === "select" && !validSafePiId(target)) return false;
   if (!validSafePiId(s.chatId) || (hubId !== undefined && hubId !== s.hubId) || (expectedChat !== undefined && expectedChat !== s.chatId)) return false;
   if (!validSafePiId(s.hubChatId) || (mode !== undefined && s.clientMode !== mode) || (hubChatId !== undefined && s.hubChatId !== hubChatId)) return false;
-  if (s.clientMode === "task" && (s.chatId === s.hubChatId || s.tasks !== undefined || action === "select" || action === "tasks" || action === "create")) return false;
+  if (s.clientMode === "task" && (s.chatId === s.hubChatId || s.tasks !== undefined || s.hosts !== undefined || action === "hosts" || action === "select" || action === "tasks" || action === "create")) return false;
   if (!canParticipate(s.clientMode, s.chatId, s.hubChatId) && s.draft !== null) return false;
+  if (s.hosts !== undefined && !validHosts(s.hosts) || action === "hosts" && !s.hosts) return false;
+  if (s.brief !== undefined && !validBrief(s.brief)) return false;
   if (action === "tasks" && (!s.tasks || s.tasks.after !== after)) return false;
   if (s.tasks) {
     let previous = Number(s.tasks.after ?? 0);
     if (s.tasks.after !== undefined && !validSafePiId(s.tasks.after)) return false;
-    for (const row of s.tasks.items) { if (!validSafePiId(row.chatId) || Number(row.chatId) <= previous) return false; previous = Number(row.chatId); }
+    for (const row of s.tasks.items) { if (!validSafePiId(row.chatId) || Number(row.chatId) <= previous || (row.parentChatId !== undefined && (!validSafePiId(row.parentChatId) || row.kind !== "subagent" || Number(row.parentChatId) >= Number(row.chatId)))) return false; previous = Number(row.chatId); }
     if (s.tasks.next !== undefined && (!validSafePiId(s.tasks.next) || Number(s.tasks.next) <= Number(s.tasks.after ?? 0) || Number(s.tasks.next) < previous)) return false;
   }
   if ((action === "rexStatus" || action === "rexInspect") && !s.rex) return false;
@@ -69,6 +74,8 @@ export class TuiSession {
   private supportsSettings = false;
   private supportsRex = false;
   private supportsStartup = false;
+  private supportsBrief = false;
+  private supportsHosts = false;
   private startupBlocked = false;
   private mode: TuiClientMode = "hub";
   private hubChatId?: string;
@@ -108,10 +115,11 @@ export class TuiSession {
     this.active = active; this.activeSaved = !!active; this.before = undefined;
     this.binding = status.binding && { machineId: status.binding.machineId, cwd: status.binding.cwd };
     this.supportsRex = status.rexOpen === 1;
+    this.supportsBrief = status.taskBrief === 1; this.supportsHosts = status.hostInventory === 1;
     this.supportsStartup = status.rexStartup === 1;
     this.supportsSettings = status.modelSettings === 1; this.settingsUncertain = this.supportsSettings;
     const notice = !writable ? `${inspectOnly}${saved.length ? " Saved requests remain untouched; review them in the Rex client." : ""}` : active ? `Saved ${active.kind} ${active.requestId}: :retry or :discard; instruction drafts use --no-tui.${saved.length > 1 ? " Other drafts: --no-tui /drafts." : ""}` : "";
-    this.state = { clientMode: this.mode, hubChatId: this.hubChatId!, hubId: this.hubId!, chatId: this.chatId!, title: this.chatId === this.hubChatId ? "Hub" : displayText(status.binding?.title || `Task ${this.chatId}`, 160), model: displayText(`${status.model?.provider ?? ""}/${status.model?.modelId ?? "unknown model"}`, 160), tools: status.tools, activityKnown: false, busy: false, queued: 0, entries: [], hasOlder: false, historical: false, preview: "", notice, draft: null };
+    this.state = { clientMode: this.mode, hubChatId: this.hubChatId!, hubId: this.hubId!, chatId: this.chatId!, title: this.chatId === this.hubChatId ? "Hub" : displayText(status.binding?.title || `Task ${this.chatId}`, 160), model: displayText(`${status.model?.provider ?? ""}/${status.model?.modelId ?? "unknown model"}`, 160), tools: status.tools, activityKnown: false, busy: false, queued: 0, entries: [], hasOlder: false, historical: false, preview: "", notice, draft: null, ...(status.binding?.brief ? { brief: { ...(status.binding.brief.problem === undefined ? {} : { problem: displayText(status.binding.brief.problem, 2048) }), ...(status.binding.brief.description === undefined ? {} : { description: displayText(status.binding.brief.description, 8192) }) } } : {}) };
   }
   private async refreshSettings() {
     if (!this.supportsSettings) throw new Error("Hub does not advertise model settings; upgrade it only when idle");
@@ -134,7 +142,7 @@ export class TuiSession {
       let role: TuiEntry["role"] = "note", text = "";
       if (entry.kind === "deck.input") {
         role = "user"; text = entry.data.text;
-        if (entry.data.origin?.kind === "task-tool") { role = "note"; text = `[agent chat ${entry.data.origin.chatId}, task ${entry.data.origin.taskId}]\n${text}`; }
+        if (entry.data.origin?.kind === "task-tool") { role = "note"; text = `[agent chat ${entry.data.origin.chatId}, task ${entry.data.origin.taskId}${entry.data.origin.chain ? `; request ${entry.data.requestId}; reply ${entry.data.origin.chain.replyToChatId}/${entry.data.origin.chain.replyToRequestId}; hop ${entry.data.origin.chain.hop}/8` : ""}]\n${text}`; }
       }
       else if (entry.kind === "pi.assistant" || entry.kind === "pi.tool-result") {
         role = entry.kind === "pi.assistant" ? "assistant" : "tool";
@@ -161,11 +169,13 @@ export class TuiSession {
       requireCreation(this.mode, this.chatId, this.hubChatId);
       if (!this.supportsRex) throw new Error("Rex support is required to create a task; no request sent");
     }
+    if (this.active.kind === "task" && !this.supportsBrief && (this.active.problem !== undefined || this.active.description !== undefined)) throw new Error("Hub lacks task briefs; no request sent");
     this.activeSaved = false;
     await this.store!.save(this.active); // Must succeed before network; exact original fields.
     this.activeSaved = true;
+    const method = this.active.kind === "task" ? taskCreationCommand(this.active) : "admit";
     const { kind, chatId, requestId, ...args } = this.active;
-    const ack = await this.command(kind === "input" ? "admit" : "create_task", { requestId, ...args, ...(kind === "input" ? { chatId } : {}) }, this.hubId);
+    const ack = await this.command(method, { requestId, ...args, ...(kind === "input" ? { chatId } : {}) }, this.hubId);
     this.activeSaved = false;
     await this.store!.remove(requestId); this.active = undefined;
     if (kind === "input") this.state!.notice = "Input admitted; completion not yet confirmed";
@@ -184,23 +194,37 @@ export class TuiSession {
     if (this.startupBlocked) throw new Error("Rex startup unconfirmed; no input enabled");
     await this.initialize();
     let state = this.state!;
-    if (request.action === "select" || request.action === "tasks") requireNavigation(this.mode);
+    if (request.action === "select" || request.action === "tasks" || request.action === "hosts") requireNavigation(this.mode);
     if (request.action === "create") requireCreation(this.mode, this.chatId, this.hubChatId);
     if (["send", "retry", "discard", "stop", "configure"].includes(request.action)) requireParticipation(this.mode, this.chatId, this.hubChatId);
     switch (request.action) {
       case "select":
         await this.selectChat(request.chatId); state = this.state!; break;
+      case "hosts":
+        if (!this.supportsHosts) throw new Error("Hub lacks registered-host inventory");
+        state.hosts = await this.command("list_hosts", {}, this.hubId); break;
       case "tasks": {
-        const page = await this.command("list_chats", { limit: 25, ...(request.after ? { after: request.after } : {}) }, this.hubId);
-        state.tasks = { items: page.items.map((row: any) => ({ chatId: row.chatId, kind: row.kind, title: row.chatId === this.hubChatId ? "Hub" : displayText(row.title, 160), machineId: displayText(row.machineId, 80), cwd: displayText(row.cwd, 256) })), ...(request.after ? { after: request.after } : {}), ...(page.next ? { next: page.next } : {}) };
+        const page = await this.command("list_chats", { limit: 25, ...(this.supportsHosts ? { includeObservations: true } : {}), ...(request.after ? { after: request.after } : {}) }, this.hubId);
+        if (this.supportsHosts) state.hosts = await this.command("list_hosts", {}, this.hubId);
+        state.tasks = { items: page.items.map((row: any) => ({ chatId: row.chatId, kind: row.kind, title: row.chatId === this.hubChatId ? "Hub" : displayText(row.title, 160), machineId: displayText(row.machineId, 80), cwd: displayText(row.cwd, 256), ...(row.parentChatId ? { parentChatId: row.parentChatId } : {}), activity: row.activity ?? "unknown", rexState: row.rexState ?? "unknown", connection: state.hosts ? state.hosts.items.find(h => h.machineId === row.machineId)?.connection ?? "unregistered" : "unknown" })), ...(request.after ? { after: request.after } : {}), ...(page.next ? { next: page.next } : {}) };
         break;
       }
-      case "create":
+      case "create": {
         if (!this.supportsRex) throw new Error("Rex support is required to create a task; no request sent");
         if (this.active || this.settingsUncertain) throw new Error("Resolve saved requests/settings before creating a task");
-        if (!request.taskTarget && !this.binding) throw new Error("Saved workspace binding unavailable; no task requested");
-        this.active = { kind: "task", chatId: this.chatId!, requestId: randomUUID(), title: request.text!, ...(request.taskTarget ?? this.binding!) }; this.activeSaved = false;
+        const form = request.taskForm ?? request.taskTarget;
+        if (!form?.machineId && !this.binding) throw new Error("Saved workspace binding unavailable; no task requested");
+        // New form selection uses registered hosts. Legacy /task-at retains its
+        // exact arbitrary/offline binding contract and drafts are never retargeted.
+        if (request.taskForm?.machineId) {
+          if (!this.supportsHosts) throw new Error("Hub lacks registered-host inventory");
+          const hosts = await this.command("list_hosts", {}, this.hubId);
+          if (!hosts.items.some((h: any) => h.machineId === request.taskForm!.machineId)) throw new Error("Selected host is not registered; no task requested");
+        }
+        if (!this.supportsBrief && (form?.problem !== undefined || form?.description !== undefined)) throw new Error("Hub lacks task briefs; no request sent");
+        this.active = { kind: "task", chatId: this.chatId!, requestId: randomUUID(), title: request.text!, ...this.binding!, ...form }; this.activeSaved = false;
         await this.deliver(); break;
+      }
       case "rexStatus":
       case "rexInspect": {
         if (!this.supportsRex) throw new Error("Hub does not advertise Rex support");

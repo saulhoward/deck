@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { nativeReadId } from "./native-read-id.js";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { AgentDoc, type TaskId } from "@earendil-works/pi-durable";
 import { ChatDoc, DeckError, type DeckRuntime } from "./deck.js";
@@ -13,11 +14,9 @@ import { RECONCILE_KIND, reconciledBinding } from "./rex-reconciliation.js";
 // In-flight read bookkeeping only; no health cache, task, receipt or replay queue.
 export class RexInspector {
   private readonly active = new Set<string>();
-  private nextId = 1n << 63n; // Disjoint from Pi safe-integer operation/task IDs.
   constructor(private readonly runtime: DeckRuntime, private readonly host?: HostFiles) {}
   private readId(): string {
-    if (this.nextId >= 1n << 64n) throw new DeckError("busy", "Rex read correlation exhausted; reconnect the native worker");
-    return String(this.nextId++);
+    return nativeReadId();
   }
   async resolveTarget(id: string, options: RexTargetOptions): Promise<RexOpenTarget> {
     if (!validTargetOptions(options)) throw new DeckError("invalid", "Invalid local Rex overrides");

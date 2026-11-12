@@ -65,6 +65,7 @@ pub fn validCommandArgs(command: []const u8, raw: std.json.Value) bool {
     if (!contracts.validHubCommand(.{ .string = command })) return false;
     const args: std.json.Value = if (raw == .null) .{ .object = .empty } else raw;
     if (!model_settings.validArgs(command, args) or !status_login.validArgs(command, args) or !rex_open.validArgs(command, args) or !views.validArgs(command, args)) return false;
+    if (std.mem.eql(u8, command, "list_hosts")) return args == .object and args.object.count() == 0;
     if (std.mem.eql(u8, command, "list_chats")) {
         if (!contracts.validListChatsArgs(args)) return false;
         return if (args.object.get("after")) |after| safePiId(after) else true;
@@ -78,6 +79,10 @@ pub fn validCommandArgs(command: []const u8, raw: std.json.Value) bool {
         if (after) |value| if (!std.mem.eql(u8, value.string, "0") and !safePiId(value)) return false;
     }
     if (std.mem.eql(u8, command, "admit")) return contracts.validAdmitArgs(args) and safePiId(args.object.get("chatId").?) and units(args.object.get("requestId").?, 200) and units(args.object.get("text").?, 200000);
+    if (std.mem.eql(u8, command, "create_task_brief")) {
+        if (!contracts.validCreateTaskBriefArgs(args)) return false;
+        return units(args.object.get("requestId").?, 200) and units(args.object.get("machineId").?, 200000) and @import("task_brief.zig").title(args.object.get("title").?.string) and @import("task_brief.zig").cwd(args.object.get("cwd").?.string) and @import("task_brief.zig").fields(args) and (args.object.contains("problem") or args.object.contains("description"));
+    }
     if (std.mem.eql(u8, command, "create_task") or std.mem.eql(u8, command, "import_instructions")) {
         if (std.mem.eql(u8, command, "create_task")) {
             if (!contracts.validCreateTaskArgs(args) or !units(args.object.get("title").?, 200000)) return false;
@@ -94,6 +99,31 @@ pub fn validClientRequest(request: std.json.Value) bool {
     if ((std.mem.eql(u8, command, "model_settings") or std.mem.eql(u8, command, "set_model_settings")) and !request.object.contains("hubId")) return false;
     if (request.object.get("hubId")) |hub_id| if (!contracts.validTransportId(hub_id) or !units(hub_id, 200)) return false;
     return validCommandArgs(request.object.get("command").?.string, request.object.get("args") orelse .null);
+}
+pub fn validCreationAck(args: std.json.Value, result: std.json.Value, with_brief: bool) bool {
+    if (!validCommandArgs(if (with_brief) "create_task_brief" else "create_task", args) or !contracts.validCreateTaskAck(result) or !safePiId(result.object.get("chatId").?)) return false;
+    const brief = result.object.get("brief");
+    if (!with_brief) return brief == null;
+    if (brief == null or !@import("task_brief.zig").valid(brief.?)) return false;
+    for ([_][]const u8{ "problem", "description" }) |key| {
+        const original = args.object.get(key);
+        const echoed = brief.?.object.get(key);
+        if ((original == null) != (echoed == null)) return false;
+        if (original) |text| if (!std.mem.eql(u8, text.string, echoed.?.string)) return false;
+    }
+    return true;
+}
+pub fn validHosts(value: std.json.Value) bool {
+    if (!contracts.validHostInventory(value)) return false;
+    const items = value.object.get("items").?.array.items;
+    var local = false;
+    for (items, 0..) |item, i| {
+        const is_local = std.mem.eql(u8, item.object.get("kind").?.string, "local");
+        if (is_local != std.mem.eql(u8, item.object.get("connection").?.string, "local") or (is_local and local)) return false;
+        local = local or is_local;
+        for (items[0..i]) |prior| if (std.mem.eql(u8, prior.object.get("machineId").?.string, item.object.get("machineId").?.string)) return false;
+    }
+    return true;
 }
 fn validDiscoveryReply(args: std.json.Value, result: std.json.Value) bool {
     if (!validCommandArgs("list_chats", args) or !contracts.validChatListPage(result)) return false;
@@ -123,6 +153,7 @@ fn validDiscoveryReply(args: std.json.Value, result: std.json.Value) bool {
         const owner = item.object.get("ownerTaskId");
         if ((parent == null) != (owner == null)) return false;
         if (parent) |value| if (!safePiId(value) or !safePiId(owner.?)) return false;
+        if (item.object.get("brief")) |brief| if (!@import("task_brief.zig").valid(brief)) return false;
     }
     if (result.object.get("next")) |value| {
         if (!safePiId(value)) return false;
@@ -165,6 +196,7 @@ fn validHistoryReply(args: std.json.Value, result: std.json.Value) bool {
                     if (origin.object.get("kind")) |tag| {
                         if (tag == .string and std.mem.eql(u8, tag.string, "task-tool")) {
                             if (!contracts.validHistoryAgentOrigin(origin) or !safePiId(origin.object.get("chatId").?) or !safePiId(origin.object.get("taskId").?)) return false;
+                            if (origin.object.get("chain")) |chain| if (!safePiId(chain.object.get("rootChatId").?) or !safePiId(chain.object.get("replyToChatId").?)) return false;
                         }
                     }
                 }
@@ -215,10 +247,12 @@ pub fn validReply(request: std.json.Value, reply: std.json.Value) bool {
     if (!model_settings.validReply(command, args, request.object.get("hubId"), result)) return false;
     if (!status_login.validReply(command, args, request.object.get("hubId"), result)) return false;
     if (!views.validReply(command, args, result) or !rex_open.validReply(command, args, request.object.get("hubId") orelse .null, result)) return false;
+    if (std.mem.eql(u8, command, "list_hosts")) return validHosts(result);
     if (std.mem.eql(u8, command, "list_chats")) return validDiscoveryReply(args, result);
     if (std.mem.eql(u8, command, "history")) return validHistoryReply(args, result);
     if (std.mem.eql(u8, command, "admit")) return contracts.validAdmitArgs(args) and safePiId(args.object.get("chatId").?) and contracts.validAdmitAck(result) and safePiId(result.object.get("submissionId").?);
-    if (std.mem.eql(u8, command, "create_task")) return contracts.validCreateTaskArgs(args) and contracts.validCreateTaskAck(result) and safePiId(result.object.get("chatId").?);
+    if (std.mem.eql(u8, command, "create_task")) return validCreationAck(args, result, false);
+    if (std.mem.eql(u8, command, "create_task_brief")) return validCreationAck(args, result, true);
     if (std.mem.eql(u8, command, "import_instructions")) return contracts.validInstructionImportArgs(args) and safePiId(args.object.get("chatId").?) and contracts.validInstructionImportAck(result) and safePiId(result.object.get("chatId").?) and safePiId(result.object.get("taskId").?) and std.mem.eql(u8, args.object.get("chatId").?.string, result.object.get("chatId").?.string) and std.mem.eql(u8, args.object.get("requestId").?.string, result.object.get("requestId").?.string);
     if (std.mem.eql(u8, command, "stop")) return contracts.validStopArgs(args) and safePiId(args.object.get("chatId").?) and contracts.validStopAck(result);
     if (std.mem.eql(u8, command, "rex_startup")) {

@@ -30,7 +30,7 @@ function renderHistory(items: unknown[], descending = true) {
     const entry = object(raw);
     if (entry.kind === "deck.input") {
       const data = object(entry.data); const origin = data.origin && typeof data.origin === "object" && !Array.isArray(data.origin) ? object(data.origin) : {};
-      const sender = origin.kind === "task-tool" ? `agent chat ${plain(String(origin.chatId))}` : "you";
+      const sender = origin.kind === "task-tool" ? `agent chat ${plain(String(origin.chatId))}${origin.chain ? `; provenance ${plain(JSON.stringify({ requestId: data.requestId, chain: origin.chain }))}` : ""}` : "you";
       stdout.write(`${sender}: ${plain(String(data.text))}\n`);
     }
     else if (entry.kind === "pi.assistant" && Array.isArray(entry.model)) {
@@ -61,6 +61,8 @@ function renderHistory(items: unknown[], descending = true) {
 
 import { taskCommand, taskScope } from "./task-client.js";
 import { parseTaskTarget } from "./task-target.js";
+import { parseTaskForm, taskCreationCommand } from "./task-brief.js";
+import { groupedTasks } from "./task-groups.js";
 
 async function main() {
   let login = false;
@@ -157,8 +159,9 @@ async function main() {
     if (draft.chatId !== selected) throw new Error("Draft belongs to another chat");
     if (draft.kind === "task") create();
     await drafts.save(draft); // Never send until the complete private record is published.
+    const method = draft.kind === "task" ? taskCreationCommand(draft) : draft.kind === "input" ? "admit" : "import_instructions";
     const { kind, chatId, ...args } = draft;
-    const ack = await command(kind === "input" ? "admit" : kind === "task" ? "create_task" : "import_instructions", kind === "task" ? args : { chatId, ...args });
+    const ack = await command(method, kind === "task" ? args : { chatId, ...args });
     // command() checked the generated command-specific ACK and its semantic
     // identity/range guards; transport success alone never permits removal.
     await drafts.remove(draft.requestId);
@@ -252,6 +255,7 @@ async function main() {
   };
   const createTask = async () => {
     create();
+    if (active?.kind === "task" && (active.problem !== undefined || active.description !== undefined) && status.taskBrief !== 1) throw new Error("Hub lacks task briefs; no request sent");
     const task = await deliver(active!);
     active = undefined;
     if (detached) return;
@@ -296,7 +300,7 @@ async function main() {
       if (!text) continue;
       try {
         if (text === "/exit") break;
-        if (text === "/help") { stdout.write("/status /activity /stop /older /tasks [more] /select CHAT_ID /hub /task TITLE /task-at JSON /instructions [load|TASK_ID] /rex [open|reopen|status|inspect] /draft /drafts /recover REQUEST_ID /retry /discard [REQUEST_ID] /exit\nEnter submits or steers. /instructions load replaces stored explicit instructions with saved-worker AGENTS.md, only while idle; admission is not application. /instructions reads source/task status without loading. Hub task inspection is read-only; /task creates and opens Rex. Rex task clients cannot list, create or switch tasks. Ctrl+C detaches. Answer previews are sampled/provisional; retained history is authoritative. This is plain line mode, not TUI.\n"); continue; }
+        if (text === "/help") { stdout.write("/status /activity /stop /older /tasks [more] /select CHAT_ID /hub /task TITLE /task-at JSON /new JSON /hosts /brief /instructions [load|TASK_ID] /rex [open|reopen|status|inspect] /draft /drafts /recover REQUEST_ID /retry /discard [REQUEST_ID] /exit\nEnter submits or steers. /instructions load replaces stored explicit instructions with saved-worker AGENTS.md, only while idle; admission is not application. /instructions reads source/task status without loading. Hub task inspection is read-only; /task creates and opens Rex. Rex task clients cannot list, create or switch tasks. Ctrl+C detaches. Answer previews are sampled/provisional; retained history is authoritative. This is plain line mode, not TUI.\n"); continue; }
         if (text === "/draft") {
           if (!active) throw new Error("No active unacknowledged draft");
           const preview = plain(JSON.stringify(active));
@@ -323,15 +327,24 @@ async function main() {
           olderBefore = typeof page.next === "string" ? page.next : undefined;
           stdout.write(olderBefore ? "More retained history: /older\n" : "Beginning of retained history.\n"); continue;
         }
+        if (text === "/hosts") {
+          requireNavigation(mode);
+          if (status.hostInventory !== 1) throw new Error("Hub lacks registered-host inventory");
+          stdout.write(`${plain(JSON.stringify(await command("list_hosts", {})))}\n`); continue;
+        }
+        if (text === "/brief") { const current = await command("status", { chatId: selected }); stdout.write(`${plain(JSON.stringify(object(current.binding).brief ?? "No structured brief saved"))}\n`); continue; }
         if (text === "/tasks" || text === "/tasks more") {
           requireNavigation(mode);
           if (text === "/tasks more" && !chatCursor) { stdout.write("No more chats; /tasks refreshes the list.\n"); continue; }
-          const args = { limit: 25, ...(text === "/tasks more" ? { after: chatCursor } : {}) };
+          const args = { limit: 25, ...(status.hostInventory === 1 ? { includeObservations: true } : {}), ...(text === "/tasks more" ? { after: chatCursor } : {}) };
           const page = await command("list_chats", args);
           // Validate/narrow the entire page before rendering or cursor advancement.
           if (!validDiscoveryPage(page, args)) throw new Error("Invalid chat discovery response; cursor unchanged");
-          for (const item of page.items) {
-            stdout.write(`${item.chatId === selected ? "*" : " "} ${plain(JSON.stringify(item.kind === "main" ? { ...item, kind: "hub", title: "Hub" } : item))}\n`);
+          const hosts = status.hostInventory === 1 ? (await command("list_hosts", {})).items as { machineId: string; connection: string }[] : undefined;
+          stdout.write("Grouped within this scan page; parent IDs may reference earlier pages. Connection/activity/Rex are samples, not lifecycle.\n");
+          for (const item of groupedTasks(page.items)) {
+            const row = { ...item, connection: hosts ? hosts.find(h => h.machineId === item.machineId)?.connection ?? "unregistered" : "unknown" };
+            stdout.write(`${item.chatId === selected ? "*" : " "} ${plain(JSON.stringify(item.kind === "main" ? { ...row, kind: "hub", title: "Hub" } : row))}\n`);
           }
           chatCursor = page.next;
           stdout.write(chatCursor ? "More chats: /tasks more\n" : "End of chat list.\n"); continue;
@@ -385,6 +398,18 @@ async function main() {
         }
         if (text === "/retry" && active?.kind === "instructions") { await importInstructions(); continue; }
         if (text === "/retry" && active?.kind === "task") { await createTask(); continue; }
+        if (text.startsWith("/new ")) {
+          create(); requireAcknowledged();
+          const form = parseTaskForm(text.slice(5));
+          if (form.machineId) {
+            if (status.hostInventory !== 1) throw new Error("Hub lacks registered-host inventory");
+            const hosts = await command("list_hosts", {});
+            if (!(hosts.items as { machineId: string }[]).some(h => h.machineId === form.machineId)) throw new Error("Selected host is not registered; no task requested");
+          }
+          const binding = object((await command("status", { chatId: selected })).binding);
+          active = { kind: "task", chatId: selected, requestId: randomUUID(), machineId: String(binding.machineId), cwd: String(binding.cwd), ...form };
+          await createTask(); continue;
+        }
         if (text.startsWith("/task-at ")) {
           create(); requireAcknowledged();
           const saved = parseTaskTarget(text.slice(9));

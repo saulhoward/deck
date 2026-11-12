@@ -1,132 +1,152 @@
 # Roadmap
 
-This file contains planned work, not implemented commands or support claims. Read the [README](../README.md) for the current workflow and the [Developer guide](DEVELOPER.md) for design rules. Completed work and earlier test results are in [History](HISTORY.md).
+This is planned work except for explicitly completed gates below, not a list of implemented commands or blanket support claims. Use the [README](../README.md) for current operation, the [Developer guide](DEVELOPER.md) for contracts, and [History](HISTORY.md) for recorded evidence. No delivery dates are implied.
 
 ## Current position
 
-The local prototype has one Pi writer, durable main/task chats, native file/bash tools, saved request drafts, explicit instruction import, and foreground subagents. Local Rex open/reopen, TUI task navigation, Rex-managed TUI startup, chat-scoped model/thinking controls, terminal status, and opt-in registered files/bash workers are implemented.
+**Implemented:** one hub-owned Pi Harness/SQLite store; separate hub/task conversations; native files/bash; saved drafts and retained native receipts; explicit instruction import; foreground owned subagents; task inspection/creation/messaging tools; idle-only model/thinking controls; managed task-locked Rex TUIs; verified worker transport; assigned-host Rex and task relay; explicit `/task-at` creation; `deck hub`, immutable creation briefs, grouped task/child inspection, registered-host selection and explicit bounded `hub_message` reporting.
 
-The [target architecture](DEVELOPER.md#target-interactive-and-scheduled-architecture) keeps all Pi execution and history at the hub. Interactive tasks get named Rex sessions on their execution machines, with named TUI terminals for their subagents. Scheduled jobs and their children use registered hosts without Rex. Jobs reuse their task/chat across runs; each run has its own admission identity and captured file settings.
+**Evidence limit:** isolated tests are now supplemented by [Phase 0 two-machine acceptance](HISTORY.md#phase-0-two-machine-acceptance), passed on 2026-11-12 for one Darwin arm64 pair using actual Tailscale peers, mock providers and a private Rex API 10 server. This is not cross-platform, live-provider or desktop GUI acceptance. Rex allocation remains limited to API 8/10 and worker-local Unix endpoints; the existing API 9/HTTPS operator endpoint remains unsupported.
 
-Remote interactive workflows are implemented with isolated evidence; real two-machine acceptance remains open. Jobs and child terminals remain target requirements. No delivery dates are set.
+**Not implemented:** remote task bootstrap from bare `deck agent`, MCP catalogs/transports/profiles, interactive child terminals, or captured scheduled jobs. `task_create` still defaults to the caller's host/cwd; only the hub model may explicitly select a registered host. `task_message` still refuses main/hub; `hub_message` is the separate explicit report path. Existing foreground delegation remains available.
+
+## Product boundary
+
+- One hub owns agents, model calls, admission, scheduling and canonical history. A primary task is a persistent conversation/work grouping, not a permanently running process. Its children retain Pi ownership.
+- The hub is a control/chat surface. Task TUIs participate only in their allocation-bound conversation; model coordination tools are a separate authority from UI navigation.
+- Workspace binding and explicit tool-profile grants determine execution. A terminal attachment never changes a task's machine, tools or credentials.
+- **Native MCP is the integration surface.** Deck's Zig layer implements MCP client transport and process supervision; Pi owns durable tool invocations. Hub-hosted services and assigned-worker services are explicit choices, not automatic fallback.
+- **Pi coding-agent extension compatibility is out of scope.** No plugin loader, hooks/UI emulation, worker Pi session, provider-plugin import or automatic `.pi` discovery. Internal Pi Durable adapters are not removed or confused with user plugins.
+- Tool hosts outlive TUI attachment and have no agent loop or transcript replica. Server software is separately installed; optional Node/Python-based MCP servers do not become mandatory dependencies of the native worker.
+- No automatic replay of input, MCP effects or Rex creation. Detach is not stop; stop ACK is not drainage; loss is not rollback. A journal cannot make an external service exactly-once.
 
 ## Next implementation sequence
 
-1. **Implemented:** distinct hub presentation, read-only task inspection, hub creation followed by Rex opening, and explicit status/inspection/reopen. Unsent prompts block hub navigation/creation; saved requests retain exact retries.
-2. **Implemented:** allocation-bound TUI startup and task-locked Rex clients. No cross-task navigation or non-Rex task participation. Explicit `--no-tui` follows the same role restrictions.
-3. **Partial:** registered native links, worker-only packaging, allocation-scoped task relay and assigned-host Rex launches are implemented. Complete real two-machine acceptance. Reuse the verified worker link, not a second login or exposed HTTP API; do not bypass the selected Rex API 9 gate.
-4. Add named subagent TUI terminals inside the parent interactive task's session. Preserve Pi ownership and define direct-input rules separately.
-5. Implement per-run file capture and Pi scheduling. Reuse each job's task/chat, give each run its own admission identity, and prove that jobs and their children create no Rex objects.
+Build one accepted vertical slice at a time. Phases 0–4 deliver the focused interactive workflow with stdio MCP. Phase 5 adds hosted HTTP integrations. Existing foreground subagents remain usable throughout; new child-terminal and scheduling machinery must not delay this milestone.
 
-The sections below define these requirements and the remaining validation work. They are work areas, not a requirement to finish every optional UI improvement before remote support.
+The order is deliberate: establish task identity/coordination first, prove MCP effects locally before distributing them, then let the remote launcher select the established task/profile contracts. Keep HTTP authentication and optional protocol features out of the first tool-host implementation.
 
-## 1. Finish local validation and usability
+| Phase | Deliverable | Exit evidence |
+| --- | --- | --- |
+| **0 — passed** | Existing two-machine baseline, one Darwin arm64 pair | Real peer/binary/client pins; effect and draft faults; reconnect/reopen without replay or fallback |
+| **1 — implemented** | Clear hub workflow and task coordination | Named task brief, grouped inspection, explicit host selection, bounded task-to-hub reply |
+| 2 | Native MCP on one host | Approved stdio tool catalog and durable, fault-tested tool invocation |
+| 3 | Assigned-worker MCP and tool profiles | Correct host/account/workspace, isolated capacity, retained outcomes across loss |
+| 4 | Authorized remote create/open launcher | Remote shell → one hub task → assigned Rex TUI, without general hub authority |
+| 5 | Streamable HTTP and selected service integration | Tested TLS/auth/session/retry contracts; approved real-service evidence |
 
-### Provider access
+Phase 0 is accepted for the recorded pair. Phase 1 is implemented with deterministic workflow, recovery and TUI acceptance; native stdio MCP (Phase 2) is next. Phases 3/4 must repeat real-machine acceptance for their new capabilities rather than treating this baseline as proof of future MCP/bootstrap behavior. New hosts/builds still require explicit approval and appropriate acceptance. Do not widen Rex compatibility or production deadlines to make a milestone appear complete.
 
-- [ ] Validate live ChatGPT login, refresh, account access, and inference in a separately approved test account/state directory.
-- [ ] Verify failure behavior for revoked grants and unavailable models. Do not fall back to paid keys.
-- [ ] Validate live model task inspection, independent task messaging, foreground delegation, and output previews.
-- [ ] Keep user-reported API-key results separate from automated and OAuth evidence.
+### First milestone scenario
 
-Acceptance: record the tested provider, mode, platform, and limits without exposing credentials. Keep automated tests offline. Live tests require explicit authorization; this plan does not authorize account access.
+On two explicitly registered machines, use the hub TUI to create a task with a brief and saved worker/cwd. Open its Rex TUI. Give it an approved worker-local stdio MCP tool and an explicitly granted hub-hosted service tool. Send input both directly and through the hub model. Have the task report back to the hub once, with provenance. Detach, interrupt the worker link, reconnect and reopen the same conversation. Then create/open a task from the authorized remote launcher. Verify canonical history, unchanged binding/profile, no hidden generation on creation, no duplicate effect/input, and no second Pi runtime.
 
-### Client workflow
+Use fake models and disposable MCP servers for deterministic acceptance. Real provider/service access is a separately authorized check, not implied by this scenario or by approving a worker.
 
-- [x] Update CLI help for current TUI task and Rex commands.
-- [x] Add task discovery, creation, and read-only selection inside the hub TUI. Preserve unsent editor text and unresolved drafts. Reject stale replies after selection changes.
-- [x] Distinguish hub/task colors and labels; require Rex for task participation and lock task clients. Apply the same policy to helper requests and plain clients.
-- [x] Show saved Rex allocation, fresh terminal presence, and agent activity as separate facts. Add explicit open/reopen for the selected interactive task.
-- [ ] Add Markdown and large-history navigation without unbounded display memory or terminal-control execution.
-- [ ] Add richer tool/activity detail with explicit clipping and sensitive-data limits.
-- [x] Integrate allocation-bound Rex startup with the TUI and use it for managed interactive task terminals. Keep the plain client as an explicit fallback.
-- [ ] Validate actual Rex GUI status display, terminal fonts, tmux, SSH, and nested terminal behavior.
-- [ ] Test native runtime/terminal behavior on more macOS/Linux architectures. Cross-compilation alone is not enough.
+## Phase 0 — Accept the existing remote baseline
 
-Acceptance: preserve exact retries, prompt text, safe detach, restored terminal modes, fixed identity checks, and bounded memory. Keep the plain client. Do not create hidden terminals or start inference while browsing.
+**Passed for the recorded Darwin arm64 pair on 2026-11-12.** See the [acceptance record](HISTORY.md#phase-0-two-machine-acceptance) for topology, fixtures, fault cases and limits. All test processes were stopped; scratch state/receipts and staged immutable builds were retained. This was a disposable registration, not a permanent production service setup.
 
-### Reads and reconnect
+**Scope:** validate what is already built before layering remote MCP or bootstrap authority on it.
 
-- [ ] Design incremental/SSE delivery only with bounded buffers and a clear history watermark. Keep retained history separate from replaceable samples.
-- [ ] Define full shell-output artifacts and arbitrary tool partials before claiming lossless output.
-- [ ] Add per-request transport cancellation only when a real long-running command needs it.
-- [ ] Extend client reconnect and Rex daemon-restoration tests as separate contracts. A client surviving a same-hub restart does not prove server migration or daemon recovery.
+- Independently approve the actual worker OS peer, worker executable digest, ordered capabilities and client/socket pair. An embedded Rex node is not the worker OS identity.
+- Use a supported private/test Rex endpoint and scratch hub/worker state. Repeat native file/bash effects, cancellation, lost acceptance/results, original-identity receipt recovery, stale replies and identity drift on actual machines.
+- Exercise managed startup, direct task input, worker/hub reconnect, terminal exit and explicit same-conversation reopen. Keep startup evidence, terminal presence and agent activity distinct.
+- Record platform/tool versions, topology and refusal cases. Preserve builds, configuration and receipts; do not install/enroll/upgrade a live host without separate authorization.
 
-Acceptance: disconnect means unavailable/unknown, not idle, absence, or permission to replay. Reconnect restores observation; it does not submit drafts, recreate terminals, or move assignments.
+**Gate:** a repeatable two-machine run demonstrates no replay, silent generation replacement, task migration, cross-host fallback or worker Pi store. API 9 support is a separate contract exercise if needed, not a shortcut in this phase.
 
-## 2. Define settings and recovery extensions
+**Not in this phase:** new transports, MCP, new task roles, generic monitoring dashboards or automatic repair.
 
-- [ ] Specify full per-input settings and instruction capture: exact contents, path precedence, required-file failures, timing, retention, and provider coverage.
-- [ ] Prove capture for queued input, steering, tool continuation, retry, compaction, child work, and process recovery before general or busy-time configuration.
-- [ ] Design automatic project-file discovery separately from the existing explicit `AGENTS.md` import.
-- [ ] Define compatible migrations, downgrade refusal, original-build retention, and recovery when the original runtime is unavailable.
-- [ ] Add online backup or general repair only with a tested storage and external-effect reconciliation policy.
-- [ ] Define retention/cleanup for sensitive transcripts, receipts, drafts, and backups.
-- [ ] Investigate provider fast-mode and quota APIs. Show requested/effective settings and unknown/stale quota; do not invent support or percentages.
+## Phase 1 — Make the hub/task workflow explicit
 
-Acceptance: no agent swapping around queued inputs, hook-only enforcement, second scheduler, or rewritten old captures. Do not turn a settings observation into a claim that files or code were frozen. Preserve expected-selection checks for model changes and idle-only instruction imports.
+**Implemented in source.** The three slices are present: (1) `deck hub` and bounded creation briefs, (2) grouped inspection and registered-host selection, (3) explicit `hub_message` with durable correlation and an eight-hop causal limit. See [workflow contracts](DEVELOPER.md#hub-workflow-contracts) and the [validation record](HISTORY.md#phase-1-hub-workflow-and-coordination). No new execution engine or worker Pi store was introduced.
 
-## 3. Add verified remote effects
+- Add `deck hub` as the clear hub-client entry point. Preserve existing client flags and inspector semantics. `deck serve` remains foreground; document external service management rather than adding an installer now.
+- Extend task creation metadata with title/name, problem statement and description. Preserve stable IDs, exact creation bytes and legacy receipt compatibility. Provide bounded brief entry instead of requiring long descriptions in the existing 256-byte TUI command line; preserve unsent prompts and unresolved drafts. Saving/editing metadata must not silently submit input or rewrite old context.
+- Add grouped primary-task/child inspection. Show saved binding, sampled connection/activity and Rex state separately; list offline tasks too. Do not invent an open/completed lifecycle from connectivity or a finished assistant turn.
+- Expose a bounded read-only registered-host inventory and explicit host/cwd selection for hub creation, including the hub model's creation tool. Preserve inherited defaults and no-reassignment behavior. Registration/enrollment is never a model tool.
+- Add an explicit task-to-hub messaging tool (`hub_message`) alongside existing task messaging. Carry stable request IDs, authoritative sender provenance and reply correlation. The first version sends explicit follow-up input; a passive-notification UI is not a prerequisite.
+- Enforce a bounded causal-hop budget in agent messaging tools, propagated across agent-origin messages rather than reset by another tool call. Human initiation is distinct. Never automatically relay ACKs, status observations or final answers as new input.
 
-Do not expose a remote listener before verified identity exists. The existing loopback trust model is not remote authentication.
+**Gate exercised:** a deterministic hub → task → hub exchange creates one task, starts it only on explicit input, records both sides, and stops a scripted acknowledgement loop. Tests cover cutoff pinning against later human input, lower-hop reset refusal, SIGKILL after report admission, retained legacy envelopes, lost creation ACKs and the real PTY composer. Creation/opening remain separate mutations. Task clients remain locked; owned children still cannot receive independent direct input or model changes. Old drafts/receipts and existing task-to-task behavior remain valid.
 
-**First transport slice implemented:** explicit private worker configuration/approval, actual-socket Tailscale verification on both outbound data/control links, generation fencing, exact saved-host routing, independent cancellation/heartbeat capacity, and a native-only `deck-worker` package. Isolated TCP tests use injected identity verification and cover receipt preservation, lost results, host isolation, and saturated result pipes. This is not a real two-machine Deck test. Earlier Tailscale self-node/selected-peer and HTTPS/Rex probe evidence remains separate; the selected Rex endpoint's API 9 is still not enabled for Deck allocation. Opt-in `files,bash,rex` workers now pair a third verified, generation-bound task channel and a private Unix proxy. Assigned-host Rex discovery/allocation/inspection and managed task clients are tested with a private API 10 server and actual sockets/FIFOs. This remains isolated evidence; the selected real API 9 service is still unsupported.
+**Deliberate initial bounds:** briefs are immutable creation snapshots, not an existing-task edit API; grouping is within bounded scan pages with parent links across pages; host samples are not health leases or task lifecycle. The eight-hop budget bounds forwarding depth, not arbitrary native code or fan-out. No new real-machine or live-provider/service acceptance is implied.
 
-- [ ] Validate Tailscale peer verification on selected real test machines. Map actual verified peers to registration, not claimed headers or names.
-- [x] Define schema-backed worker registration, capabilities, and connection generation. Runtime inventory remains future work.
-- [x] Add outbound files/bash worker links with bounded effects/results and independent control capacity.
-- [x] Fence replies and disconnect cleanup by generation. An old connection must not affect its replacement.
-- [x] Preserve host/cwd assignments while a worker is offline. Never execute its effects elsewhere as fallback.
-- [x] Preserve original operation IDs/bytes and consult retained receipts on explicit original-identity retry; never replay on reconnect.
-- [ ] Add a general read-only remote receipt/reconciliation UI without reissuing effects.
-- [ ] Repeat disconnect before/after acceptance, lost results, duplicate/stale replies, identity drift, hub/worker restart, and reconnect-backoff acceptance on real machines.
-- [x] Prove host isolation with independent native links and evented remote pipes in isolated tests; repeat on actual machines.
-- [x] Package worker-only mode without a Pi runtime or provider credentials.
-- [x] Route Rex creation/inspection through the assigned execution host and verify its saved server identity. A server override never moves a task.
-- [x] Carry allocation-scoped task commands through the verified worker link, with independent bounded capacity and no extra user login. The trusted-local HTTP API remains private.
-- [x] Add hub-only `/task-at` explicit host/cwd creation using existing saved drafts and separate creation/open ACKs.
-- [x] Test task TUI startup, worker-link reconnect, session closure and explicit same-conversation reopening through actual isolated transport and a private supported Rex server, without replaying input.
-- [ ] Repeat that interactive workflow on two real machines with operator-approved peer/binary/client pins. Validate API 9 contracts before any allowlist change.
+**Not in this phase:** MCP, remote launcher authority, full-text search, independent child agents, automatic outcome reporting or a new task scheduler.
 
-Acceptance: use verified identity and explicit bindings for every effect. Keep unknown accepted effects uncertain. Worker liveness is not effect completion. Do not add worker Pi stores, transcript replication, or cross-host failover.
+## Phase 2 — Native MCP on one host
 
-## 4. Improve task coordination
+**Scope:** one complete, safe stdio MCP path on the hub's native tool host, designed for reuse on a worker. Do not prototype an unrelated Node/Pi-plugin execution path that must later be replaced.
 
-- [ ] Add metadata and full-text search over retained conversations. Keep any index derived and rebuildable.
-- [ ] Add dispatch-linked answers or background delegation using Pi ownership and tasks, not a new reporting lifecycle.
-- [ ] Give interactive subagents named TUI terminals inside their parent task's named Rex session. Store full IDs and preserve Pi child ownership across terminal close/reopen.
-- [ ] Define owned-child input and lifetime rules before allowing direct interaction or independent configuration. A terminal view must not revive a finished owner or start another executor.
-- [ ] Keep scheduled-job children headless. Child creation must not allocate Rex objects merely because interactive children have terminals.
-- [ ] Define delegation duration/cost limits if needed. Do not imply current calls have such budgets.
-- [ ] Add timestamped machine capacity/load views after remote registration is trustworthy.
+1. **Freeze the boundary.** Define the supported MCP protocol revision, JSON Schema subset, request/response types, operation/receipt versioning and numeric bounds for catalogs, frames, concurrency, output and deadlines. Generate Deck contracts; keep external MCP framing distinct. Refuse unsupported schemas/features rather than weakening validation.
+2. **Load an explicit private profile.** Use approved executable/argv/cwd, a restricted environment with local credential references, and an allowlisted catalog. No automatic project/Pi configuration, package downloads, plugin execution or secret-command expansion. Resolve task-dependent launch configuration explicitly; never mutate a shared process cwd.
+3. **Implement the Zig client.** Supervise the stdio process; negotiate initialization; perform bounded paginated `tools/list`; expose approved `tools/call`; correlate responses and clean up owned resources. Separate bounded stderr diagnostics from protocol stdout. Tool-list changes require explicit refresh/review, not automatic grants.
+4. **Bridge durable Pi calls.** Project only authorized descriptors into each conversation. Bind each invocation to the conversation, saved host/profile/schema revision and Pi tool-task ID. Persist acceptance before sending to the server and retain the validated result. Explicit identical retries consult receipts; changed requests conflict; accepted-without-result stays uncertain.
+5. **Prove effects before enabling writes.** Start bring-up with a disposable read tool, then a fake counter mutation. Do not ship arbitrary mutating tools until loss before/after acceptance, lost server replies, restart, duplicate/wrong IDs, changed schemas and cancellation pass. MCP annotations/JSON-RPC IDs are not permission to replay.
 
-Acceptance: search and inspection do not become model input automatically. Main and task contexts stay separate. A completed assistant turn does not prove a project is complete. A new tool call is not a safe retry of an ambiguous old call.
+**Gate:** a hub agent discovers only granted tools, calls both fixtures, and retains results in its existing Pi conversation. A lost mutation reply never increments the counter twice through automatic retry. Native acceptance without a result is surfaced as uncertain. Detaching the TUI does not kill the tool host. A broken server does not starve native control traffic or silently cancel unrelated conversations. Configuration secrets are not copied into catalogs, task inputs/history or diagnostics; returned service data is still treated as sensitive, not magically redacted.
 
-## 5. Add jobs and monitoring
+**First supported surface:** bounded text/structured tool results. No sampling, elicitation, prompts, resources/subscriptions, custom UI, binary artifacts, Streamable HTTP or OAuth in this phase. Unsupported capabilities are not advertised and receive explicit refusal. This is per-invocation configuration provenance, not a claim of full per-input or per-job file capture.
 
-- [ ] Use Pi durable tasks/sleeps in the hub runtime for scheduling and recovery. Zig can calculate calendar instants. Do not launch a Pi process per job.
-- [ ] Reuse each job's persistent Deck task and Pi conversation across runs. Give each occurrence a unique `(job ID, scheduled UTC instant)` admission identity.
-- [ ] Capture each run's specified file settings through its assigned host. Define capture timing and failure rules; current admission observations are not file snapshots.
-- [ ] Retain each run's captured contents and reuse them on same-run retry/recovery. Later runs can capture newer contents.
-- [ ] Commit occurrence metadata, captured-settings references, and admission atomically through a supported Pi path. Do not assume the current input reservation is already that transaction.
-- [ ] Run job and child effects through registered host connections. Prove that scheduling, child creation, retries, recovery, and inspection open no Rex sessions or terminals.
-- [ ] Define timezone/DST behavior, serialized overlap, coalesced misfires, and bounded catch-up.
-- [ ] Keep manual input separate from recurring deadlines. Disabling a job must not pretend to undo accepted work.
-- [ ] Add HTTP/web monitoring only after transport identity, same-origin/CSRF rules, and bounded read views are defined.
-- [ ] Consider explicit user-service installation and optional runtime secret references as separate operational features. Builds must not install services or sign in.
+## Phase 3 — Route MCP to assigned workers
 
-Acceptance: use one execution owner and one canonical history. An offline worker keeps its assignment. Schedules must not create a parallel queue or bypass settings/effect safety.
+**Scope:** reuse Phase 2's native component and receipt contract over the existing verified worker architecture.
 
-## Scope limits
+- Add explicit MCP worker capability/profile approval; files/bash-only workers remain unchanged. MCP must work without Rex or a TUI installed. Do not enroll capabilities merely because an executable/configuration exists.
+- Carry calls through the native effect path with bounded per-server/host capacity and independent cancellation/heartbeat progress. If an additional channel is necessary, independently verify its actual peer and generation too. Do not expose a general remote HTTP command API or misuse task-client RPC as tool-execution authority.
+- Store explicit task profile grants. Resolve credentials and server startup on the designated host. Key shared server instances by compatible host/profile revision/workspace/credential context; never let one task's cwd or environment affect another.
+- Namespace and validate hub-hosted versus assigned-worker tools. Exposing a shared hub service is an explicit grant, not fallback when a worker is unavailable. Recheck grants at admission, not just during catalog display.
+- Test same-named tools with different hosts/accounts/workspaces, withdrawn tools, stale profile revisions, worker loss, restart, outstanding cancellation and receipt lookup. Profile changes are explicit and initially require affected work to be idle/drained.
 
-Rex terminal creation remains **best-effort**. Race-free replacement, duplicate-free creation, and recovery of every lost creation reply are not release gates for the local workflow. Preserve exact-object checks and manual cleanup warnings. This exception does not weaken input, file, or shell safety.
+**Gate:** on the accepted two-machine baseline, a task uses a worker-local tool and an explicitly granted hub service, while every model call and canonical conversation remains at the hub. A third/ungranted host cannot receive calls. Reconnect does not replay effects or refresh grants silently. Closing/reopening Rex does not change the selected tool environment. The worker package remains native-only; optional server runtimes are separately provisioned.
 
-The current plan does not include source polling/triage, task-outcome reporting, managed worktrees, browser automation, mobile/push, historical transcript import, embeddings, learning, or automatic cross-host recovery.
+**Not in this phase:** Pi configuration auto-import, arbitrary cross-host tool selection, tool-host failover, offline inference or a worker transcript store.
 
-For every stage:
+## Phase 4 — Add the remote create/open launcher
 
-1. State the behavior and refusal cases before coding.
-2. Extend schemas and semantic tests at the actual boundary.
-3. Use scratch state, fake providers, and isolated native services.
-4. Record runtime evidence separately from compilation or source review.
-5. Deploy only after all hub work has settled, with the prior immutable build retained.
+**Scope:** make starting work from a remote shell convenient without granting an unattached client the task or hub role.
+
+- Define a narrow, explicitly approved launcher permission over the verified worker link. It is separate from allocation-bound task RPC. It may request creation on that worker or opening an authorized task already bound there; it cannot enroll workers, change bindings, access hub chat/login, or become a general command client.
+- Implement the proposed remote `deck agent` workflow: select the configured hub and an existing task, or explicitly confirm a new task's brief/cwd. Set the final flags/prompt contract during this phase. Preserve current local/inspector behavior; never silently infer a task from cwd, labels or `REX_BLOCK`.
+- Reuse durable creation drafts and exact-identity recovery. Obtain creation ACK before the separate best-effort Rex request; a lost open reply never recreates the task. The hub authorizes the allocation and the assigned worker launches the approved task TUI.
+- Require normal pinned hub/task/allocation/block startup before input. Keep bootstrap UI authority and the launched task client's authority separate. A worker link authenticates the approved machine, not a new individual OS-user identity; do not claim a per-human ACL system.
+
+**Gate:** a remote shell can explicitly create/open one task, then participate in its managed Rex TUI with hub-owned inference and selected MCP profiles. Missing approval, wrong hub/task/host, offline workers and unsupported Rex refuse without fallback. Simulated lost creation/open/startup replies preserve exact drafts/uncertainty and cause no automatic task, input or terminal replay. No second Deck user login or exposed hub HTTP API is introduced.
+
+**Not in this phase:** automatic enrollment, implicit task adoption, broad remote hub access or race-free Rex creation. Best-effort duplicate/orphan risks remain explicit.
+
+## Phase 5 — Add hosted MCP integrations deliberately
+
+**Scope:** extend the proven tool boundary, not the agent topology. This phase is needed for services requiring Streamable HTTP; it does not block the stdio milestone.
+
+- First implement a bounded native Streamable HTTP client with tested protocol negotiation, TLS/endpoint identity, sessions, correlation, streaming/disconnect behavior and token-safe redirect rules. Connection recovery never becomes hidden mutation retry. Do not add legacy SSE transport merely for nominal coverage.
+- Start with explicitly provisioned service credentials on the selected tool host. Test host-local secret resolution, revocation, wrong endpoint/account configuration, malformed replies and redaction with a disposable service.
+- Add OAuth only as a separate increment required by a selected service. Specify consent, scopes, callback ownership, storage and refresh before use. Existing Pi login state is not an implicit credential-sharing API. Service authentication is distinct from worker trust and model-provider login.
+- Choose one real integration, such as an MCP service exposing Slack. Record its actual server version, transport, tools and authentication requirements; do not assume a Pi Slack plugin is an MCP server. Validate a read first, then a separately approved disposable write and uncertain-outcome handling.
+
+**Gate:** the same profile/grant/receipt rules hold over HTTP. A lost write response is not automatically resent, credentials remain local to their tool host, and account/endpoint drift cannot silently redirect a call. Record real-service evidence separately from fake-server tests. No plugin compatibility layer is introduced to bypass an unsupported protocol feature.
+
+## Deferred work after the interactive MCP milestone
+
+These remain goals, not competing prerequisites for Phases 1–4:
+
+- **Interactive children:** named TUI terminals inside the primary task's Rex session. Define owned-child input, model-setting and lifetime rules first. A terminal must not revive a finished owner or create a second executor. Existing foreground children remain the baseline.
+- **Scheduled jobs:** Pi-owned durable scheduling, stable job chat, unique occurrence identity and per-run captured configuration/file contents. Capture through the assigned host, retain exact contents/profile references for same-run recovery, and define atomic admission, timezone/DST, overlap and misfire behavior. Jobs and children never allocate Rex. Current version-3 admission observations are not these captures.
+- **Provider acceptance:** separately authorized live OAuth/refresh, entitlement, revoked-grant and model-delegation tests. Never fall back to paid keys. Keep automated model tests offline.
+- **Settings/recovery:** full per-input capture across queued input, steering, continuation, compaction and children; explicit instruction precedence; compatible migration/downgrade policy and original-build retention. No hook-only capture enforcement or rewritten historical records.
+- **Operational tools:** read-only receipt/reconciliation UI, sensitive-data retention policy, backup/repair improvements, explicit service installation and timestamped capacity views. Do not reissue effects to inspect or repair them.
+- **Presentation/platforms:** bounded Markdown/large-history navigation, tool-output artifacts, derived search, actual GUI/font/tmux/SSH validation and additional platform runtime tests. Cross-compilation is not runtime evidence. Incremental delivery needs bounded buffers and a canonical watermark.
+- **Optional protocol growth:** reviewed MCP configuration import, additional result/resource types and interaction features only when a concrete integration requires them. Keep provider quota/fast-mode, web monitoring and unrelated automation out of the core path.
+
+## Acceptance discipline
+
+For each phase:
+
+1. Write behavior, refusal cases, ownership and numeric limits before coding. Decide the exact schema/protocol subset, not a claim of generic compatibility.
+2. Extend generated contracts and semantic boundary tests without changing historical request hashes/receipt encodings silently.
+3. Test with scratch state, fake models and disposable services. Include crash/lost-ACK points, stale identities, bounded capacity, cancellation, redaction and exact-identity recovery.
+4. Run relevant native/runtime, installed package and cross-build checks. Record source, isolated integration, real-machine and real-service evidence separately; do not invent test counts for planned features.
+5. Review the phase gate before starting the next dependent slice. Deployment/enrollment/account access always requires separate authorization, settled work and retained immutable builds.
+
+No phase authorizes automatic terminal cleanup, transcript replication, cross-host failover, hidden mutation retry, a new execution scheduler or a Pi-extension compatibility project. Rex remains best-effort; that exception does not weaken input/native/MCP effect safety. Source triage, managed worktrees, browser/mobile automation, embeddings and learning remain outside this plan.

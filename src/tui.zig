@@ -30,6 +30,10 @@ const help =
     \\v V, u, Ctrl-R        visual selection, undo / redo
     \\Insert Enter          newline (never submit); Ctrl-W/U edit
     \\
+    \\/new                  hub only: JSON task-brief composer (Ctrl-S creates)
+    \\/hosts                registered hosts; Enter selects host for new task
+    \\/brief                inspect saved creation brief (read only)
+    \\:cancel               clear an unsubmitted task form, not admitted work
     \\/tasks                hub only: inspect tasks read-only
     \\/task TITLE           hub only: create task and open Rex
     \\/task-at JSON         hub only: {machineId,cwd,title} target
@@ -145,6 +149,42 @@ fn line(ctx: fw.DrawContext, surface: fw.Surface, x: u16, y: u16, text: []const 
         col += width;
     }
 }
+// Presentation order only. Wire pages/cursors retain canonical ascending IDs.
+fn taskRoot(page: wire.TuiTasks, index: usize) u64 {
+    var current = page.items[index];
+    for (0..25) |_| {
+        const parent = current.parentChatId orelse return std.fmt.parseInt(u64, current.chatId, 10) catch 0;
+        var found = false;
+        for (page.items) |row| if (std.mem.eql(u8, row.chatId, parent)) {
+            current = row;
+            found = true;
+            break;
+        };
+        if (!found) return std.fmt.parseInt(u64, parent, 10) catch 0;
+    }
+    return 0; // The ingress guard refuses cyclic/non-ancestral parent IDs.
+}
+fn taskOrder(page: wire.TuiTasks) [25]usize {
+    var order: [25]usize = undefined;
+    for (0..page.items.len) |i| {
+        order[i] = i;
+        var j = i;
+        while (j > 0 and taskRoot(page, order[j - 1]) > taskRoot(page, order[j])) : (j -= 1) std.mem.swap(usize, &order[j - 1], &order[j]);
+    }
+    return order;
+}
+test "task display groups children without changing the canonical page or IDs" {
+    const page: wire.TuiTasks = .{ .items = &.{
+        .{ .chatId = "1", .kind = .main, .title = "Hub", .machineId = "a", .cwd = "/" },
+        .{ .chatId = "3", .kind = .task, .title = "Task", .machineId = "b", .cwd = "/remote" },
+        .{ .chatId = "7", .kind = .subagent, .title = "Child", .machineId = "a", .cwd = "/", .parentChatId = "1" },
+        .{ .chatId = "9", .kind = .subagent, .title = "Other page parent", .machineId = "c", .cwd = "/", .parentChatId = "2" },
+    }, .next = "10" };
+    const order = taskOrder(page);
+    try std.testing.expectEqualSlices(usize, &.{ 0, 2, 3, 1 }, order[0..4]);
+    try std.testing.expectEqualStrings("3", page.items[1].chatId);
+    try std.testing.expectEqualStrings("10", page.next.?);
+}
 const Model = struct {
     a: std.mem.Allocator,
     bridge: *Bridge,
@@ -159,6 +199,10 @@ const Model = struct {
     model_index: usize = 0,
     task_picker: bool = false,
     task_index: usize = 0,
+    hosts_view: bool = false,
+    host_index: usize = 0,
+    brief_view: bool = false,
+    task_form: bool = false,
     rex_view: bool = false,
     settings_uncertain: bool = false,
     paste_mode: bool = false,
@@ -282,6 +326,44 @@ const Model = struct {
         if (!self.canList()) return;
         if (try self.bridge.tasks(after)) self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake) else self.note("Client request in flight; task read not queued.");
     }
+    fn beginTaskForm(self: *Model, machine: ?[]const u8) !void {
+        if (!self.canNavigate()) return;
+        if (self.readOnly()) {
+            self.note("Return to /hub to create a task.");
+            return;
+        }
+        if (self.bridge.pending != null) {
+            self.note("Client request in flight; creation composer not queued.");
+            return;
+        }
+        if (machine) |id| {
+            const text = try std.fmt.allocPrint(self.a, "{{\"title\":\"\",\"machineId\":\"{s}\",\"cwd\":\"\",\"problem\":\"\",\"description\":\"\"}}", .{id});
+            defer self.a.free(text);
+            try self.editor.set(text);
+        }
+        self.hosts_view = false;
+        self.task_form = true;
+        self.focus = .prompt;
+        self.note("Paste JSON {title,problem?,description?,machineId?,cwd?}. Ctrl-S creates; :cancel clears. No input/generation.");
+    }
+    fn submitTaskForm(self: *Model) !void {
+        if (!self.canWrite() or !self.canList() or self.locked() or self.settings_uncertain) {
+            self.note("Resolve saved requests/settings before creating.");
+            return;
+        }
+        const raw = std.json.parseFromSlice(std.json.Value, self.a, self.editor.text.items, .{}) catch {
+            self.note("Invalid task JSON; composer unchanged.");
+            return;
+        };
+        defer raw.deinit();
+        if (!@import("task_brief.zig").form(raw.value)) {
+            self.note("Use title <=200, problem <=2048, description <=8192 bytes; host/cwd together. Composer unchanged.");
+            return;
+        }
+        const form = try wire.parseTaskCreationForm(self.a, self.editor.text.items);
+        defer form.deinit();
+        if (try self.bridge.createForm(form.value)) self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake) else self.note("Client request in flight; creation not queued.");
+    }
     fn createAt(self: *Model, json: []const u8) !void {
         if (!self.canNavigate()) return;
         const raw = std.json.parseFromSlice(std.json.Value, self.a, json, .{}) catch {
@@ -311,6 +393,8 @@ const Model = struct {
         if (started) self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake) else self.note("Client request in flight; task creation not queued.");
     }
     fn issue(self: *Model, action: Action) !void {
+        if (action == .hosts and !self.canList()) return;
+        if (action == .send and self.task_form) return self.submitTaskForm();
         if ((action == .send or action == .retry or action == .discard or action == .stop or action == .configure) and !self.canWrite()) return;
         if (self.settings_uncertain and (action == .send or action == .retry)) {
             self.note("Settings outcome unconfirmed; wait for a fresh observation before input.");
@@ -334,7 +418,7 @@ const Model = struct {
         } else self.note("Client request in flight; action not queued. Try again after its reply.");
     }
     fn quit(self: *Model, ctx: *fw.EventContext, force: bool) void {
-        const saved = if (self.state()) |s| (if (s.draft) |draft| draft.saved and draft.kind == .input else false) else false;
+        const saved = if (self.state()) |s| (if (s.draft) |draft| draft.saved and (draft.kind == .input or (self.task_form and draft.kind == .task)) else false) else false;
         if (!force and self.editor.text.items.len > 0 and !saved) {
             self.note("Prompt has no confirmed saved draft. :send / :retry, or :q! to detach without it.");
             return;
@@ -343,7 +427,16 @@ const Model = struct {
     }
     fn ex(self: *Model, ctx: *fw.EventContext) !void {
         const cmd = self.command.items;
-        if (std.mem.eql(u8, cmd, "tasks")) try self.taskPage(null) else if (std.mem.startsWith(u8, cmd, "task-at ")) try self.createAt(cmd[8..]) else if (std.mem.startsWith(u8, cmd, "task ")) try self.createTask(std.mem.trim(u8, cmd[5..], " "), null) else if (std.mem.startsWith(u8, cmd, "select ")) {
+        if (std.mem.eql(u8, cmd, "new")) try self.beginTaskForm(null) else if (std.mem.eql(u8, cmd, "hosts")) try self.issue(.hosts) else if (std.mem.eql(u8, cmd, "brief")) {
+            self.brief_view = true;
+            self.help_scroll = 0;
+        } else if (std.mem.eql(u8, cmd, "cancel") and self.task_form) {
+            if (self.locked() or self.bridge.pending != null) self.note("Resolve the creation request with :retry or :discard first.") else {
+                try self.editor.set("");
+                self.task_form = false;
+                self.note("Unsubmitted task form cleared; no task requested.");
+            }
+        } else if (std.mem.eql(u8, cmd, "tasks")) try self.taskPage(null) else if (std.mem.startsWith(u8, cmd, "task-at ")) try self.createAt(cmd[8..]) else if (std.mem.startsWith(u8, cmd, "task ")) try self.createTask(std.mem.trim(u8, cmd[5..], " "), null) else if (std.mem.startsWith(u8, cmd, "select ")) {
             const id = std.mem.trim(u8, cmd[7..], " ");
             const n = std.fmt.parseInt(u64, id, 10) catch 0;
             if (n == 0 or n > 9007199254740991 or id[0] == '0' or !std.ascii.isDigit(id[0])) self.note("Use /select with a positive chat ID from /tasks.") else try self.selectChat(id);
@@ -368,6 +461,21 @@ const Model = struct {
             self.quit(ctx, false);
             return;
         }
+        if (self.brief_view) {
+            if (key.matches(vaxis.Key.escape, .{}) or key.matches('q', .{})) self.brief_view = false else if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) self.help_scroll = @min(self.help_max, self.help_scroll + 1) else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) self.help_scroll -|= 1;
+            return;
+        }
+        if (self.hosts_view) {
+            if (key.matches(vaxis.Key.escape, .{}) or key.matches('q', .{})) {
+                self.hosts_view = false;
+                return;
+            }
+            const hosts = if (self.state()) |s| s.hosts orelse return else return;
+            if (key.matches('r', .{})) try self.issue(.hosts) else if (hosts.items.len > 0) {
+                if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) self.host_index = @min(hosts.items.len - 1, self.host_index + 1) else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) self.host_index -|= 1 else if (key.matches(vaxis.Key.enter, .{})) try self.beginTaskForm(hosts.items[self.host_index].machineId);
+            }
+            return;
+        }
         if (self.task_picker) {
             if (key.matches(vaxis.Key.escape, .{}) or key.matches('q', .{})) {
                 self.task_picker = false;
@@ -377,7 +485,7 @@ const Model = struct {
             if (key.matches('n', .{})) {
                 if (page.next) |next| try self.taskPage(next);
             } else if (key.matches('g', .{})) try self.taskPage(null) else if (page.items.len > 0) {
-                if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) self.task_index = @min(page.items.len - 1, self.task_index + 1) else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) self.task_index -|= 1 else if (key.matches(vaxis.Key.enter, .{})) try self.selectChat(page.items[self.task_index].chatId);
+                if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) self.task_index = @min(page.items.len - 1, self.task_index + 1) else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) self.task_index -|= 1 else if (key.matches(vaxis.Key.enter, .{})) try self.selectChat(page.items[taskOrder(page)[self.task_index]].chatId);
             }
             return;
         }
@@ -531,6 +639,9 @@ const Model = struct {
                         const s = response.value.case0.snapshot;
                         if (action == .select) {
                             self.task_picker = false;
+                            self.hosts_view = false;
+                            self.brief_view = false;
+                            self.task_form = false;
                             self.rex_view = false;
                             self.model_picker = false;
                             self.scroll = 0;
@@ -544,7 +655,17 @@ const Model = struct {
                             self.task_picker = true;
                             self.task_index = 0;
                         }
-                        if (action == .create) self.uncertain = false;
+                        if (action == .hosts) {
+                            self.hosts_view = true;
+                            self.host_index = 0;
+                        }
+                        if (action == .create) {
+                            self.uncertain = false;
+                            if (self.task_form) {
+                                try self.editor.set("");
+                                self.task_form = false;
+                            }
+                        }
                         // Only a fresh observation updates the indicator: action
                         // ACKs and older pages can carry cached display fields.
                         if (action == .poll or action == .latest) {
@@ -563,6 +684,7 @@ const Model = struct {
                         }
                         if (self.snapshot == null and s.draft != null) try self.editor.set(s.draft.?.text);
                         if (action == .send or action == .retry or action == .discard) {
+                            self.task_form = false;
                             self.uncertain = false;
                             try self.editor.set("");
                             self.scroll = 0;
@@ -575,7 +697,7 @@ const Model = struct {
                     }
                 }
                 self.ticks += 1;
-                if (self.ticks % 10 == 0 and self.bridge.pending == null and !self.command_mode and !self.paste_mode and !self.model_picker and !self.task_picker and !self.rex_view) {
+                if (self.ticks % 10 == 0 and self.bridge.pending == null and !self.command_mode and !self.paste_mode and !self.model_picker and !self.task_picker and !self.hosts_view and !self.brief_view and !self.rex_view) {
                     try self.issue(.poll);
                 }
                 // A slow background read becomes visible even without input or
@@ -593,7 +715,7 @@ const Model = struct {
             .paste_start => {
                 if (self.terminal_status) |status| status.presentation.acknowledge();
                 self.paste_mode = true;
-                self.reject_paste = self.command_mode or self.help_visible or self.model_picker or self.task_picker or self.rex_view or self.locked() or self.readOnly();
+                self.reject_paste = self.command_mode or self.help_visible or self.model_picker or self.task_picker or self.hosts_view or self.brief_view or self.rex_view or self.locked() or self.readOnly();
                 self.paste_overflow = false;
                 self.paste_buffer.clearRetainingCapacity();
             },
@@ -634,21 +756,61 @@ const Model = struct {
         for (0..w) |x| surface.writeCell(@intCast(x), 0, .{ .style = status_bar });
         line(ctx, surface, 0, 0, title, status_bar, null, 0);
         if (self.task_picker) {
-            line(ctx, surface, 1, 2, "TASKS · saved chats (labels are not host availability)", accent, null, 0);
+            line(ctx, surface, 1, 2, "TASKS · grouped within page · samples are not task lifecycle", accent, null, 0);
             if (s) |snap| if (snap.tasks) |page| {
-                const count = @as(usize, h - 7);
+                const count = @as(usize, (h - 6) / 3);
                 const start = (self.task_index + 1) -| count;
-                for (page.items[start..@min(page.items.len, start + count)], start..) |task, index| {
-                    const text = try std.fmt.allocPrint(ctx.arena, "{s} {s} [{s}] {s} · {s}", .{ if (index == self.task_index) ">" else " ", task.chatId, if (task.kind == .main) "hub" else @tagName(task.kind), task.title, task.cwd });
+                const order = taskOrder(page);
+                for (order[start..@min(page.items.len, start + count)], start..) |raw, index| {
+                    const task = page.items[raw];
+                    const parent = if (task.parentChatId) |id| try std.fmt.allocPrint(ctx.arena, " child of {s}", .{id}) else "";
+                    const text = try std.fmt.allocPrint(ctx.arena, "{s} {s} [{s}]{s} {s}", .{ if (index == self.task_index) ">" else " ", task.chatId, if (task.kind == .main) "hub" else @tagName(task.kind), parent, task.title });
+                    const detail = try std.fmt.allocPrint(ctx.arena, "  saved {s}:{s}", .{ task.machineId, task.cwd });
+                    const sample = try std.fmt.allocPrint(ctx.arena, "  link {s} · agent {s} · saved Rex {s}", .{ if (task.connection) |v| @tagName(v) else "unknown", if (task.activity) |v| @tagName(v) else "unknown", task.rexState orelse "unknown" });
                     var style = base;
                     style.reverse = index == self.task_index;
-                    line(ctx, surface, 1, @intCast(3 + index - start), text, style, null, 0);
+                    line(ctx, surface, 1, @intCast(3 + 3 * (index - start)), text, style, null, 0);
+                    line(ctx, surface, 1, @intCast(4 + 3 * (index - start)), detail, dim, null, 0);
+                    line(ctx, surface, 1, @intCast(5 + 3 * (index - start)), sample, dim, null, 0);
                 }
                 if (page.items.len == 0) line(ctx, surface, 1, 3, "Empty scanned page; n continues when a cursor is available.", dim, null, 0);
                 line(ctx, surface, 1, h - 3, if (page.next != null) "More pages: n · first page: g" else "Last page · first page: g", dim, null, 0);
             };
             line(ctx, surface, 1, h - 2, self.notice[0..self.notice_len], dim, null, 0);
             line(ctx, surface, 1, h - 1, "j/k · Enter inspect · Esc cancel · /task TITLE creates + opens Rex", accent, null, 0);
+            return surface;
+        }
+        if (self.hosts_view) {
+            line(ctx, surface, 1, 2, "HOSTS · explicit registration; sampled connection is not readiness", accent, null, 0);
+            if (s) |snap| if (snap.hosts) |hosts| {
+                const count = @as(usize, h - 7);
+                const start = (self.host_index + 1) -| count;
+                for (hosts.items[start..@min(hosts.items.len, start + count)], start..) |host, index| {
+                    const text = try std.fmt.allocPrint(ctx.arena, "{s} {s} · {s} · {s} · Rex {s}", .{ if (index == self.host_index) ">" else " ", host.machineId, @tagName(host.kind), @tagName(host.connection), if (host.rex) "approved" else "not approved" });
+                    var style = base;
+                    style.reverse = index == self.host_index;
+                    line(ctx, surface, 1, @intCast(3 + index - start), text, style, null, 0);
+                }
+            };
+            line(ctx, surface, 1, h - 3, "Sample only; offline tasks stay bound. No fallback or enrollment.", dim, null, 0);
+            line(ctx, surface, 1, h - 2, self.notice[0..self.notice_len], dim, null, 0);
+            line(ctx, surface, 1, h - 1, "j/k · Enter new task on host (explicit cwd) · r refresh · Esc close", accent, null, 0);
+            return surface;
+        }
+        if (self.brief_view) {
+            line(ctx, surface, 1, 2, "TASK BRIEF · immutable creation snapshot · read only", accent, null, 0);
+            var detail: std.ArrayList(Row) = .empty;
+            if (s) |snap| {
+                try rows(ctx, &detail, snap.title, w - 4, accent);
+                if (snap.brief) |brief| {
+                    try rows(ctx, &detail, try std.fmt.allocPrint(ctx.arena, "Problem:\n{s}\nDescription:\n{s}", .{ brief.problem orelse "", brief.description orelse "" }), w - 4, base);
+                } else try rows(ctx, &detail, "No structured brief saved (legacy/title-only task).", w - 4, dim);
+            }
+            const count = @as(usize, h - 5);
+            self.help_max = detail.items.len -| count;
+            self.help_scroll = @min(self.help_scroll, self.help_max);
+            for (detail.items[self.help_scroll..@min(detail.items.len, self.help_scroll + count)], 0..) |row, index| line(ctx, surface, 2, @intCast(3 + index), row.text, row.style, null, 0);
+            line(ctx, surface, 1, h - 1, "j/k scroll · Esc close · brief changes never submit input", accent, null, 0);
             return surface;
         }
         if (self.rex_view) {
@@ -723,7 +885,7 @@ const Model = struct {
             .visual => "VISUAL",
             .visual_line => "V-LINE",
         };
-        const border = try std.fmt.allocPrint(ctx.arena, " ── PROMPT / {s} {s} ──  {d}/16384 bytes", .{ mode, if (self.focus == .prompt) "●" else "○", self.editor.text.items.len });
+        const border = try std.fmt.allocPrint(ctx.arena, " ── {s} / {s} {s} ──  {d}/16384 bytes", .{ if (self.task_form) "TASK BRIEF" else "PROMPT", mode, if (self.focus == .prompt) "●" else "○", self.editor.text.items.len });
         line(ctx, surface, 0, chat_h + 2, border, accent, null, 0);
         var prompt: std.ArrayList(Row) = .empty;
         try rows(ctx, &prompt, self.editor.text.items, w - 4, base);
@@ -746,9 +908,9 @@ const Model = struct {
         } else line(ctx, surface, 1, h - 2, self.notice[0..self.notice_len], dim, null, 0);
         for (0..w) |x| surface.writeCell(@intCast(x), h - 1, .{ .style = status_bar });
         const queued = if (s != null and s.?.activityKnown) try std.fmt.allocPrint(ctx.arena, "{d}", .{s.?.queued}) else "?";
-        const status = try std.fmt.allocPrint(ctx.arena, " {s} · {s} / {s} · {s}{s} · queued {s} · {s} · {s}", .{ self.shown_transport.text(), if (self.focus == .chat) "CHAT" else "PROMPT", mode, if (self.online) "" else "STALE / ", if (s) |snap| (if (!snap.activityKnown) "activity unavailable" else if (snap.busy) "busy sample" else "idle sample") else "connecting", queued, if (s) |snap| snap.tools else "", if (s) |snap| (if (snap.historical) "older / :latest" else if (self.scroll > 0) "scroll held" else "latest") else "" });
+        const status = try std.fmt.allocPrint(ctx.arena, " {s} · {s} / {s} · {s}{s} · queued {s} · {s} · {s}", .{ self.shown_transport.text(), if (self.focus == .chat) "CHAT" else if (self.task_form) "BRIEF" else "PROMPT", mode, if (self.online) "" else "STALE / ", if (s) |snap| (if (!snap.activityKnown) "activity unavailable" else if (snap.busy) "busy sample" else "idle sample") else "connecting", queued, if (s) |snap| snap.tools else "", if (s) |snap| (if (snap.historical) "older / :latest" else if (self.scroll > 0) "scroll held" else "latest") else "" });
         line(ctx, surface, 0, h - 1, status, status_bar, null, 0);
-        const hints: []const u8 = if (self.readOnly()) " /rex open  /hub  :q " else "  ^S send  :help  :q ";
+        const hints: []const u8 = if (self.readOnly()) " /rex open  /hub  :q " else if (self.task_form) " ^S create  :cancel  :q " else "  ^S send  :help  :q ";
         if (w >= 60) line(ctx, surface, @intCast(w - hints.len), h - 1, hints, status_bar, null, 0);
         return surface;
     }
@@ -932,6 +1094,28 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     model.quit(&ctx, false);
     try std.testing.expect(ctx.quit);
 
+    model.snapshot.?.value.case0.snapshot.draft.?.kind = .task;
+    model.task_form = true;
+    ctx.quit = false;
+    model.quit(&ctx, false);
+    try std.testing.expect(ctx.quit);
+    model.task_form = false;
+    model.snapshot.?.value.case0.snapshot.draft = null;
+    try model.editor.set("UNSENT prompt");
+    try model.beginTaskForm(null);
+    try std.testing.expect(!model.task_form);
+    try std.testing.expectEqualStrings("UNSENT prompt", model.editor.text.items);
+    try model.editor.set("");
+    model.settings_uncertain = false;
+    try model.beginTaskForm(null);
+    try std.testing.expect(model.task_form);
+    try model.editor.set("{\"title\":\"Unsubmitted\"}");
+    try model.command.appendSlice(a, "cancel");
+    try model.ex(&ctx);
+    try std.testing.expect(!model.task_form);
+    try std.testing.expectEqualStrings("", model.editor.text.items);
+    try std.testing.expect(bridge.pending == null);
+
     // Hub inspection keeps the hub color but cannot edit or mutate a task.
     model.snapshot.?.value.case0.snapshot.draft = null;
     model.snapshot.?.value.case0.snapshot.chatId = "2";
@@ -953,7 +1137,7 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     bridge.client_mode = .task;
     model.snapshot.?.value.case0.snapshot.clientMode = .task;
     try std.testing.expect(!model.readOnly());
-    for ([_][]const u8{ "tasks", "hub", "main", "select 1", "task no" }) |cmd| {
+    for ([_][]const u8{ "tasks", "hosts", "new", "hub", "main", "select 1", "task no" }) |cmd| {
         try model.command.appendSlice(a, cmd);
         try model.ex(&ctx);
         try std.testing.expect(bridge.pending == null);

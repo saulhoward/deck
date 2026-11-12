@@ -50,7 +50,7 @@ test("installed package runs hub, client, lazy provider imports and native tools
         assert.equal(await runtime.importInstructions(String(runtime.main.id),'package-import'),imported);
         assert.equal((await runtime.instructionSource(String(runtime.main.id))).path,'AGENTS.md');
         const agent = await runtime.main.agent(context);
-        for (const name of ['task_list','task_history','task_activity','task_create','task_message','subagent']) assert.ok(agent.tools.some(tool => tool.name === name));
+        for (const name of ['host_list','task_list','task_history','task_activity','task_create','task_message','hub_message','subagent']) assert.ok(agent.tools.some(tool => tool.name === name));
         await runtime.main.commit(async tx => {
           for (let i=0;i<110;i++) await tx.appendEntry(runtime.main.id,{kind:'deck.input',data:{text:'packaged retained '+i}});
           // Seed a paired tool exchange to check installed-client result rendering.

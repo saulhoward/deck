@@ -4,6 +4,66 @@ This is the consolidated change and decision record. It replaces the progress re
 
 Test counts below are **recorded evidence for the named implementation stage**. Earlier counts do not describe a new run of the current tree. No count is a release guarantee or proof of deployment.
 
+## Phase 1 hub workflow and coordination
+
+**Implemented and validated on 2026-11-12, after `ed9bf9a`.** This source-tree stage completes all three Phase 1 slices; it is not a commit, deployment or new two-machine/live-service acceptance.
+
+- Added `deck hub` while retaining `deck agent`, normal client/inspection flags and foreground `deck serve`. Hub launches cannot masquerade as allocation-scoped task clients.
+- Added bounded, immutable creation briefs, initial task instructions, the separate `/new` JSON composer, `/brief`, and plain-client equivalents. Creation starts no generation. Title-only hashes and old drafts stay unchanged; explicit empty brief fields remain distinct. Brief requests use a separate `create_task_brief` mutation plus exact echoed fields, so old hubs refuse before creation and incomplete ACKs cannot clear drafts or open Rex. Save → create ACK → clear → separate best-effort Rex open remains intact.
+- Added bounded registered-host inventory and selection, including offline registered hosts, without enrollment, reassignment or fallback. Native `link_status` is a hub-local observation using a shared high-half read-ID namespace. A timed-out observation stays unknown with one retained correlation per route; late replies are consumed, not reused as fresh health. Task/child grouping changes only bounded-page presentation, never scan order/cursors or task lifecycle.
+- Added explicit task-to-hub `hub_message` follow-up input. Sender and target authority uses canonical Pi identity/ownership as well as metadata. Captured model-request cutoffs and memoized causal envelopes preserve provenance and reply correlation through interruption. The eight-hop high-water budget cannot reset through a new tool call, a lower-hop message or later human input not in that model request. Missing provenance fails closed for new forwarding; exact admitted legacy receipts remain recoverable. No ACK/status/answer is automatically relayed. This is not a sandbox or a fan-out quota.
+- Kept Pi as the only agent/store/scheduler owner, workers native-only, UI roles pinned, and Rex API 8/10 Unix-only allocation unchanged. No MCP, bootstrap launcher, child terminals or scheduler was added.
+
+### Phase 1 validation
+
+- Full runtime/generator suite: **483 tests, 481 passed, two opt-in integration checks skipped, no failures**. These skips were covered separately below. Coverage includes a scripted hub → task → hub exchange, the eight-hop loop and human reset, cutoff/lower-hop/unknown-provenance refusal, canonical hub identity despite misleading metadata, exact Unicode/empty briefs, host-observation timeout bounds, SIGKILL after modern and legacy admission, old-hub refusal, malformed ACK retention, and real PTY normal/lost-ACK creation flows.
+- Native suite with explicitly enabled private Rex integration: **61/61 passed**, uncached execution. Ordinary runs were 60 passed plus that one opt-in skip. Shared TypeScript/Zig fixtures cover forms, byte limits, inventory, brief ACKs and native read contracts.
+- Installed-target regression selection: **121/121 passed**, including package smoke, task/relay/worker boundaries, settings, plain creation and real PTY hub/task behavior. Separate installed private Rex contract: **11/11 passed**, API 10, isolated Unix endpoint with no tailnet. These are isolated tests, not real-peer acceptance or GUI-focus guarantees.
+- `nix flake check path:.`, full package and native-only worker builds passed on aarch64-darwin. The worker closure has no Node/Pi runtime. Both binaries also cross-compiled for x86_64-linux, aarch64-linux and x86_64-macos; compilation is not runtime evidence for those systems.
+- Contract generation/checks, TypeScript, Zig formatting, local documentation links/fences and diff checks passed. Test harness fixes used an atomic recovery checkpoint and distinct Escape/command PTY steps; no production deadline was increased.
+
+Fresh builds are exposed separately as `result-phase1` and `result-phase1-worker`; existing `result`, `result-worker`, deployed services and the retained Phase 0 evidence were not replaced. Source/log verification and build artifacts do not constitute permission to restart a hub or change registered binary/client pins. Native stdio MCP (Phase 2) is next.
+
+## Phase 0 two-machine acceptance
+
+**Passed on 2026-11-12 for the tested topology.** This is separate operator-run evidence for `ed9bf9a`, not a new implementation, release, or increase in the automated test counts below.
+
+### Topology and provenance
+
+- Two actual Darwin arm64 machines: hub macOS 27.2, worker macOS 27.0.1. Native data, control and task-client channels used production OS Tailscale peer verification with no injected verifier. The worker OS node was distinct from the embedded Rex service node.
+- All remote administration and artifact transfer used the operator-approved Rex connection, not SSH or a file-transfer listener. The existing API-9 server remained unchanged and was not used for Deck allocation. With explicit approval, staged the existing tested Deck/client and standalone-worker packages side by side, plus a private signed Rex API-10 bundle with a worker-local Unix socket and Tailscale disabled.
+- Tested packages: `/nix/store/0dfailbd9wg94yj6s38r3dwipxx52jfm-deck-0.1.0-dev` and `/nix/store/vh4rv5qk83b9fzbzb6x34nsmy9njkbg1-deck-worker-0.1.0-dev`. The independently compared native worker SHA-256 was `60cc5b49df62ec911378a35f63c96be438bc33e87083d70a2b5603d209870afb`. Private Rex was `0.0.1793645657-gd018d2`, API 10. Deck's runtime/client used packaged Node 24.21.0; a separate remote operator harness used existing Node 24.22.1.
+- Used a disposable hub/store, worker identity/registry, workspace, credentials-free mock model and isolated client drafts. The first task input/reconnect/reopen checks used the unmodified installed runtime and TUI. Native fault tests then used a scratch runtime copy with only a scripted faux provider and an explicit original-identity native-receipt probe hook. Production routing, peer checks, scope guards, receipt formats and deadlines were unchanged. The fixture was fingerprinted normally and selected only after the hub was idle.
+
+### Observed checks
+
+| Check | Observation |
+| --- | --- |
+| Registration and launch | Independently matched worker binary/client/socket pins; all three real-peer channels paired; assigned-host allocation and task-locked TUI startup succeeded |
+| Conversation ownership | Direct remote TUI input and mock answer appeared in the central task conversation, not main; no worker Pi store was created |
+| Native effects | Write/read/exact-edit/bash executed in the saved remote workspace; local fallback paths remained untouched |
+| Cancellation | Task-TUI stop cancelled the running native shell; retained receipt reported exit 143/`cancelled`, and the post-sleep effect was absent |
+| Worker and hub reconnect | Same TUI PID and unchanged canonical history survived worker loss and an idle hub restart; fresh reads resumed without input replay |
+| Known native receipt | Explicit byte-identical retry returned the original completed bash result without another append; changed-byte reuse of the same ID returned `conflict` |
+| Accepted without result | Killed the test worker after a shell append and durable acceptance; restart plus explicit original-ID retry returned `effect_uncertain`, without another append |
+| Late completion | Paused only the worker process beyond the unchanged heartbeat deadline while its shell finished; after resume/reconnect the late result was retained, but did not complete a newer request or alter the already-recorded uncertain history |
+| Offline/unregistered host | An offline attempt reported that this attempt was not sent; an unregistered saved assignment refused its write without local execution |
+| Lost input ACK | A test-only private Unix last-hop proxy dropped one successful admission reply. The real TUI retained its locked exact draft; fresh reads did not resend it. Explicit retry preserved scope/arguments, returned the retained admission and added no duplicate history |
+| Scope and identity refusal | Hub-chat access, login, wrong allocation and superseded allocation scope were refused. Wrong executable and wrong peer-user pins never published a usable task-client endpoint; restoring the approved registration reconnected |
+| Reopen | Explicit terminal exit/reopen retained the conversation and Rex session, created a new block, registered new startup, and revoked the old scope without replay |
+
+The accepted-without-result receipt intentionally remains uncertain; it was not rewritten as success. Two deliberate loss-test calls each appended once. The later call's completed receipt does not resolve or replace the earlier operation's evidence.
+
+### Evidence, cleanup and limits
+
+Private evidence and retained state are under `/tmp/dp0-ln755f_4` on both machines. The hub-side `acceptance-summary.json`, `final-history.json`, `remote-final-evidence.json`, scope/draft/fault observations, exact operator/RPC request records and runtime fixture describe the run. The worker retains its original `worker.json` and receipts together; immutable package GC roots and the private signed Rex bundle are retained. These helpers contain run-specific identities: a repeat must use fresh scratch state and explicitly approved pins, not clone the store or blindly replay old requests.
+
+All test hubs, workers, task TUIs, the private Rex server, fault proxy and operator-controller session were stopped. The worker socket was removed, and the remote test-process scan was empty. The original API-9 server's instance identity was unchanged. No active profile, existing Deck process, permanent worker service or production registration was replaced.
+
+Staging exposed two operator-harness requirements, not changes to Deck: Rex control requests have a 65,536-byte bound, so transfers used smaller, hash-checked chunks; the copied macOS Rex executable needed its signed app-bundle metadata to satisfy its existing signature. No re-signing, production timeout increase, peer-validation bypass or API allowlist change was used.
+
+This closes Phase 0 for this pair only. It does not validate live provider OAuth/inference, Linux runtime behavior, every crash window, desktop GUI focus, API-9 Deck allocation, MCP, remote bootstrap, child terminals or scheduled jobs. Those remain separate work and acceptance gates.
+
 ## Unreleased source-tree work
 
 The work below records development since `17c2ff9`, including the documentation consolidation and subsequent task-navigation work. The files/bash worker slice follows `7ec363e`; the task-relay stage follows `1d4001c`:
@@ -18,7 +78,7 @@ The work below records development since `17c2ff9`, including the documentation 
 - Added opt-in end-to-end tests using one central Pi store, the actual native transport/Unix proxy, a private Rex API 10 server and a real Zig TUI. Verified managed startup/input, same-PID worker-link reconnect, unchanged canonical history, terminal exit and explicit reopening of the same conversation.
 - Initial validation caught terminal-test assumptions (combining Escape/command bytes and expecting quiet polls to erase retained error notices) and an unnecessary change to trusted-local stop dispatch exposed by its test double. Split Escape/readiness, observed actual freshness rather than notice dismissal, and restored the original independent local stop path. A package run also exposed the native cancellation test assuming a fenced request pipe remained writable: it now accepts `EPIPE` as well as EOF teardown, while still requiring the cancelled receipt and no subsequent effect. Production deadlines and no-queue rules were not widened.
 - Tightened Unix endpoint ownership: capture its inode once, transfer listener ownership to the relay thread, and preserve replacement files/sockets during cleanup. Native tests now verify cleanup and execute uncached so changing opt-in integration environment cannot reuse a skipped/cached test run.
-- All live hub/remote-machine configuration and sessions were left alone. Isolated tests inject socket-peer verification; real two-machine Tailscale acceptance, named child terminals and captured scheduled jobs remain pending. This work does not perform deployment or enrollment.
+- This implementation slice left live hub/remote-machine configuration and sessions alone. Its isolated tests inject socket-peer verification; two-machine acceptance was still pending at that stage and was subsequently performed in the separate Phase 0 run above. Named child terminals and captured scheduled jobs remain future work.
 
 ### Registered native files/bash workers
 
@@ -50,7 +110,7 @@ Initial read-only checks against the installed Tailscale 1.98.2 macOS app valida
 
 After the operator supplied a remote Rex endpoint, HTTPS certificate verification and explicit Rex server status succeeded over Tailscale. The endpoint reported API 9. A uniquely named disposable session ran only OS/tool-path checks: Darwin arm64, with Rex available but Deck, Tailscale, and Nix absent from the terminal's PATH. The probe session was removed by its returned full ID; existing sessions were not changed and no software was installed.
 
-The real peer response omitted Tailscale's legacy `MachineAuthorized` field. Updated verification to require a running local backend and accept that documented omission without treating it as approval; explicit denial, malformed values, identity drift, and expired keys still refuse. Added regression tests and verified correct/wrong pins against the selected peer. The Rex peer is not yet a registered Deck worker, and API 9 remains outside Deck's allocation allowlist pending the remaining contract tests. No Tailscale settings or live hub changed.
+The real peer response omitted Tailscale's legacy `MachineAuthorized` field. Updated verification to require a running local backend and accept that documented omission without treating it as approval; explicit denial, malformed values, identity drift, and expired keys still refuse. Added regression tests and verified correct/wrong pins against the selected peer. At that probe stage, no OS worker had been registered. API 9 remains outside Deck's allocation allowlist pending separate contract work. No Tailscale settings or live hub changed during the probe; the later Phase 0 run used a distinct OS-worker identity and private API-10 server.
 
 ### Zig TUI
 
@@ -124,6 +184,20 @@ Direct task chat means selecting that task's conversation through the hub. It do
 
 The source comparison with `jessfraz/agent` used commit [`7147c1c`](https://github.com/jessfraz/agent/tree/7147c1c21a736eafc7d9e6b3769f5c548630e6bd). A later review of the renamed `jessfraz/beep-boop` used [`8466b59`](https://github.com/jessfraz/beep-boop/tree/8466b59dfd5073ddbe01dc63669817a7aaa41b20). These were source reviews, not executed deployment evidence. Deck kept lessons about exact-object inspection, validated contracts, and identity-preserving reconnect. It did not adopt source triage, task-outcome reporting, or the broader automation product.
 
+### Native MCP rather than Pi coding-agent extension compatibility
+
+After the task-relay implementation (`ed9bf9a`), the desired workflow was reviewed against the source. The follow-on plan now chooses **native MCP tools**, not reuse of arbitrary Pi coding-agent extensions.
+
+- Preserve one hub-owned Pi Harness/SQLite store, model orchestration and canonical history. A task has a primary chat and optional Pi-owned children; task metadata is not a new execution lifecycle.
+- Plan explicit name/problem/description metadata, grouped inspection, a clearer hub client entry point, bounded task-to-hub reporting, and a separately authorized remote create/open launcher. Current task-to-task tools and foreground children remain the baseline.
+- Put MCP client transport and server process supervision in Deck's native layer. Pi owns durable invocations. Tool hosts can live on the hub or assigned worker and must not depend on TUI/Rex attachment.
+- Bind access to explicit, versioned task tool profiles and grants, not the viewing terminal's Pi installation, cwd or environment. Keep service credentials at the designated tool host and model credentials at the hub; do not automatically import a Pi application's connections or secrets.
+- Exclude a Pi plugin loader, lifecycle-hook/UI compatibility, provider-plugin import and worker agent loops. This does not remove internal Pi Durable adapters or rewrite historical fields named `extensions`. MCP servers are separately installed programs and may have their own runtime dependencies.
+- Prioritize: real-machine baseline → hub/task coordination → safe one-host stdio MCP → assigned-worker MCP → remote bootstrap. Streamable HTTP/service authentication follows as a separate increment. New child terminals and captured jobs are deferred until the primary interactive workflow is accepted.
+- Keep uncertain MCP writes uncertain; neither a JSON-RPC ID, a server annotation nor a local receipt proves external exactly-once execution. No automatic mutation replay, cross-host fallback or opaque Node/plugin shortcut is part of the plan.
+
+This entry records a documentation/design decision, not implementation or new runtime test evidence. The [Roadmap](ROADMAP.md#next-implementation-sequence) supplies focused phase scopes, exclusions and exit gates; the [Developer guide](DEVELOPER.md#target-native-mcp-tools) defines the target boundary. No live machine, account, server or registration was changed by this planning work.
+
 ### Interactive terminals and headless jobs
 
 After documentation consolidation, the target architecture was clarified:
@@ -134,7 +208,7 @@ After documentation consolidation, the target architecture was clarified:
 - Scheduled jobs and their children run through registered host connections without Rex sessions or terminals.
 - A job reuses its persistent Deck task and Pi conversation across runs. Each run has a distinct admission identity and captured file settings.
 
-This records a design requirement, not completed remote/job support. It also does not upgrade existing admission observations into full file captures. The [Roadmap](ROADMAP.md#next-implementation-sequence) separates local TUI work, remote host transport, child terminals, and scheduled runs.
+This records a design requirement, not completed remote/job support. It also does not upgrade existing admission observations into full file captures. The [Roadmap](ROADMAP.md#next-implementation-sequence) now prioritizes primary-task coordination and native MCP, while retaining child terminals and captured scheduled runs as later goals.
 
 ### Pi primitives before new machinery
 
@@ -209,7 +283,7 @@ The registered-worker builds are `/nix/store/gz0pmppb42qjsx4yas9ldx2pmxdhwjn1-de
 
 The user reported successful live API-key inference, file write/read/exact edit, bash output/cwd checks, foreground sleep cancellation, detach/reconnect, and unsent-draft recovery across client exit and hub restart. The user also confirmed the default local Rex open workflow.
 
-These reports do not establish live ChatGPT OAuth/refresh, model delegation, exhaustive crash windows, real two-machine worker acceptance, or all terminal platforms. No external provider calls occur in the automated evidence above.
+These automated build/test reports do not establish live ChatGPT OAuth/refresh, model delegation, exhaustive crash windows, real two-machine worker acceptance, or all terminal platforms. The separate [Phase 0 record](#phase-0-two-machine-acceptance) supplies scoped two-machine evidence, not broader provider/platform acceptance. No external provider calls occur in the automated evidence above or the Phase 0 mock-provider run.
 
 ## Deployment boundary
 

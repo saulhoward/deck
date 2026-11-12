@@ -1,4 +1,6 @@
 // Local unacknowledged request cache, never an execution queue or transcript store.
+import { briefFields } from "./task-brief.js";
+import type { TaskBrief } from "./generated/contracts.js";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { link, lstat, mkdir, open, opendir, rm } from "node:fs/promises";
@@ -6,7 +8,7 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
 export type Draft = { kind: "input"; chatId: string; requestId: string; text: string; mode: "steer" } |
-  { kind: "task"; chatId: string; requestId: string; title: string; machineId: string; cwd: string } |
+  ({ kind: "task"; chatId: string; requestId: string; title: string; machineId: string; cwd: string } & TaskBrief) |
   { kind: "instructions"; chatId: string; requestId: string; machineId: string; cwd: string };
 type Saved = { version: 1; hubId: string; createdAt: number; request: Draft };
 export type DraftSummary = { kind: Draft["kind"]; chatId: string; requestId: string; createdAt: number };
@@ -28,7 +30,7 @@ function validate(value: unknown): Draft {
   if (data.kind === "task" || data.kind === "instructions") {
     const cwd = text(data.cwd); if (!isAbsolute(cwd)) throw new Error("Invalid saved draft cwd");
     if (data.kind === "instructions") return { kind: "instructions", chatId, requestId: id, machineId: text(data.machineId), cwd };
-    return { kind: "task", chatId, requestId: id, title: text(data.title), machineId: text(data.machineId), cwd };
+    return { kind: "task", chatId, requestId: id, title: text(data.title), machineId: text(data.machineId), cwd, ...briefFields(data as TaskBrief) };
   }
   throw new Error("Unsupported saved draft");
 }

@@ -25,7 +25,11 @@ import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
 export type Binding = { machineId: string; cwd: string };
-type Chat = { kind: "main" | "task" | "subagent"; title: string; machineId: string; cwd: string; parentChatId?: string; ownerTaskId?: string };
+import { validHosts } from "./host-inventory.js";
+import { briefFields, briefInstructions, validBriefBinding } from "./task-brief.js";
+import { validChain, type MessageChain } from "./message-causality.js";
+import { validMachineIdentity, type TaskBrief, type HostInventory } from "./generated/contracts.js";
+type Chat = { kind: "main" | "task" | "subagent"; title: string; machineId: string; cwd: string; parentChatId?: string; ownerTaskId?: string; brief?: TaskBrief };
 export const ChatDoc = defineDoc<Chat>({
   kind: "deck.chat", version: 1, scope: "conversation", history: "latest", fork: "initial",
   initial: () => ({ kind: "main", title: "Main", machineId: "", cwd: "" }), checkpointWhen: () => true,
@@ -50,7 +54,7 @@ function positiveId(id: string, kind: string): number {
   return value;
 }
 function chatId(id: string): ConversationId { return positiveId(id, "conversation") as ConversationId; }
-export type Input = { requestId: string; text: string; mode: "steer" | "followUp"; origin?: { kind: "task-tool"; chatId: string; taskId: string } };
+export type Input = { requestId: string; text: string; mode: "steer" | "followUp"; origin?: { kind: "task-tool"; chatId: string; taskId: string; chain?: MessageChain } };
 import { AsyncLocalStorage } from "node:async_hooks";
 
 export type RuntimeOptions = {
@@ -165,7 +169,7 @@ export class DeckRuntime {
     return chat;
   }
 
-  async listChats({ limit = 50, after }: { limit?: number; after?: string } = {}): Promise<ChatListPage> {
+  async listChats({ limit = 50, after, includeObservations = false }: { limit?: number; after?: string; includeObservations?: boolean } = {}): Promise<ChatListPage> {
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new DeckError("invalid", "Chat page limit must be an integer from 1 to 100");
     // Pi 1.4.0's ID-ordered scan cursor stays behind this adapter. The wire continuation
     // is the last scanned conversation ID, including records without Deck metadata.
@@ -174,17 +178,55 @@ export class DeckRuntime {
     const items: ChatListPage["items"] = [];
     for (const record of page.items) {
       const metadata = await this.harness.snapshot(ChatDoc, record.id, context);
-      if (metadata) items.push({ chatId: String(record.id), kind: metadata.kind, title: metadata.title, machineId: metadata.machineId, cwd: metadata.cwd, ...(metadata.parentChatId ? { parentChatId: metadata.parentChatId } : {}), ...(metadata.ownerTaskId ? { ownerTaskId: metadata.ownerTaskId } : {}) });
+      let observation: { activity: "busy" | "idle" | "unknown"; rexState: string } | undefined;
+      if (metadata && includeObservations) {
+        observation = { activity: "unknown", rexState: "unknown" };
+        try { const activity = await this.activity(String(record.id)); observation.activity = activity.busy || activity.queued > 0 ? "busy" : "idle"; } catch { /* Unknown is not idle. */ }
+        try { observation.rexState = (await this.terminalStatus(String(record.id))).status; } catch { /* Saved allocation observation only, not terminal health. */ }
+      }
+      if (metadata) items.push({ ...observation, chatId: String(record.id), kind: metadata.kind, title: metadata.title, machineId: metadata.machineId, cwd: metadata.cwd, ...(metadata.parentChatId ? { parentChatId: metadata.parentChatId } : {}), ...(metadata.ownerTaskId ? { ownerTaskId: metadata.ownerTaskId } : {}), ...(metadata.brief ? { brief: metadata.brief } : {}) });
     }
     return { items, ...(page.next ? { next: String(page.items.at(-1)!.id) } : {}) };
   }
 
-  createTask(title: string, binding: Binding, requestId: string = randomUUID(), signal?: AbortSignal): Promise<Conversation> {
+  async hosts(): Promise<HostInventory> {
+    const sampledAtMs = Date.now();
+    const items: HostInventory["items"] = [];
+    if (this.localMachineId && validMachineIdentity(this.localMachineId)) items.push({ machineId: this.localMachineId, kind: "local", rex: !!this.rexClient, connection: "local" });
+    items.push(...(await this.host?.registeredHosts?.() ?? []));
+    const inventory = { sampledAtMs, items };
+    if (!validHosts(inventory)) throw new DeckError("invalid", "Invalid registered-host inventory");
+    return inventory;
+  }
+  async legacyCreatedTask(title: string, binding: Binding, requestId: string): Promise<Conversation | undefined> {
+    const saved = await this.harness.snapshot(TaskRequest, requestId, context);
+    const hash = createHash("sha256").update(JSON.stringify([title, binding.machineId, binding.cwd])).digest("hex");
+    return saved?.chatId && saved.hash === hash ? this.chat(String(saved.chatId)) : undefined;
+  }
+  async hasLegacyMessageReceipt(id: string, input: Input): Promise<boolean> {
+    // Recovery only: never turn a legacy reservation without a submission into
+    // fresh unbudgeted agent input. Exact hashes retain their old provenance.
+    if (!input.origin || input.origin.chain !== undefined) return false;
+    const chat = await this.chat(id);
+    const existing = await chat.commit(tx => tx.submissionByRequest(chat.id, input.requestId), context);
+    if (!existing || existing.type !== "input") return false;
+    const reservation = await this.harness.snapshot(Admission, chat.id, input.requestId, context);
+    return reservation?.hash === createHash("sha256").update(JSON.stringify([input.text, input.mode, input.origin])).digest("hex");
+  }
+  async registeredTarget(machineId: string): Promise<boolean> {
+    return (await this.hosts()).items.some(h => h.machineId === machineId);
+  }
+
+  createTask(title: string, binding: Binding, requestId: string = randomUUID(), signal?: AbortSignal, suppliedBrief: TaskBrief = {}): Promise<Conversation> {
     return this.serial(async () => {
       signal?.throwIfAborted();
       if (!title.trim() || !binding.machineId || !binding.cwd.startsWith("/")) throw new DeckError("invalid", "Task needs a title, host and absolute cwd");
       if (!requestId || requestId.length > 200) throw new DeckError("invalid", "Invalid task request ID");
-      const hash = createHash("sha256").update(JSON.stringify([title, binding.machineId, binding.cwd])).digest("hex");
+      const brief = briefFields(suppliedBrief); const hasBrief = Object.keys(brief).length > 0;
+      if (hasBrief && !validBriefBinding(title, binding.cwd)) throw new DeckError("invalid", "Brief creation requires bounded title and cwd");
+      // Preserve every historical title-only request hash; presence of even an empty
+      // brief field opts into a new identity, without rewriting old receipts.
+      const hash = createHash("sha256").update(JSON.stringify(hasBrief ? ["deck.task-create.v2", title, binding.machineId, binding.cwd, brief] : [title, binding.machineId, binding.cwd])).digest("hex");
       const existing = await this.main.commit(async (tx) => {
         const receipt = await tx.doc(TaskRequest, requestId, hash);
         if (receipt.hash !== hash) throw new DeckError("conflict", "Task request ID already used with different arguments");
@@ -195,9 +237,9 @@ export class DeckRuntime {
       signal?.throwIfAborted();
       return this.harness.createConversation({
         ownership: { kind: "ownerless" },
-        agent: { ...(agent.model ? { model: agent.model } : {}), thinkingLevel: agent.thinkingLevel, cwd: binding.cwd },
+        agent: { ...(agent.model ? { model: agent.model } : {}), thinkingLevel: agent.thinkingLevel, cwd: binding.cwd, ...(hasBrief ? { instructions: briefInstructions(title, brief) } : {}) },
         init: async (tx, id) => {
-          Object.assign(await tx.doc(ChatDoc, id), { ...binding, title, kind: "task" });
+          Object.assign(await tx.doc(ChatDoc, id), { ...binding, title, kind: "task", ...(hasBrief ? { brief } : {}) });
           (await tx.doc(TaskRequest, requestId, hash)).chatId = id;
         },
       }, context);
@@ -210,10 +252,11 @@ export class DeckRuntime {
       if (!input.requestId || input.requestId.length > 200 || !input.text.trim() || !["steer", "followUp"].includes(input.mode)) {
         throw new DeckError("invalid", "Input needs requestId, text and a supported mode");
       }
-      const origin = input.origin === undefined ? undefined : { kind: input.origin.kind, chatId: input.origin.chatId, taskId: input.origin.taskId };
+      const origin = input.origin === undefined ? undefined : { kind: input.origin.kind, chatId: input.origin.chatId, taskId: input.origin.taskId, ...(input.origin.chain === undefined ? {} : { chain: input.origin.chain }) };
       if (origin) {
         if (origin.kind !== "task-tool") throw new DeckError("invalid", "Unsupported input origin");
         positiveId(origin.chatId, "origin conversation"); positiveId(origin.taskId, "origin task");
+        if (origin.chain !== undefined && (!validChain(origin.chain) || origin.chain.hop < 1)) throw new DeckError("invalid", "Invalid message provenance");
       }
       const chat = await this.chat(id);
       if ((await this.harness.snapshot(ChatDoc, chat.id, context))?.kind === "subagent") throw new DeckError("invalid", "Subagent chats accept input only through their owning tool; inspect or stop them instead");
@@ -259,7 +302,7 @@ export class DeckRuntime {
       signal?.throwIfAborted();
       // ACK only after Pi has committed the submission. The capture remains unchanged on retry.
       return chat.submit({
-        type: "input", content: origin ? `[Message from agent chat ${origin.chatId}, tool task ${origin.taskId}; not a direct human message]\n${input.text}` : input.text, requestId: input.requestId, whenBusy: input.mode,
+        type: "input", content: origin ? `[Message from agent chat ${origin.chatId}, tool task ${origin.taskId}; not a direct human message${origin.chain ? `; provenance ${JSON.stringify({ requestId: input.requestId, ...origin.chain })}` : ""}]\n${input.text}` : input.text, requestId: input.requestId, whenBusy: input.mode,
         entry: { kind: "deck.input", data: { text: input.text, requestId: input.requestId, mode: input.mode, capture, ...(origin ? { origin } : {}) } },
       }, context);
     });

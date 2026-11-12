@@ -11,7 +11,7 @@ export type { NativeResult as FileResult, NativeProgress as ShellProgress } from
 import type { NativeResult as FileResult, NativeProgress as ShellProgress } from "./generated/contracts.js";
 
 type Args = NativeArguments;
-export interface HostFiles { rexClientFor?(machineId: string): import("./generated/contracts.js").WorkerRexClient | undefined; call(binding: Binding, id: string, operation: string, args: Args, signal?: AbortSignal, onProgress?: (progress: ShellProgress) => void): Promise<FileResult>; }
+export interface HostFiles { registeredHosts?(): Promise<import("./generated/contracts.js").HostItem[]>; rexClientFor?(machineId: string): import("./generated/contracts.js").WorkerRexClient | undefined; call(binding: Binding, id: string, operation: string, args: Args, signal?: AbortSignal, onProgress?: (progress: ShellProgress) => void): Promise<FileResult>; }
 function nativeFrame(value: unknown): { frame: Buffer; request: NativeRequest } {
   // Validate what will actually be sent, without normalizing or changing hash bytes.
   try {

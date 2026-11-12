@@ -288,7 +288,12 @@ pub const Link = struct {
                         if (std.mem.eql(u8, p.request.value.id, request.id)) duplicate = true;
                     }
                     if (duplicate) return error.DuplicateRequest;
-                    if (connection == null or !std.mem.eql(u8, request.machineId, self.registry.hosts[self.index].machineId) or (!supported(request.operation) and self.clients == null)) {
+                    if (request.operation == .link_status and std.mem.eql(u8, request.machineId, self.registry.hosts[self.index].machineId)) {
+                        // Hub-local observation only: no worker request, journal or execution.
+                        const reply = try std.json.Stringify.valueAlloc(a, .{ .version = 1, .id = request.id, .result = .{ .ok = true, .code = "link_status", .output = if (connection != null) @as([]const u8, "connected") else "offline" } }, .{});
+                        defer a.free(reply);
+                        try to_pi.append(reply);
+                    } else if (connection == null or !std.mem.eql(u8, request.machineId, self.registry.hosts[self.index].machineId) or (!supported(request.operation) and self.clients == null)) {
                         try failure(&to_pi, request, false);
                     } else {
                         try to_worker.append(copy);

@@ -68,26 +68,29 @@ pub fn deinit(self: *Bridge) void {
     if (self.hub_chat_id) |id| self.a.free(id);
 }
 pub fn request(self: *Bridge, action: @FieldType(wire.TuiRequest, "action"), text: ?[]const u8, hold: ?bool) !bool {
-    return self.requestConfigured(action, text, hold, null, null, null, null);
+    return self.requestConfigured(action, text, hold, null, null, null, null, null);
 }
 pub fn configure(self: *Bridge, change: wire.ModelSettingsChange) !bool {
-    return self.requestConfigured(.configure, null, null, change, null, null, null);
+    return self.requestConfigured(.configure, null, null, change, null, null, null, null);
 }
 pub fn selectChat(self: *Bridge, chat_id: []const u8) !bool {
-    return self.requestConfigured(.select, null, null, null, chat_id, null, null);
+    return self.requestConfigured(.select, null, null, null, chat_id, null, null, null);
 }
 pub fn tasks(self: *Bridge, after: ?[]const u8) !bool {
-    return self.requestConfigured(.tasks, null, null, null, null, after, null);
+    return self.requestConfigured(.tasks, null, null, null, null, after, null, null);
 }
 pub fn createAt(self: *Bridge, target: wire.TaskCreationTarget) !bool {
-    return self.requestConfigured(.create, null, null, null, null, null, target);
+    return self.requestConfigured(.create, null, null, null, null, null, target, null);
 }
-fn requestConfigured(self: *Bridge, action: @FieldType(wire.TuiRequest, "action"), text: ?[]const u8, hold: ?bool, configuration: ?wire.ModelSettingsChange, chat_id: ?[]const u8, after: ?[]const u8, task_target: ?wire.TaskCreationTarget) !bool {
+pub fn createForm(self: *Bridge, form: wire.TaskCreationForm) !bool {
+    return self.requestConfigured(.create, null, null, null, null, null, null, form);
+}
+fn requestConfigured(self: *Bridge, action: @FieldType(wire.TuiRequest, "action"), text: ?[]const u8, hold: ?bool, configuration: ?wire.ModelSettingsChange, chat_id: ?[]const u8, after: ?[]const u8, task_target: ?wire.TaskCreationTarget, task_form: ?wire.TaskCreationForm) !bool {
     if (self.failed or self.pending != null) return false;
-    if (self.client_mode == .task and (action == .select or action == .tasks or action == .create)) return error.TaskLocked;
+    if (self.client_mode == .task and (action == .select or action == .tasks or action == .hosts or action == .create)) return error.TaskLocked;
     self.sequence += 1;
     const id = try std.fmt.bufPrint(&self.id_buf, "{d}", .{self.sequence});
-    var request_value: wire.TuiRequest = .{ .version = 1, .id = id, .action = action, .text = text, .hold = hold, .configuration = configuration, .chatId = chat_id, .after = after, .taskTarget = task_target };
+    var request_value: wire.TuiRequest = .{ .version = 1, .id = id, .action = action, .text = text, .hold = hold, .configuration = configuration, .chatId = chat_id, .after = after, .taskTarget = task_target, .taskForm = task_form };
     const bytes = try std.json.Stringify.valueAlloc(self.a, request_value, .{});
     defer self.a.free(bytes);
     const checked = try std.json.parseFromSlice(std.json.Value, self.a, bytes, .{});
@@ -107,6 +110,7 @@ fn requestConfigured(self: *Bridge, action: @FieldType(wire.TuiRequest, "action"
     // The complete mutation payload is owned by output; reply correlation does
     // not retain borrowed JSON task-target strings after the command is parsed.
     request_value.taskTarget = null;
+    request_value.taskForm = null;
     self.pending = request_value;
     return true;
 }
@@ -114,7 +118,7 @@ pub fn validTaskTarget(value: std.json.Value) bool {
     if (!wire.validTaskCreationTarget(value)) return false;
     const cwd = value.object.get("cwd").?.string;
     const title = value.object.get("title").?.string;
-    return std.fs.path.isAbsolute(cwd) and cwd.len <= 4096 and std.mem.indexOfScalar(u8, cwd, 0) == null and title.len <= 200 and std.mem.trim(u8, title, " \t\r\n").len > 0;
+    return @import("task_brief.zig").cwd(cwd) and @import("task_brief.zig").title(title) and @import("task_brief.zig").fields(value);
 }
 pub fn validRequest(value: std.json.Value) bool {
     if (!wire.validTuiRequest(value)) return false;
@@ -125,9 +129,11 @@ pub fn validRequest(value: std.json.Value) bool {
     } else if (value.object.contains("chatId")) return false;
     if (value.object.get("after")) |after| if (!std.mem.eql(u8, action, "tasks") or !safeId(after)) return false;
     if (value.object.contains("hold") and !std.mem.eql(u8, action, "poll")) return false;
-    if (value.object.contains("taskTarget") and !std.mem.eql(u8, action, "create")) return false;
+    if ((value.object.contains("taskTarget") or value.object.contains("taskForm")) and !std.mem.eql(u8, action, "create")) return false;
+    if (value.object.contains("taskTarget") and value.object.contains("taskForm")) return false;
     if (std.mem.eql(u8, action, "configure")) return value.object.contains("configuration") and text == null;
     if (value.object.contains("configuration")) return false;
+    if (value.object.get("taskForm")) |form| return std.mem.eql(u8, action, "create") and text == null and @import("task_brief.zig").form(form);
     if (value.object.get("taskTarget")) |target| return std.mem.eql(u8, action, "create") and text == null and validTaskTarget(target);
     if (std.mem.eql(u8, action, "send") or std.mem.eql(u8, action, "create")) {
         const content = text orelse return false;
@@ -150,7 +156,9 @@ pub fn validReply(value: std.json.Value, expected: []const u8, hub_id: ?[]const 
     if (!safeId(hub_chat)) return false;
     const task_mode = std.mem.eql(u8, s.object.get("clientMode").?.string, "task");
     const at_hub = std.mem.eql(u8, chat, hub_chat.string);
-    if (task_mode and (at_hub or s.object.contains("tasks"))) return false;
+    if (task_mode and (at_hub or s.object.contains("tasks") or s.object.contains("hosts"))) return false;
+    if (s.object.get("hosts")) |hosts| if (!@import("hub.zig").validHosts(hosts)) return false;
+    if (s.object.get("brief")) |brief| if (!@import("task_brief.zig").valid(brief)) return false;
     if (!task_mode and !at_hub and s.object.get("draft").? != .null) return false;
     if (s.object.get("tasks")) |page| {
         var previous: u64 = 0;
@@ -164,6 +172,9 @@ pub fn validReply(value: std.json.Value, expected: []const u8, hub_id: ?[]const 
             if (!safeId(id)) return false;
             const n = std.fmt.parseInt(u64, id.string, 10) catch return false;
             if (n <= previous) return false;
+            if (row.object.get("parentChatId")) |parent| {
+                if (!safeId(parent) or !std.mem.eql(u8, row.object.get("kind").?.string, "subagent") or (std.fmt.parseInt(u64, parent.string, 10) catch return false) >= n) return false;
+            }
             previous = n;
         }
         if (page.object.get("next")) |next| {
@@ -237,6 +248,7 @@ fn receive(self: *Bridge) !?std.json.Parsed(wire.TuiResponse) {
         if (s.clientMode != self.client_mode) return error.InvalidFrame;
         if (self.hub_chat_id) |id| if (!std.mem.eql(u8, id, s.hubChatId)) return error.InvalidFrame;
         if ((pending.action == .models or pending.action == .configure) and s.modelSettings == null) return error.InvalidFrame;
+        if (pending.action == .hosts and s.hosts == null) return error.InvalidFrame;
         if (pending.action == .tasks) {
             const page = s.tasks orelse return error.InvalidFrame;
             if ((pending.after == null) != (page.after == null) or (pending.after != null and !std.mem.eql(u8, pending.after.?, page.after.?))) return error.InvalidFrame;

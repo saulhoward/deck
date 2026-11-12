@@ -4,6 +4,8 @@ import { fstatSync } from "node:fs";
 import { PipeFiles, type HostFiles, type FileResult, type ShellProgress } from "./host-files.js";
 import type { Binding } from "./deck.js";
 import { validRexClient } from "./remote-contracts.js";
+import { nativeReadId } from "./native-read-id.js";
+import type { HostItem } from "./generated/contracts.js";
 import { validRemoteRuntimeRoutes, type WorkerRexClient, type RemoteRuntimeRoutes, type NativeArguments } from "./generated/contracts.js";
 export function parseRoutes(bytes: string, localMachine: string, reserved: number[]): RemoteRuntimeRoutes {
   const value: unknown = JSON.parse(bytes);
@@ -23,6 +25,22 @@ export class RoutedFiles implements HostFiles {
   private readonly remotes = new Map<string, PipeFiles>();
   private readonly clients = new Map<string, WorkerRexClient>();
   rexClientFor(machineId: string) { return this.clients.get(machineId); }
+  private readonly observing = new Set<string>();
+  async registeredHosts(): Promise<HostItem[]> {
+    return Promise.all([...this.remotes].map(async ([machineId, pipe]): Promise<HostItem> => {
+      let connection: HostItem["connection"] = "unknown";
+      if (!this.observing.has(machineId)) {
+        this.observing.add(machineId);
+        // One retained read correlation per route, even when callers time out.
+        // Consume late replies, never cache them as a fresh availability lease.
+        const sample = Promise.resolve().then(() => pipe.call({ machineId, cwd: "/" }, nativeReadId(), "link_status", {})).then((reply): HostItem["connection"] => reply.ok && reply.code === "link_status" && (reply.output === "connected" || reply.output === "offline") ? reply.output : "unknown", () => "unknown" as const).finally(() => this.observing.delete(machineId));
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try { connection = await Promise.race([sample, new Promise<"unknown">(resolve => { timer = setTimeout(() => resolve("unknown"), 2000); })]); }
+        finally { clearTimeout(timer); }
+      }
+      return { machineId, kind: "worker", rex: this.clients.has(machineId), connection };
+    }));
+  }
   constructor(private readonly machineId: string, private readonly local: PipeFiles, routes: RemoteRuntimeRoutes) {
     for (const host of routes.hosts) for (const fd of [host.readFd, host.writeFd, host.controlFd, ...(host.rexClient ? [host.clientReadFd!, host.clientWriteFd!] : [])]) {
       const stat = fstatSync(fd); if (!stat.isFIFO() && !stat.isSocket()) throw new Error("Invalid native worker pipe");

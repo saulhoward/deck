@@ -17,7 +17,7 @@
       "additionalProperties": true
     },
     "TransportId": { "type": "string", "minLength": 1, "maxLength": 200 },
-    "HubCommand": { "enum": ["status", "login_start", "login_status", "login_reply", "login_cancel", "rex_open", "rex_status", "rex_inspect", "rex_startup", "activity", "progress", "list_chats", "create_task", "import_instructions", "instruction_status", "admit", "history", "stop", "model_settings", "set_model_settings"] },
+    "HubCommand": { "enum": ["status", "login_start", "login_status", "login_reply", "login_cancel", "rex_open", "rex_status", "rex_inspect", "rex_startup", "activity", "progress", "list_chats", "list_hosts", "create_task", "create_task_brief", "import_instructions", "instruction_status", "admit", "history", "stop", "model_settings", "set_model_settings"] },
     "KnownCommandErrorCode": { "enum": ["conflict", "offline", "not_found", "invalid", "auth_required", "busy", "settings_changed", "invalid_response", "too_large", "runtime_failed"] },
     "FailureSource": { "enum": ["local", "transport", "remote"] },
     "FailurePolicy": {
@@ -71,7 +71,7 @@
       "type": "object", "additionalProperties": false,
       "properties": { "version": { "const": 1 }, "channel": { "enum": ["data", "control", "clients"] }, "hubId": { "$ref": "#/$defs/TransportId" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "connectionId": { "$ref": "#/$defs/Sha256" } }, "required": ["version", "channel", "hubId", "machineId"]
     },
-    "NativeOperation": { "enum": ["read", "write", "edit", "bash", "bash_progress", "rex_allocate", "rex_inspect", "rex_resolve", "rex_allocation_receipt"] },
+    "NativeOperation": { "enum": ["read", "write", "edit", "bash", "bash_progress", "rex_allocate", "rex_inspect", "rex_resolve", "rex_allocation_receipt", "link_status"] },
     "NativeCorrelationId": { "type": "string", "minLength": 1, "maxLength": 32 },
     "NativePath": { "description": "Decoded UTF-8 byte limit and NUL refusal are additional semantic checks; paths are not a sandbox.", "type": "string", "maxLength": 4096 },
     "NativeText": { "type": "string", "maxLength": 131072 },
@@ -148,7 +148,7 @@
     "StatusBinding": {
       "description": "Read-only saved metadata projection; empty/offline bindings are not current worker authority. Older peers may omit display metadata.",
       "type": "object", "additionalProperties": false,
-      "properties": { "machineId": { "$ref": "#/$defs/ChatListLabel" }, "cwd": { "$ref": "#/$defs/ChatListLabel" }, "kind": { "$ref": "#/$defs/ChatListKind" }, "title": { "$ref": "#/$defs/ChatListLabel" }, "parentChatId": { "$ref": "#/$defs/PiId" }, "ownerTaskId": { "$ref": "#/$defs/PiId" } },
+      "properties": { "machineId": { "$ref": "#/$defs/ChatListLabel" }, "cwd": { "$ref": "#/$defs/ChatListLabel" }, "kind": { "$ref": "#/$defs/ChatListKind" }, "title": { "$ref": "#/$defs/ChatListLabel" }, "parentChatId": { "$ref": "#/$defs/PiId" }, "ownerTaskId": { "$ref": "#/$defs/PiId" }, "brief": { "$ref": "#/$defs/TaskBrief" } },
       "required": ["machineId", "cwd"]
     },
     "StatusModel": {
@@ -169,7 +169,7 @@
       "type": "object", "additionalProperties": false,
       "properties": {
         "implementation": { "$ref": "#/$defs/Sha256" }, "hubId": { "$ref": "#/$defs/TransportId" },
-        "modelSettings": { "type": "integer", "minimum": 0, "maximum": 1 }, "hubGuard": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexStartup": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexOpen": { "type": "integer", "minimum": 0, "maximum": 1 },
+        "taskBrief": { "type": "integer", "minimum": 0, "maximum": 1 }, "hostInventory": { "type": "integer", "minimum": 0, "maximum": 1 }, "modelSettings": { "type": "integer", "minimum": 0, "maximum": 1 }, "hubGuard": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexStartup": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexOpen": { "type": "integer", "minimum": 0, "maximum": 1 },
         "mainChatId": { "$ref": "#/$defs/PiId" }, "chatId": { "$ref": "#/$defs/PiId" }, "binding": { "$ref": "#/$defs/StatusBinding" },
         "activity": { "$ref": "#/$defs/StatusInspection" }, "provider": { "$ref": "#/$defs/ChatListLabel" }, "model": { "$ref": "#/$defs/StatusModel" }, "tools": { "type": "string", "minLength": 1, "maxLength": 32 }
       }, "required": ["hubId", "mainChatId", "chatId", "tools"]
@@ -218,6 +218,12 @@
       "properties": { "requestId": { "$ref": "#/$defs/DurableRequestId" }, "title": { "$ref": "#/$defs/CommandString" }, "machineId": { "$ref": "#/$defs/CommandString" }, "cwd": { "$ref": "#/$defs/CommandString" } },
       "required": ["requestId", "title", "machineId", "cwd"], "additionalProperties": true
     },
+    "CreateTaskBriefArgs": {
+      "description": "Distinct mutation so legacy hubs refuse before creation rather than ignoring brief extras. At least one brief field is required semantically; inherited machine labels are preserved.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "requestId": { "$ref": "#/$defs/DurableRequestId" }, "title": { "type": "string", "minLength": 1, "maxLength": 200 }, "machineId": { "$ref": "#/$defs/CommandString" }, "cwd": { "$ref": "#/$defs/NativePath" }, "problem": { "type": "string", "maxLength": 2048 }, "description": { "type": "string", "maxLength": 8192 } },
+      "required": ["requestId", "title", "machineId", "cwd"]
+    },
     "InstructionImportArgs": {
       "type": "object",
       "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "requestId": { "$ref": "#/$defs/DurableRequestId" }, "machineId": { "$ref": "#/$defs/CommandString" }, "cwd": { "$ref": "#/$defs/CommandString" } },
@@ -228,8 +234,8 @@
       "type": "object", "properties": { "submissionId": { "$ref": "#/$defs/PiId" } }, "required": ["submissionId"], "additionalProperties": false
     },
     "CreateTaskAck": {
-      "description": "Created/retrieved conversation only, not inference or terminal allocation.",
-      "type": "object", "properties": { "chatId": { "$ref": "#/$defs/PiId" } }, "required": ["chatId"], "additionalProperties": false
+      "description": "Created/retrieved conversation only, not inference or terminal allocation. Brief requests require exact brief echo; older ACKs cannot silently discard new metadata.",
+      "type": "object", "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "brief": { "$ref": "#/$defs/TaskBrief" } }, "required": ["chatId"], "additionalProperties": false
     },
     "InstructionImportAck": {
       "description": "Administrative task admitted, not instructions applied. Echoed chat/request identities must additionally match the original request.",
@@ -240,7 +246,7 @@
     "ListChatsArgs": {
       "description": "Canonical conversation scan, not a lifecycle/health catalog. Legacy request extensions remain ignored. Omitted limit defaults to 50; after is the exclusive last-scanned Pi ID.",
       "type": "object",
-      "properties": { "limit": { "type": "integer", "minimum": 1, "maximum": 100 }, "after": { "$ref": "#/$defs/PiId" } },
+      "properties": { "limit": { "type": "integer", "minimum": 1, "maximum": 100 }, "after": { "$ref": "#/$defs/PiId" }, "includeObservations": { "type": "boolean" } },
       "required": [], "additionalProperties": true
     },
     "ChatListKind": { "enum": ["main", "task", "subagent"] },
@@ -248,7 +254,7 @@
     "ChatListItem": {
       "description": "Read-only canonical metadata projection. Optional link IDs are display hints, never Pi ownership authority. Unknown/private fields refuse at the wire boundary.",
       "type": "object",
-      "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "kind": { "$ref": "#/$defs/ChatListKind" }, "title": { "$ref": "#/$defs/ChatListLabel" }, "machineId": { "$ref": "#/$defs/ChatListLabel" }, "cwd": { "$ref": "#/$defs/ChatListLabel" }, "parentChatId": { "$ref": "#/$defs/PiId" }, "ownerTaskId": { "$ref": "#/$defs/PiId" } },
+      "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "kind": { "$ref": "#/$defs/ChatListKind" }, "title": { "$ref": "#/$defs/ChatListLabel" }, "machineId": { "$ref": "#/$defs/ChatListLabel" }, "cwd": { "$ref": "#/$defs/ChatListLabel" }, "parentChatId": { "$ref": "#/$defs/PiId" }, "ownerTaskId": { "$ref": "#/$defs/PiId" }, "brief": { "$ref": "#/$defs/TaskBrief" }, "activity": { "enum": ["busy", "idle", "unknown"] }, "rexState": { "type": "string", "maxLength": 32 } },
       "required": ["chatId", "kind", "title", "machineId", "cwd"], "additionalProperties": false
     },
     "ChatListItems": { "type": "array", "items": { "$ref": "#/$defs/ChatListItem" }, "maxItems": 100 },
@@ -342,8 +348,9 @@
       "type": "object", "properties": { "text": { "$ref": "#/$defs/HistoryText" }, "origin": {} },
       "required": ["text"], "additionalProperties": true
     },
+    "MessageChain": { "type": "object", "additionalProperties": false, "properties": { "rootChatId": { "$ref": "#/$defs/PiId" }, "rootRequestId": { "$ref": "#/$defs/DurableRequestId" }, "hop": { "type": "integer", "minimum": 0, "maximum": 8 }, "replyToChatId": { "$ref": "#/$defs/PiId" }, "replyToRequestId": { "$ref": "#/$defs/DurableRequestId" } }, "required": ["rootChatId", "rootRequestId", "hop", "replyToChatId", "replyToRequestId"] },
     "HistoryAgentOrigin": {
-      "type": "object", "properties": { "kind": { "const": "task-tool" }, "chatId": { "$ref": "#/$defs/PiId" }, "taskId": { "$ref": "#/$defs/PiId" } },
+      "type": "object", "properties": { "kind": { "const": "task-tool" }, "chatId": { "$ref": "#/$defs/PiId" }, "taskId": { "$ref": "#/$defs/PiId" }, "chain": { "$ref": "#/$defs/MessageChain" } },
       "required": ["kind", "chatId", "taskId"], "additionalProperties": true
     },
     "HistoryContentPart": {
@@ -553,20 +560,24 @@
       "required": ["version", "operationId", "requestHash", "state", "creation"],
       "additionalProperties": false
     },
-    "TaskCreationTarget": { "type": "object", "additionalProperties": false, "properties": { "machineId": { "$ref": "#/$defs/MachineIdentity" }, "cwd": { "$ref": "#/$defs/NativePath" }, "title": { "type": "string", "minLength": 1, "maxLength": 200 } }, "required": ["machineId", "cwd", "title"] },
+    "TaskBrief": { "type": "object", "additionalProperties": false, "properties": { "problem": { "type": "string", "maxLength": 2048 }, "description": { "type": "string", "maxLength": 8192 } }, "required": [] },
+    "TaskCreationForm": { "type": "object", "additionalProperties": false, "properties": { "machineId": { "$ref": "#/$defs/MachineIdentity" }, "cwd": { "$ref": "#/$defs/NativePath" }, "title": { "type": "string", "minLength": 1, "maxLength": 200 }, "problem": { "type": "string", "maxLength": 2048 }, "description": { "type": "string", "maxLength": 8192 } }, "required": ["title"] },
+    "TaskCreationTarget": { "type": "object", "additionalProperties": false, "properties": { "machineId": { "$ref": "#/$defs/MachineIdentity" }, "cwd": { "$ref": "#/$defs/NativePath" }, "title": { "type": "string", "minLength": 1, "maxLength": 200 }, "problem": { "type": "string", "maxLength": 2048 }, "description": { "type": "string", "maxLength": 8192 } }, "required": ["machineId", "cwd", "title"] },
+    "HostItem": { "type": "object", "additionalProperties": false, "properties": { "machineId": { "$ref": "#/$defs/MachineIdentity" }, "kind": { "enum": ["local", "worker"] }, "rex": { "type": "boolean" }, "connection": { "enum": ["local", "connected", "offline", "unknown"] } }, "required": ["machineId", "kind", "rex", "connection"] },
+    "HostInventory": { "type": "object", "additionalProperties": false, "properties": { "sampledAtMs": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }, "items": { "type": "array", "items": { "$ref": "#/$defs/HostItem" }, "maxItems": 9 } }, "required": ["sampledAtMs", "items"] },
     "TuiRequest": {
       "description": "Client-only renderer bridge, never a Pi execution channel. One outstanding request; no replay on loss.",
       "type": "object", "additionalProperties": false,
-      "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "action": { "enum": ["poll", "older", "latest", "send", "retry", "discard", "stop", "models", "configure", "tasks", "select", "create", "rexStatus", "rexInspect", "rexOpen"] }, "chatId": { "$ref": "#/$defs/PiId" }, "after": { "$ref": "#/$defs/PiId" }, "configuration": { "$ref": "#/$defs/ModelSettingsChange" }, "taskTarget": { "$ref": "#/$defs/TaskCreationTarget" }, "text": { "type": "string", "maxLength": 16384 }, "hold": { "type": "boolean" } }, "required": ["version", "id", "action"]
+      "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "action": { "enum": ["poll", "older", "latest", "send", "retry", "discard", "stop", "models", "configure", "tasks", "hosts", "select", "create", "rexStatus", "rexInspect", "rexOpen"] }, "chatId": { "$ref": "#/$defs/PiId" }, "after": { "$ref": "#/$defs/PiId" }, "configuration": { "$ref": "#/$defs/ModelSettingsChange" }, "taskTarget": { "$ref": "#/$defs/TaskCreationTarget" }, "taskForm": { "$ref": "#/$defs/TaskCreationForm" }, "text": { "type": "string", "maxLength": 16384 }, "hold": { "type": "boolean" } }, "required": ["version", "id", "action"]
     },
     "TuiEntry": { "type": "object", "additionalProperties": false, "properties": { "id": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "role": { "enum": ["user", "assistant", "tool", "note"] }, "text": { "type": "string", "maxLength": 8192 } }, "required": ["id", "role", "text"] },
     "TuiDraft": { "description": "Display-only preview. Retry always uses the original DraftStore request, never this preview.", "type": "object", "additionalProperties": false, "properties": { "requestId": { "$ref": "#/$defs/DurableRequestId" }, "kind": { "enum": ["input", "task", "instructions"] }, "saved": { "type": "boolean" }, "text": { "type": "string", "maxLength": 16384 }, "clipped": { "type": "boolean" } }, "required": ["requestId", "kind", "saved", "text", "clipped"] },
-    "TuiChat": { "type": "object", "additionalProperties": false, "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "kind": { "$ref": "#/$defs/ChatListKind" }, "title": { "type": "string", "maxLength": 160 }, "machineId": { "type": "string", "maxLength": 80 }, "cwd": { "type": "string", "maxLength": 256 } }, "required": ["chatId", "kind", "title", "machineId", "cwd"] },
+    "TuiChat": { "type": "object", "additionalProperties": false, "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "kind": { "$ref": "#/$defs/ChatListKind" }, "title": { "type": "string", "maxLength": 160 }, "machineId": { "type": "string", "maxLength": 80 }, "cwd": { "type": "string", "maxLength": 256 }, "parentChatId": { "$ref": "#/$defs/PiId" }, "activity": { "enum": ["busy", "idle", "unknown"] }, "rexState": { "type": "string", "maxLength": 32 }, "connection": { "enum": ["local", "connected", "offline", "unknown", "unregistered"] } }, "required": ["chatId", "kind", "title", "machineId", "cwd"] },
     "TuiTasks": { "description": "One bounded discovery page; labels are display-only, never routing authority.", "type": "object", "additionalProperties": false, "properties": { "items": { "type": "array", "maxItems": 25, "items": { "$ref": "#/$defs/TuiChat" } }, "after": { "$ref": "#/$defs/PiId" }, "next": { "$ref": "#/$defs/PiId" } }, "required": ["items"] },
     "TuiRex": { "description": "Selected-chat creation provenance and optional independent presence sample, not agent health.", "type": "object", "additionalProperties": false, "properties": { "status": { "$ref": "#/$defs/RexStatusSnapshot" }, "inspection": { "$ref": "#/$defs/RexInspectionSnapshot" } }, "required": ["status"] },
     "TuiClientMode": { "enum": ["hub", "task"] },
     "TuiSnapshot": { "type": "object", "additionalProperties": false, "properties": {
-      "clientMode": { "$ref": "#/$defs/TuiClientMode" }, "hubChatId": { "$ref": "#/$defs/PiId" }, "settingsPending": { "type": "boolean" }, "tasks": { "$ref": "#/$defs/TuiTasks" }, "rex": { "$ref": "#/$defs/TuiRex" }, "modelSettings": { "$ref": "#/$defs/ModelSettingsSnapshot" }, "hubId": { "$ref": "#/$defs/TransportId" }, "chatId": { "$ref": "#/$defs/PiId" }, "title": { "type": "string", "maxLength": 160 }, "model": { "type": "string", "maxLength": 160 }, "tools": { "type": "string", "maxLength": 80 },
+      "clientMode": { "$ref": "#/$defs/TuiClientMode" }, "hubChatId": { "$ref": "#/$defs/PiId" }, "settingsPending": { "type": "boolean" }, "hosts": { "$ref": "#/$defs/HostInventory" }, "brief": { "$ref": "#/$defs/TaskBrief" }, "tasks": { "$ref": "#/$defs/TuiTasks" }, "rex": { "$ref": "#/$defs/TuiRex" }, "modelSettings": { "$ref": "#/$defs/ModelSettingsSnapshot" }, "hubId": { "$ref": "#/$defs/TransportId" }, "chatId": { "$ref": "#/$defs/PiId" }, "title": { "type": "string", "maxLength": 160 }, "model": { "type": "string", "maxLength": 160 }, "tools": { "type": "string", "maxLength": 80 },
       "agentStatus": { "$ref": "#/$defs/AgentStatus" }, "activityKnown": { "type": "boolean" }, "busy": { "type": "boolean" }, "queued": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }, "entries": { "type": "array", "maxItems": 80, "items": { "$ref": "#/$defs/TuiEntry" } }, "hasOlder": { "type": "boolean" }, "historical": { "type": "boolean" }, "preview": { "type": "string", "maxLength": 4096 }, "notice": { "type": "string", "maxLength": 1024 }, "draft": { "anyOf": [{ "$ref": "#/$defs/TuiDraft" }, { "type": "null" }] }
     }, "required": ["clientMode", "hubChatId", "hubId", "chatId", "title", "model", "tools", "activityKnown", "busy", "queued", "entries", "hasOlder", "historical", "preview", "notice", "draft"] },
     "TuiResponse": { "oneOf": [

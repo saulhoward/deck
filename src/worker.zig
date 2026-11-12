@@ -79,7 +79,7 @@ fn controlled(native: Native, allocator: std.mem.Allocator, journal: Io.Dir, mac
     const parsed = try boundary.parseRequest(allocator, body);
     defer parsed.deinit();
     const request = parsed.value;
-    if (request.operation == .bash_progress) return error.InvalidArguments;
+    if (request.operation == .bash_progress or request.operation == .link_status) return error.InvalidArguments;
     var result: Result = undefined;
     if (!std.mem.eql(u8, machine_id, request.machineId)) {
         result = .{ .ok = false, .output = "offline: assigned worker is not this machine; no local fallback", .code = "offline" };

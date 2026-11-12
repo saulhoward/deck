@@ -2,7 +2,7 @@
 
 Deck is a personal coding-agent tool. It has a Zig hub, command-line client, and terminal user interface (TUI). One TypeScript runtime uses Pi to store conversations and run agents. Zig runs local file and shell tools. Rex can keep task terminals open.
 
-**Deck is a prototype.** Local hub/Rex clients, registered native workers, and opt-in assigned-host Rex task clients are implemented. Real two-machine acceptance is still pending; the selected Rex API 9 endpoint remains unsupported. Tools run with your user permissions; the workspace is not a sandbox.
+**Deck is a prototype.** Local hub/Rex clients, registered native workers, and opt-in assigned-host Rex task clients are implemented. [Two-machine acceptance](docs/HISTORY.md#phase-0-two-machine-acceptance) passed on one Darwin arm64 pair with mock providers and a private Rex API 10 server; the selected Rex API 9 endpoint remains unsupported. Tools run with your user permissions; the workspace is not a sandbox.
 
 ## Documentation
 
@@ -14,11 +14,20 @@ These documents distinguish current behavior from the target design. A local bui
 
 ## Target workflow
 
-Every chat uses the hub. Interactive tasks can open named Rex sessions on their explicitly configured execution machines. Their subagents will have named TUI terminals inside the same session. Closing and reopening a session will retain the task's hub conversation.
+**Goal, not a list of currently available commands.** Keep one hub-owned Pi runtime and SQLite store for the hub conversation, every task's primary conversation, and its children. Model calls originate at the hub; workspace operations and approved MCP tools execute on their designated hosts.
 
-Scheduled jobs and their children will run in the hub runtime through registered host connections, without Rex terminals. Each job will reuse its task and Pi conversation. Each run will have its own admission identity and captured file settings.
+- Run the hub under an external service manager and open its control TUI with `deck hub`.
+- Give each task a name, problem statement, description, one primary chat, an explicit execution-machine/cwd binding, and optional Pi-owned subagents. List saved tasks with their children; distinguish connectivity, activity and terminal presence.
+- Let the hub model discover, create and message tasks. Let primary task agents message other tasks and explicitly report to the hub, with provenance and bounded message chains rather than automatic acknowledgement loops.
+- From the hub, inspect tasks read-only and open/reopen their assigned-host Rex sessions. A proposed remote `deck agent` launcher selects an existing task or explicitly creates one through the hub before Rex starts its task-locked TUI. It does not create another hub or infer task identity from the current directory.
+- Keep direct human input and agent-origin messages in the same primary task conversation. Model/thinking changes remain chat-scoped and idle-only in writable clients.
+- Expose approved **native MCP tools**, hosted on the hub or the assigned worker. A task's saved tool profile determines access; attaching a different TUI does not change tools or credentials. Closing a terminal does not stop the agent or its tool host.
 
-Assigned-host task clients are implemented and tested in isolation; real two-machine acceptance remains pending. Jobs and subagent terminals still need implementation. See the [target architecture](docs/DEVELOPER.md#target-interactive-and-scheduled-architecture) and [next implementation steps](docs/ROADMAP.md#next-implementation-sequence). The instructions below describe what works now.
+**Native MCP means Deck-owned MCP client transport and process supervision in Zig, with Pi owning durable tool invocations.** It does not mean loading Pi coding-agent extensions, reusing a running Pi session, or running another agent on each worker. MCP server programs are separate, explicitly installed software and may themselves need Node or Python. The native worker does not acquire those runtimes as mandatory dependencies. Service credentials stay with the configured tool host; model credentials stay at the hub. Reusing an MCP server configuration requires explicit Deck setup and approval, not automatic discovery of `.pi` files or arbitrary plugin execution.
+
+Assigned-host task clients have isolated tests and a recorded two-machine Darwin arm64 acceptance run. That run used disposable registrations and mock providers, not a permanent service deployment. **Phase 1 is implemented:** `deck hub`, creation-time task briefs, grouped inspection, registered-host selection and explicit task-to-hub messaging. The remote bootstrap launcher and native MCP remain **planned**. `deck agent` remains compatible; bare `deck agent` on another machine still does not create a remote task or Rex allocation.
+
+Named interactive child terminals and captured, headless scheduled jobs remain later goals. Jobs will reuse their task/chat, with distinct per-run admission identities and captured file settings; jobs and their children will never allocate Rex terminals. See the [target architecture](docs/DEVELOPER.md#target-interactive-and-scheduled-architecture), [MCP boundary](docs/DEVELOPER.md#target-native-mcp-tools), and [phased plan](docs/ROADMAP.md#next-implementation-sequence). The instructions below describe what works now.
 
 ## Current workflow
 
@@ -56,24 +65,34 @@ mkdir "$DEMO/work"
 In another terminal, from the checkout:
 
 ```sh
-./result/bin/deck agent --port 52801
+./result/bin/deck hub --port 52801
 ```
 
 Use another unused port if 52801 is occupied. The mock provider makes no external model calls. It returns mock answers and does not exercise model-driven tools.
 
-`serve` stays in the foreground. It does not install a service. The default endpoint is `127.0.0.1:52800`; clients must use the hub's port. `--directory` selects stored state. `--workspace` sets the initial main workspace. Saved chats keep their original binding when the hub restarts.
+`serve` stays in the foreground. It does not install a service. For unattended use, configure your existing launchd/systemd service to run the same foreground command, with absolute executable/state/workspace paths and explicit environment. Do not start a second writer or upgrade an active hub without settling its work. `deck hub` attaches a client; it does not start or replace the service. The default endpoint is `127.0.0.1:52800`; clients must use the hub's port. `--directory` selects stored state. `--workspace` sets the initial main workspace. Saved chats keep their original binding when the hub restarts.
 
 ## Use the TUI
 
 Interactive terminals use the TUI by default. The hub has teal status bars; Rex task clients use slate-blue bars and show `task / Rex locked`. Inspect a saved task read-only with:
 
 ```sh
-deck agent --task CHAT_ID
+deck hub --task CHAT_ID
 ```
 
-In the hub, `/tasks` opens the task picker. Move with `j/k` or arrows and press Enter to inspect. Use `n` for the next page, `g` for the first page, and Esc to close. `/hub` returns to the hub chat. Inspection cannot edit, send, retry/discard task drafts, stop, or change task settings. Saved task requests remain untouched. Use `/rex open` to participate in its Rex client.
+In the hub, `/tasks` opens the task picker. It groups parents and children within each bounded scan page; parent IDs can reference another page. Saved binding, sampled connection/activity and historical Rex allocation are separate rows. Offline tasks remain visible. None of these observations is an open/completed task lifecycle. Move with `j/k` or arrows and press Enter to inspect. Use `n` for the next page, `g` for the first page, and Esc to close. `/hub` returns to the hub chat. Inspection cannot edit, send, retry/discard task drafts, stop, or change task settings. Saved task requests remain untouched. Use `/rex open` to participate in its Rex client.
 
 From the hub chat, `/task TITLE` creates a task on the hub's saved workspace binding and then requests its Rex terminal. It does not submit input or switch the hub view. Creation and terminal allocation are separate: if Rex opening fails or is unconfirmed, the task remains saved and read-only here. Inspect it and explicitly open/reopen; never repeat creation to recover a terminal. Rex capability is required, with no local participation fallback.
+
+For a structured brief, use `/new` in the hub chat, press `i`, then paste JSON into the **TASK BRIEF** editor:
+
+```json
+{"title":"Investigate latency","problem":"Requests slow down under load","description":"Measure first; preserve existing behavior."}
+```
+
+Use `Ctrl-S` or `:send` to create, not to submit model input. Title is limited to 200 UTF-8 bytes, problem to 2,048, description to 8,192; the complete JSON editor has an independent 16 KiB bound. Omit both `machineId` and `cwd` to inherit the hub binding, or supply both explicitly. `/hosts` lists approved hosts; Enter opens a form with that host selected and an empty cwd that you must fill. Offline registration is not availability, and unavailable work never falls back locally. `/new` cannot enroll a host or reassign an existing task. Legacy `/task-at` retains its explicit arbitrary/offline binding contract.
+
+Briefs are immutable creation snapshots in this phase. They supply the new task's initial instructions but start no generation. `/brief` reads them without editing context. A later explicit instruction import can replace active instructions; it does not rewrite the saved brief or earlier history. `:cancel` clears only an unsubmitted form. After a lost creation ACK, use the existing exact-draft `:retry`/`:discard` flow; do not start another creation. Brief entry refuses to overwrite an unsent prompt or unresolved request. The separate command line remains 256 bytes with no command paste.
 
 Rex task clients cannot list/create/select other tasks or return to the hub. Hub navigation/creation still refuses unsent prompt text and unresolved requests, rather than losing them. Send or clear the prompt first.
 
@@ -88,6 +107,9 @@ Rex task clients cannot list/create/select other tasks or return to the hub. Hub
 | Read older or latest history | `:older`, `:latest` |
 | Inspect tasks / return to hub (hub client only) | `/tasks`, `/select ID`, `/hub` |
 | Create a task and request Rex (hub chat only) | `/task TITLE` |
+| Compose a task brief / choose a registered host | `/new`, `/hosts` |
+| Inspect the saved creation brief | `/brief` |
+| Clear an unsubmitted creation form | `:cancel` |
 | Create on an explicit saved host/cwd (hub only) | `/task-at {"machineId":"32 hex ID","cwd":"/absolute/path","title":"Task"}` |
 | Inspect the selected task's Rex state | `/rex`; `s` refreshes status, `i` inspects presence |
 | Open/reopen the selected task in Rex | `/rex open`, or `o` in the Rex view |
@@ -112,8 +134,8 @@ The terminal title is `Δ - {dirName}`, using the client launch directory. Suppo
 ## Use the plain client
 
 ```sh
-deck agent --no-tui
-deck agent --no-tui --task CHAT_ID
+deck hub --no-tui
+deck hub --no-tui --task CHAT_ID
 ```
 
 | Command | Purpose |
@@ -123,6 +145,8 @@ deck agent --no-tui --task CHAT_ID
 | `/select CHAT_ID`, `/hub` | Hub only: inspect a task / return to hub |
 | `/task TITLE` | Hub chat only: create a task and request its Rex terminal |
 | `/task-at JSON` | Hub chat only: explicit `machineId`, absolute `cwd`, and `title`; save first, then request Rex |
+| `/new JSON` | Hub chat only: bounded `{title,problem?,description?,machineId?,cwd?}`; explicit hosts must be registered |
+| `/hosts`, `/brief` | Read registered hosts (hub client only) / the selected chat's saved brief |
 | `/status`, `/activity` | Inspect settings, bindings, or activity |
 | `/older` | Read an older history page |
 | `/instructions load` | Import the selected chat's `AGENTS.md` while idle |
@@ -143,9 +167,15 @@ For one-shot input to the hub chat, use `deck agent --message 'TEXT'`. This retu
 
 Models can inspect chats with `task_list`, `task_history`, and `task_activity`. Search currently filters titles; it is not full-text search.
 
-`task_create` creates an independent task. `task_message` sends input and returns an admission receipt, not an answer. Stopping the sender does not stop the target task.
+`host_list` reads the approved host inventory, not credentials or enrollment controls. `task_create` creates an independent task without generation or Rex. It inherits the caller's saved machine/cwd and the hub's model/reasoning; only the hub model may explicitly select a registered `machineId` and `cwd`. Optional `problem`/`description` become the task's initial brief. A new tool call is a new creation, not a retry of an ambiguous one.
+
+`task_message` sends to another independent task, not the hub or an owned child. `hub_message` explicitly reports from an independent task to the hub as follow-up input. Both return admission, **not an answer**, and retain authoritative sender, request and reply provenance. An eight-hop causal budget stops agent-message loops; only fresh human input resets it, not another tool call or a lower-hop agent message. Missing legacy provenance fails closed for new forwarding. This is a limit on messaging tools, not a sandbox or a fan-out quota. Deck never automatically relays ACKs, status or final answers. Stopping the sender does not stop admitted target work. Model coordination authority remains distinct from the task TUI's navigation lock.
 
 `subagent` creates a Pi-owned foreground child and waits for its answer. It inherits the parent's settings and binding, but not its transcript. Stopping the parent cancels its ordinary owned work. You can inspect or stop child chats, but you cannot send them direct input or change their model independently.
+
+### MCP status
+
+Deck does not yet expose MCP servers as model tools. It does not load the Pi CLI's extensions, MCP connections, provider plugins or credential setup. A working integration in a separate Pi session is not automatically available here. Native MCP is the chosen integration goal; arbitrary Pi-extension compatibility is out of scope. See the [MCP plan](docs/ROADMAP.md#phase-2--native-mcp-on-one-host).
 
 ### Project instructions
 
@@ -254,7 +284,7 @@ Restore keeps identities and workspace bindings. Do not run source and restored 
 
 ## Register a files/bash worker
 
-This default configuration enables **files/bash only**. [Rex task clients](#enable-assigned-host-rex-task-clients) require explicit additional approval. Pi, models, history, and credentials stay at the hub. The worker uses its saved machine ID/cwd; disconnection never redirects its work locally. An actual two-machine Deck acceptance test is still pending; isolated TCP tests use injected verifier identities, not a live tailnet.
+This default configuration enables **files/bash only**. [Rex task clients](#enable-assigned-host-rex-task-clients) require explicit additional approval. Pi, models, history, and credentials stay at the hub. The worker uses its saved machine ID/cwd; disconnection never redirects its work locally. [Phase 0 acceptance](docs/HISTORY.md#phase-0-two-machine-acceptance) exercised real OS Tailscale peers on two Darwin arm64 hosts. The separate isolated TCP suite still uses injected verifier identities; neither proves every platform or deployment.
 
 Both OS hosts need a running Tailscale backend and an explicit absolute Tailscale executable. An embedded Rex service's node identity is **not** automatically the worker OS's identity. Do not expose the loopback chat API or reuse a Rex HTTPS URL as a worker endpoint.
 
@@ -332,7 +362,7 @@ The client must register its exact hub/task/allocation and native `REX_BLOCK` be
 
 All three sockets (effects, control, clients) independently verify their actual Tailscale peer and bind one fresh generation. Revocation, replacement, or config drift cannot silently attach an old client to another task. Changing an approved client path requires explicitly closing/reopening affected terminals; retain the old immutable build and settle work first. No live hub or remote machine is upgraded by building this feature.
 
-Validation includes real isolated sockets/FIFOs with injected peer verification and a private Rex API 10 server: managed startup, task input at the hub, worker-link reconnect with the same client PID, and explicit reopening of the same conversation. This is **not** real two-machine/Tailscale acceptance and does not validate the selected API 9 service.
+Validation includes isolated sockets/FIFOs with injected peer verification and a separate [real two-machine run](docs/HISTORY.md#phase-0-two-machine-acceptance) with production Tailscale peer verification. The latter exercised managed startup, central task input/history, same-PID reconnect, lost-ACK draft recovery, native effect faults and explicit same-conversation reopen. It used a private Rex API 10/Unix server; the existing API 9 service was used only for operator access and remains unsupported for Deck allocation. No live provider or desktop GUI acceptance is implied.
 
 ## Limits and trust
 

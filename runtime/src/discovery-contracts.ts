@@ -1,5 +1,6 @@
 // Read-only semantic checks, not a conversation/ownership/health catalog.
 import { validListChatsArgs, validChatListPage, type ListChatsArgs, type ChatListPage } from "./generated/contracts.js";
+import { validBrief } from "./task-brief.js";
 import { validSafePiId } from "./mutation-contracts.js";
 
 export function validDiscoveryArgs(value: unknown): value is ListChatsArgs {
@@ -14,6 +15,7 @@ export function validDiscoveryPage(value: unknown, args: unknown = {}): value is
   for (const item of value.items) {
     if (!validSafePiId(item.chatId) || Number(item.chatId) <= previous) return false;
     previous = Number(item.chatId);
+    if (item.brief !== undefined && !validBrief(item.brief)) return false;
     if ((item.parentChatId === undefined) !== (item.ownerTaskId === undefined)) return false;
     if (item.parentChatId !== undefined && (!validSafePiId(item.parentChatId) || !validSafePiId(item.ownerTaskId))) return false;
   }

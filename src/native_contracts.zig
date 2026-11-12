@@ -44,8 +44,9 @@ pub fn validRequest(allocator: std.mem.Allocator, v: V) bool {
     }
     const n = id(request_id) orelse return false;
     if (!validCancellationId(n)) return false;
-    const ephemeral = eq(operation, "rex_inspect") or eq(operation, "rex_resolve");
+    const ephemeral = eq(operation, "rex_inspect") or eq(operation, "rex_resolve") or eq(operation, "link_status");
     if (ephemeral != (n >= (@as(u64, 1) << 63))) return false;
+    if (eq(operation, "link_status")) return args == .object and args.object.count() == 0;
     if (eq(operation, "read")) return wire.validNativeReadArgs(args) and path(field(args, "path"));
     if (eq(operation, "write")) return wire.validNativeWriteArgs(args) and path(field(args, "path")) and text(field(args, "content")).len <= 128 * 1024;
     if (eq(operation, "edit")) return wire.validNativeEditArgs(args) and path(field(args, "path")) and text(field(args, "oldText")).len > 0 and text(field(args, "oldText")).len <= 128 * 1024 and text(field(args, "newText")).len <= 128 * 1024;
@@ -76,6 +77,7 @@ pub fn validReply(request_id: []const u8, operation: wire.NativeOperation, v: V)
 }
 pub fn validResult(operation: wire.NativeOperation, v: V) bool {
     if (!wire.validNativeResult(v) or operation == .bash_progress) return false;
+    if (operation == .link_status and field(v, "ok").bool) return eq(field(v, "code"), "link_status") and (eq(field(v, "output"), "connected") or eq(field(v, "output"), "offline")) and field(v, "exitCode") == .null and !(field(v, "truncated") == .bool and field(v, "truncated").bool);
     const shell = operation == .bash;
     const rex = switch (operation) {
         .rex_allocate, .rex_inspect, .rex_resolve, .rex_allocation_receipt => true,
@@ -100,7 +102,7 @@ pub fn validResult(operation: wire.NativeOperation, v: V) bool {
         else => false,
     };
     if (field(v, "ok").bool) return (eq(code, success) or (!rex and code == .null)) and (!shell or zero);
-    for ([_][]const u8{ "ok", "allocated", "rex_inspected", "rex_resolved", "rex_receipt" }) |s| if (eq(code, s)) return false;
+    for ([_][]const u8{ "ok", "allocated", "rex_inspected", "rex_resolved", "rex_receipt", "link_status" }) |s| if (eq(code, s)) return false;
     return !shell or !zero or !eq(code, "exit_nonzero");
 }
 // Validate the actual serialized bytes at egress. Retained hashes and results are

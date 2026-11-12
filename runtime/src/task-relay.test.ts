@@ -54,7 +54,7 @@ test("assigned-host Rex launch pins its approved client/socket; remote commands 
     assert.equal((await f.direct("admit", { chatId: f.chatId, requestId: randomUUID(), text: "before startup", mode: "steer" })).ok, false);
     assert.ok((await f.direct("rex_startup", { chatId: f.chatId, allocationId: f.scope.allocationId, blockId: f.scope.blockId })).ok);
     for (const [command, args] of [
-      ["list_chats", {}], ["create_task", { title: "forbidden", machineId: machine, cwd: "/", requestId: randomUUID() }],
+      ["list_chats", {}], ["list_hosts", {}], ["create_task_brief", { title: "forbidden", machineId: machine, cwd: "/", requestId: randomUUID(), problem: "brief" }], ["create_task", { title: "forbidden", machineId: machine, cwd: "/", requestId: randomUUID() }],
       ["login_start", { requestId: randomUUID() }], ["rex_open", { chatId: f.chatId, port: 52800, requestId: randomUUID() }],
       ["status", {}], ["history", { chatId: String(f.runtime.main.id) }],
       ["rex_startup", { chatId: f.chatId, allocationId: randomUUID(), blockId: f.scope.blockId }],

@@ -1,3 +1,4 @@
+import { validBrief } from "./task-brief.js";
 import * as wire from "./generated/contracts.js";
 import { validSafePiId, type ReplyContext } from "./mutation-contracts.js";
 
@@ -35,7 +36,7 @@ export function validStatusLoginReply(request: ReplyContext, value: unknown): bo
       if (!["offline", "native-files + bash"].includes(value.tools)) return false;
       if (value.provider !== undefined && value.model?.provider !== undefined && value.provider !== value.model.provider) return false;
       const binding = value.binding;
-      return !binding || ((binding.parentChatId === undefined) === (binding.ownerTaskId === undefined) && (binding.parentChatId === undefined || (validSafePiId(binding.parentChatId) && validSafePiId(binding.ownerTaskId))));
+      return !binding || ((binding.brief === undefined || validBrief(binding.brief)) && (binding.parentChatId === undefined) === (binding.ownerTaskId === undefined) && (binding.parentChatId === undefined || (validSafePiId(binding.parentChatId) && validSafePiId(binding.ownerTaskId))));
     }
     case "login_start": return validLoginSnapshot(value) && "id" in value && value.id === (args as wire.LoginStartArgs).requestId;
     case "login_status": return validLoginSnapshot(value);

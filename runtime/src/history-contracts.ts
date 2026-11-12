@@ -14,7 +14,7 @@ function validRenderedEntry(entry: HistoryEntry): boolean {
     if (!validHistoryInputData(entry.data)) return false;
     const origin = entry.data.origin;
     if (origin && typeof origin === "object" && "kind" in origin && origin.kind === "task-tool") {
-      return validHistoryAgentOrigin(origin) && validSafePiId(origin.chatId) && validSafePiId(origin.taskId);
+      return validHistoryAgentOrigin(origin) && validSafePiId(origin.chatId) && validSafePiId(origin.taskId) && (origin.chain === undefined || (validSafePiId(origin.chain.rootChatId) && validSafePiId(origin.chain.replyToChatId)));
     }
   } else if (entry.kind === "pi.assistant" || entry.kind === "pi.tool-result") {
     if (!validHistoryMessages(entry.model)) return false;

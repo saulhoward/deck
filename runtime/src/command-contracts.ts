@@ -1,3 +1,4 @@
+import { validHostArgs } from "./host-inventory.js";
 import { validModelSettingsArgs } from "./model-settings-contracts.js";
 import { validHubCommand, validRequestEnvelope, validTransportId, type RequestEnvelope } from "./generated/contracts.js";
 import { validMutationArgs, type ReplyContext } from "./mutation-contracts.js";
@@ -10,7 +11,7 @@ import { validStatusLoginArgs } from "./status-login-contracts.js";
 // Pure semantic composition, not a second authored wire model or dispatcher.
 export function validCommandArgs(command: string, raw: unknown): boolean {
   const args = raw ?? {};
-  return validHubCommand(command) && validStatusLoginArgs(command, args) &&
+  return validHubCommand(command) && validHostArgs(command, args) && validStatusLoginArgs(command, args) &&
     (command !== "list_chats" || validDiscoveryArgs(args)) && (command !== "history" || validHistoryArgs(args)) &&
     validModelSettingsArgs(command, args) && validRexArgs(command, args) && validViewArgs(command, args) && validMutationArgs(command, args);
 }

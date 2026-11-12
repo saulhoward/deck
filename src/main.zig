@@ -25,6 +25,7 @@ const help =
     \\  deck rex open|reopen|status|inspect --task CHAT_ID [--port 52800]
     \\    [--rex /path/to/rex] [--server unix:///path/to/socket] [--host-id UUID] [--instance-id UUID]
     \\  deck serve --stdio --mock [--directory PATH] [--runtime PATH]
+    \\  deck hub [--tui | --no-tui] [--port 52800] [--task CHAT_ID] [--message TEXT]
     \\  deck agent [--tui | --no-tui] [--port 52800] [--task CHAT_ID] [--message TEXT]
     \\    TTYs default to the Zig TUI; --message and redirected input use the plain client.
     \\    TUI: i insert, Esc normal, Tab chat/prompt, Ctrl-S send, :help, :q detach.
@@ -330,7 +331,18 @@ pub fn main(init: std.process.Init) void {
         };
         return;
     }
-    if (args.len > 1 and std.mem.eql(u8, args[1], "agent")) {
+    if (args.len > 1 and std.mem.eql(u8, args[1], "hub")) {
+        var i: usize = 2;
+        while (i < args.len) : (i += 1) {
+            const arg = args[i];
+            if (std.mem.eql(u8, arg, "--rex-allocation") or std.mem.eql(u8, arg, "--worker-socket")) {
+                std.debug.print("deck hub cannot launch an allocation-scoped task client\n", .{});
+                std.process.exit(2);
+            }
+            if (!std.mem.eql(u8, arg, "--tui") and !std.mem.eql(u8, arg, "--no-tui") and !std.mem.eql(u8, arg, "--login")) i += 1;
+        }
+    }
+    if (args.len > 1 and (std.mem.eql(u8, args[1], "agent") or std.mem.eql(u8, args[1], "hub"))) {
         const interactive = tui.selected(args[2..], std.c.isatty(0) == 1 and std.c.isatty(1) == 1) catch {
             std.debug.print("--tui cannot be combined with --no-tui or --message\n", .{});
             std.process.exit(2);
@@ -343,7 +355,7 @@ pub fn main(init: std.process.Init) void {
             return;
         }
     }
-    if (args.len > 1 and (std.mem.eql(u8, args[1], "agent") or std.mem.eql(u8, args[1], "login") or std.mem.eql(u8, args[1], "rex"))) {
+    if (args.len > 1 and (std.mem.eql(u8, args[1], "agent") or std.mem.eql(u8, args[1], "hub") or std.mem.eql(u8, args[1], "login") or std.mem.eql(u8, args[1], "rex"))) {
         const term = launchClient(native, allocator, args) catch {
             std.Io.File.stderr().writeStreamingAll(init.io, "deck: client runtime unavailable; rebuild or check the installation\n") catch {};
             std.process.exit(1);
@@ -395,6 +407,7 @@ test {
     _ = @import("worker_limits_test.zig");
     _ = @import("shell_test.zig");
     _ = @import("contracts_test.zig");
+    _ = @import("phase1_test.zig");
     _ = @import("native_contracts_test.zig");
     _ = @import("command_policy_test.zig");
     _ = @import("model_settings.zig");

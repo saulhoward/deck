@@ -154,6 +154,29 @@ const Fake = struct {
     }
 };
 
+test "link inventory is a hub-local bounded observation, never a worker effect" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture = try Fixture.init(a);
+    defer fixture.deinit();
+    const probe = try fixture.request("9223372036854775808", "/", "link_status", wire.NativeArguments{});
+    try fixture.send(probe);
+    const offline = try fixture.reply();
+    try std.testing.expectEqualStrings("link_status", offline.object.get("code").?.string);
+    try std.testing.expectEqualStrings("offline", offline.object.get("output").?.string);
+    const fake = try Fake.connect(&fixture);
+    defer fake.close();
+    try fixture.send(try fixture.request("9223372036854775809", "/", "link_status", wire.NativeArguments{}));
+    const online = try fixture.reply();
+    try std.testing.expectEqualStrings("connected", online.object.get("output").?.string);
+    try std.testing.expect(online.object.get("ok").?.bool);
+    try tcp.nonblock(fake.data, true);
+    var reader: tcp.Reader = .{};
+    defer reader.deinit();
+    try std.testing.expectEqual(null, try reader.read(io, fake.data));
+}
+
 test "remote sockets preserve exact receipts across lost replies and explicit reconnect retry" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
