@@ -1,5 +1,11 @@
 [
   {"name":"read", "valid":true},
+  {"name":"MCP call", "set":{"operation":"mcp_call","machineId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "planSchema":"McpCallPlan", "valid":true},
+  {"name":"MCP malformed plan", "set":{"operation":"mcp_call","machineId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","args":{"plan":"{}"}}, "valid":false},
+  {"name":"MCP complete original reply", "set":{"operation":"mcp_call","machineId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "planSchema":"McpCallPlan", "reply":{"result":{"ok":true,"code":"mcp_result","output":"{\"jsonrpc\":\"2.0\",\"id\":\"call:1\",\"result\":{\"content\":[]}}"}}, "valid":true},
+  {"name":"MCP wrong response id", "set":{"operation":"mcp_call","machineId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "planSchema":"McpCallPlan", "reply":{"result":{"ok":true,"code":"mcp_result","output":"{\"jsonrpc\":\"2.0\",\"id\":\"call:2\",\"result\":{\"content\":[]}}"}}, "valid":false},
+  {"name":"MCP cannot masquerade as legacy success", "set":{"operation":"mcp_call","machineId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "planSchema":"McpCallPlan", "reply":{"result":{"ok":true,"code":"ok","output":"{}"}}, "valid":false},
+  {"name":"MCP cannot truncate a result", "set":{"operation":"mcp_call","machineId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, "planSchema":"McpCallPlan", "reply":{"result":{"ok":false,"code":"effect_uncertain","output":"unknown","truncated":true}}, "valid":false},
   {"name":"safe maximum", "set":{"id":"9007199254740991"}, "valid":true},
   {"name":"zero refused", "set":{"id":"0"}, "valid":false},
   {"name":"leading zero refused", "set":{"id":"01"}, "valid":false},

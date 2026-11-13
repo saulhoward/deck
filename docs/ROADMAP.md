@@ -4,11 +4,13 @@ This is planned work except for explicitly completed gates below, not a list of 
 
 ## Current position
 
-**Implemented:** one hub-owned Pi Harness/SQLite store; separate hub/task conversations; native files/bash; saved drafts and retained native receipts; explicit instruction import; foreground owned subagents; task inspection/creation/messaging tools; idle-only model/thinking controls; managed task-locked Rex TUIs; verified worker transport; assigned-host Rex and task relay; explicit `/task-at` creation; `deck hub`, immutable creation briefs, grouped task/child inspection, registered-host selection and explicit bounded `hub_message` reporting.
+**Implemented:** one hub-owned Pi Harness/SQLite store; separate hub/task conversations; native files/bash; saved drafts and retained native receipts; explicit instruction import; foreground owned subagents; task inspection/creation/messaging tools; idle-only model/thinking controls; managed task-locked Rex TUIs; verified worker transport; assigned-host Rex and task relay; explicit `/task-at` creation; `deck hub`, immutable creation briefs, grouped task/child inspection, registered-host selection and explicit bounded `hub_message` reporting; native MCP 2025-06-18 stdio supervision, explicit private profiles/public catalogs, idle-only task grants, and assigned-worker MCP routing.
 
 **Evidence limit:** isolated tests are now supplemented by [Phase 0 two-machine acceptance](HISTORY.md#phase-0-two-machine-acceptance), passed on 2026-11-12 for one Darwin arm64 pair using actual Tailscale peers, mock providers and a private Rex API 10 server. This is not cross-platform, live-provider or desktop GUI acceptance. Rex allocation remains limited to API 8/10 and worker-local Unix endpoints; the existing API 9/HTTPS operator endpoint remains unsupported.
 
-**Not implemented:** remote task bootstrap from bare `deck agent`, MCP catalogs/transports/profiles, interactive child terminals, or captured scheduled jobs. `task_create` still defaults to the caller's host/cwd; only the hub model may explicitly select a registered host. `task_message` still refuses main/hub; `hub_message` is the separate explicit report path. Existing foreground delegation remains available.
+**MCP evidence limit:** Phases 2/3 passed source/installed validation and a separate [fresh two-machine MCP run](HISTORY.md#mcp-two-machine-acceptance) on 2026-11-12. The run used actual Tailscale verification, installed native binaries/adapters, a faux-provider entry and disposable servers on one Darwin arm64 pair. It does not imply live-service/provider, HTTP/OAuth or Linux runtime acceptance; the older Phase 0 run is not being reused as MCP proof.
+
+**Not implemented:** remote task bootstrap from bare `deck agent`, MCP HTTP/OAuth, interactive child terminals, or captured scheduled jobs. `task_create` still defaults to the caller's host/cwd; only the hub model may explicitly select a registered host. `task_message` still refuses main/hub; `hub_message` is the separate explicit report path. Existing foreground delegation remains available.
 
 ## Product boundary
 
@@ -30,12 +32,12 @@ The order is deliberate: establish task identity/coordination first, prove MCP e
 | --- | --- | --- |
 | **0 — passed** | Existing two-machine baseline, one Darwin arm64 pair | Real peer/binary/client pins; effect and draft faults; reconnect/reopen without replay or fallback |
 | **1 — implemented** | Clear hub workflow and task coordination | Named task brief, grouped inspection, explicit host selection, bounded task-to-hub reply |
-| 2 | Native MCP on one host | Approved stdio tool catalog and durable, fault-tested tool invocation |
-| 3 | Assigned-worker MCP and tool profiles | Correct host/account/workspace, isolated capacity, retained outcomes across loss |
+| **2 — passed** | Native MCP on one host | Source/installed read/counter, strict boundaries, cancellation and exact/uncertain receipt recovery |
+| **3 — passed for the recorded pair** | Assigned-worker MCP and tool profiles | Actual peers; host/account/workspace isolation; detach/reopen; cancellation, loss and no-replay recovery |
 | 4 | Authorized remote create/open launcher | Remote shell → one hub task → assigned Rex TUI, without general hub authority |
 | 5 | Streamable HTTP and selected service integration | Tested TLS/auth/session/retry contracts; approved real-service evidence |
 
-Phase 0 is accepted for the recorded pair. Phase 1 is implemented with deterministic workflow, recovery and TUI acceptance; native stdio MCP (Phase 2) is next. Phases 3/4 must repeat real-machine acceptance for their new capabilities rather than treating this baseline as proof of future MCP/bootstrap behavior. New hosts/builds still require explicit approval and appropriate acceptance. Do not widen Rex compatibility or production deadlines to make a milestone appear complete.
+Phase 0 is accepted for the recorded pair. Phase 1 is implemented with deterministic workflow, recovery and TUI acceptance. Phases 2/3 passed their scoped source/installed and fresh real-machine gates. Phase 4 is next and must repeat real-machine acceptance for its new bootstrap authority rather than treating the earlier runs as proof of that behavior. New hosts/builds still require explicit approval and appropriate acceptance. Do not widen Rex compatibility or production deadlines to make a milestone appear complete.
 
 ### First milestone scenario
 
@@ -77,6 +79,8 @@ Use fake models and disposable MCP servers for deterministic acceptance. Real pr
 
 ## Phase 2 — Native MCP on one host
 
+**Status: passed for the recorded scope.** Source and installed native/Pi tests cover approved read/counter tools, real TUI detach/reopen, capacity/cancellation, strict schemas, pin/credential refusal, stale fences, backup/restore and both accepted-null/completed-receipt crash recovery. See [recorded evidence and artifact identities](HISTORY.md#native-stdio-mcp-phases-23); no live provider/service or deployment is implied.
+
 **Scope:** one complete, safe stdio MCP path on the hub's native tool host, designed for reuse on a worker. Do not prototype an unrelated Node/Pi-plugin execution path that must later be replaced.
 
 1. **Freeze the boundary.** Define the supported MCP protocol revision, JSON Schema subset, request/response types, operation/receipt versioning and numeric bounds for catalogs, frames, concurrency, output and deadlines. Generate Deck contracts; keep external MCP framing distinct. Refuse unsupported schemas/features rather than weakening validation.
@@ -90,6 +94,8 @@ Use fake models and disposable MCP servers for deterministic acceptance. Real pr
 **First supported surface:** bounded text/structured tool results. No sampling, elicitation, prompts, resources/subscriptions, custom UI, binary artifacts, Streamable HTTP or OAuth in this phase. Unsupported capabilities are not advertised and receive explicit refusal. This is per-invocation configuration provenance, not a claim of full per-input or per-job file capture.
 
 ## Phase 3 — Route MCP to assigned workers
+
+**Status: passed on the recorded Darwin arm64 pair.** The [fresh acceptance run](HISTORY.md#mcp-two-machine-acceptance) used new disposable state/server/model, actual Tailscale verification and newly reviewed binary/capability pins. Worker and fixed-hub tools, account/workspace isolation, remote TUI detach/reopen/input, cancellation, accepted-null and completed-result recovery, and offline no-fallback behavior passed without replay or silent grant changes. Isolated tests additionally cover MCP without Rex, third-worker forwarding refusal and malformed/stale protocol cases. No historical scopes, live credentials or production services were reused/replaced.
 
 **Scope:** reuse Phase 2's native component and receipt contract over the existing verified worker architecture.
 

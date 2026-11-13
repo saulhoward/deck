@@ -4,6 +4,47 @@ This is the consolidated change and decision record. It replaces the progress re
 
 Test counts below are **recorded evidence for the named implementation stage**. Earlier counts do not describe a new run of the current tree. No count is a release guarantee or proof of deployment.
 
+## Native stdio MCP (Phases 2/3)
+
+**Implemented and validated on 2026-11-12, after `899fd26`.** Phases 2/3 passed their scoped source, installed and fresh two-machine gates below. Acceptance was completed before commit/push; it is not a deployment or blanket platform/service support claim.
+
+- Added native MCP 2025-06-18 stdio supervision, one isolated process group per invocation/probe, pinned private host profiles and explicit exported catalogs. No Node/Pi plugin execution layer, downloads, ambient credentials, HTTP/OAuth, worker model loop or second transcript store was added.
+- Added strict shared schema/JSON/response boundaries, duplicate-key rejection, bounded discovery and output, original argument/result preservation, separate MCP capacity, cancellation and persistent stale-revision fences. Native v2 acceptance precedes launch; exact retries recover evidence, changed bytes/cross-kind IDs conflict, and accepted-null receipts never trigger another execution. Historical native receipts remain unchanged.
+- Added central Pi aliases/grants and memoized invocation bindings. Independent tasks start empty; owned children inherit selection. Only the trusted-local explicit-hub API may change idle/drained independent-chat grants. Workers require explicit MCP capability independently of Rex. A task can use its assigned worker and explicitly granted fixed-cwd hub services, never an arbitrary third worker or fallback host.
+- Added native export/probe CLI and serve/worker configuration flags. Operator controls are API-only; there is no new TUI grant picker. Configuration and public catalog changes require controlled review/restart/regrant. External profile/catalog/credential files are not included in ordinary state backup; local v2 receipts and stale markers are.
+
+### MCP validation
+
+- Final Nix runtime/generator run: **512 tests, 510 passed, two opt-in skips, zero failures**, plus the outside-checkout installed package check **1/1** (`/tmp/deck-mcp-awake-nix-tests.log`). The suite includes 29 MCP cases covering strict schemas, original literals/results, private pins/credentials, bounded discovery/timeout, cancellation/isolation, stale/backup evidence, grants/withdrawal/inheritance, central Pi recovery and real local PTY detach/reopen.
+- Final native run with isolated Rex API 10 explicitly enabled: **65/65 passed** (`/tmp/deck-mcp-current-native.log`). Injected-peer worker-link coverage includes MCP without Rex, lost delivery/exact-byte recovery and refusal before forwarding to unapproved/third hosts. This is separate from the actual Tailscale run below.
+- Current installed binaries: **517/517 wrapper-backed tests** (`/tmp/deck-mcp-installed-current.log`) and **5/5 raw installed-native fixture tests** (`/tmp/deck-mcp-installed-raw.log`), no skips. The latter intentionally exercise temporary backup runtimes and code fingerprints: the wrapper overrides the backup fixture root, and hashing the wrapper does not identify the actual native executable. They are not five additional wrapper-mode passes. Installed MCP Pi fixtures resolve the package's actual adapters/dependencies, not checkout substitutes.
+- Full/worker Nix builds and local aarch64-darwin flake checks passed. The worker closure contains Bash/readline/ncurses/libiconv, not Node, Pi or the compiler. Both binaries cross-compiled for **x86_64-linux, aarch64-linux and x86_64-macos** (`/tmp/deck-mcp-cross-final2.log`); these are compilation checks, not runtime acceptance on those targets.
+- Review added explicit SIGPIPE handling, file **and directory** fsync for published MCP receipts/stale fences, and a Linux `statx` ownership check because Zig 0.17.1 does not expose callable `std.c.fstat` there. Closed stdin becomes EPIPE, not supervisor termination; pinning still does not eliminate executable-path replacement races.
+- Earlier failed/aborted attempts are not counted as passes. Installed fixture ESM resolution was corrected; crash tests now observe the existing writer lock becoming free after asynchronous SIGKILL instead of racing a replacement writer. One Nix attempt had three timed-out PTY cancellations; the subsequent run prevented idle system sleep and passed without increasing production deadlines. Source/static, generated-contract, formatting and diff checks passed.
+
+The accepted artifacts are exposed through separate `result-mcp` and `result-mcp-worker` links:
+
+```text
+/nix/store/7gsi0h1h6yyk4ssq0wmy7w429x8j6fww-deck-0.1.0-dev
+/nix/store/254afmjyf0z3mcdjcfdpyz13jilqs7xs-deck-worker-0.1.0-dev
+```
+
+### MCP two-machine acceptance
+
+**Passed 2026-11-12, completed at 22:52:53 UTC.** Fresh evidence is retained at `/private/tmp/dm3-r4koz9a5` on the tested Darwin arm64 pair. No Phase 0 stores, identities, scopes or run scripts were reused. Transfers/administration used a dedicated Rex session; Deck's effects/control/task-client channels used production Tailscale verification, not the injected test verifier.
+
+- Hub OS node `nAzfeEZRBg11CNTRL` (`100.81.92.116`), worker OS node `nwPG27uaH611CNTRL` (`100.84.23.117`), user `7579044732280396`. New hub `6d70e074-398e-44a3-8f5b-4219e2f71e46`; machine IDs `d0458f26af1b02b4c898320bc62339dd` and `ca48661d99c5194423a5d557742dae81`. Worker approval pinned the exact `files,bash,rex,mcp` order and client/socket.
+- Actual native executable SHA-256: hub `b0ee4cc1d0f5358f73b27ba0ccb30ded7c6154d1acbefe67358339ac18f9c87d`; worker `7abf24e4e395c6fa3dd8f2f697ad21c82c89db7db2fd1951954b3715079a6199`. Installed native binaries and installed Deck/Pi adapters were used with an external, normally fingerprinted faux-provider entry. Recovery gates paused that fixture before Pi opened until the independently verified native link was ready; production routing, receipt code and deadlines were unchanged.
+- New task `11` retained its brief, worker/cwd and grant revision **1**. Read-only calls preceded mutations. Same-named tools on the worker and fixed-cwd hub service observed different workspaces and dummy accounts. Independent ungranted execution and a third-host grant were refused. Fixture credentials did not enter the public catalog or canonical history.
+- Worker counter ended at **five intentional mutations**, hub counter at **one**. Detaching the actual remote Rex TUI left invocation **93** alive; explicit release completed it. Reopening preserved grants/environment, and fresh input through the registered task-locked remote TUI produced read operation **138** in central history without another mutation.
+- Cancellation of **106** was checked beyond the stop ACK: its owned server exited and retained uncertain evidence, without rollback or replay. SIGKILL cut **114** after acceptance/mutation preserved the exact null receipt across worker/hub restart and surfaced `effect_uncertain`. Completed operation **125** survived lost delivery and reconnect; Pi recovered the exact original result and receipt bytes without a sixth mutation. Offline request **149** refused without using the explicitly granted hub service; reconnect neither accepted/replayed it nor refreshed grants.
+- All **21** recorded faux model calls ran at the hub; worker state contained no Pi SQLite store. Node was a separately provisioned disposable server dependency, not a dependency of the worker package. An installed native worker probe also matched schemas with no Rex on PATH and sent no `tools/call`.
+- Private Rex **API 10**, `0.0.1793645657-gd018d2`, used a new Unix endpoint/host/instance with tailnet and session restoration disabled. Test TUIs, workers, MCP groups, private Rex, keep-awake helper and administration session were stopped; the worker client socket was removed, hub listeners closed, and the writer lock reacquired. The existing API-9/HTTPS operator server retained its original PID, host, instance and configuration. Existing `result`/`result-worker`, live registrations, provider credentials and production services were unchanged.
+
+Evidence includes `acceptance-summary.json`, `fixture-sha256.json`, `remote-final-evidence.json`, `isolated-accounts.json`, `detach-proof.json`, `cancellation-proof.json`, `crash-cut.json`, `recovery-result.json`, `completed-cut.json`, `completed-recovery-result.json`, `offline-result.json`, `tui-input-history.json`, `final-history.json`, `final-grants.json`, `model-proof.json`, `cleanup.json` and `operator-server-preserved.json`. Temporary administration transfer failures were reconciled from retained results/verified bytes, not blind mutation retries. Over-restricting the native supervisor's macOS session environment made Tailscale CLI verification refuse; retaining ordinary OS-session metadata fixed the fixture. MCP server environments remained separately explicit.
+
+This accepts the stdio/assigned-worker slice for this pair, **not** Linux/x86_64 runtime support, live providers/services, HTTP/OAuth, desktop GUI behavior or the Phase 4 remote bootstrap launcher. A test server can return its supplied credential; this is not secret redaction or sandboxing. No commit, push or production deployment occurred.
+
 ## Phase 1 hub workflow and coordination
 
 **Implemented and validated on 2026-11-12, after `ed9bf9a`.** This source-tree stage completes all three Phase 1 slices; it is not a commit, deployment or new two-machine/live-service acceptance.
@@ -22,7 +63,7 @@ Test counts below are **recorded evidence for the named implementation stage**. 
 - `nix flake check path:.`, full package and native-only worker builds passed on aarch64-darwin. The worker closure has no Node/Pi runtime. Both binaries also cross-compiled for x86_64-linux, aarch64-linux and x86_64-macos; compilation is not runtime evidence for those systems.
 - Contract generation/checks, TypeScript, Zig formatting, local documentation links/fences and diff checks passed. Test harness fixes used an atomic recovery checkpoint and distinct Escape/command PTY steps; no production deadline was increased.
 
-Fresh builds are exposed separately as `result-phase1` and `result-phase1-worker`; existing `result`, `result-worker`, deployed services and the retained Phase 0 evidence were not replaced. Source/log verification and build artifacts do not constitute permission to restart a hub or change registered binary/client pins. Native stdio MCP (Phase 2) is next.
+Fresh builds are exposed separately as `result-phase1` and `result-phase1-worker`; existing `result`, `result-worker`, deployed services and the retained Phase 0 evidence were not replaced. Source/log verification and build artifacts do not constitute permission to restart a hub or change registered binary/client pins. At that checkpoint, native stdio MCP (Phase 2) was next.
 
 ## Phase 0 two-machine acceptance
 

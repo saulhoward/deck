@@ -72,9 +72,9 @@ fn execute(io: Io, allocator: std.mem.Allocator, request: Request) !Result {
 }
 
 pub fn operation(native: Native, allocator: std.mem.Allocator, journal: Io.Dir, machine_id: []const u8, body: []const u8) ![]const u8 {
-    return controlled(native, allocator, journal, machine_id, body, null, null, null);
+    return controlled(native, allocator, journal, machine_id, body, null, null, null, null, false);
 }
-fn controlled(native: Native, allocator: std.mem.Allocator, journal: Io.Dir, machine_id: []const u8, body: []const u8, cancelled: ?*std.atomic.Value(bool), progress: ?shell.Progress, rex_client: ?contracts.WorkerRexClient) ![]const u8 {
+fn controlled(native: Native, allocator: std.mem.Allocator, journal: Io.Dir, machine_id: []const u8, body: []const u8, cancelled: ?*std.atomic.Value(bool), progress: ?shell.Progress, rex_client: ?contracts.WorkerRexClient, mcp: ?*const @import("mcp_profiles.zig").Profiles, hub_service: bool) ![]const u8 {
     const io = native.io;
     const parsed = try boundary.parseRequest(allocator, body);
     defer parsed.deinit();
@@ -83,6 +83,8 @@ fn controlled(native: Native, allocator: std.mem.Allocator, journal: Io.Dir, mac
     var result: Result = undefined;
     if (!std.mem.eql(u8, machine_id, request.machineId)) {
         result = .{ .ok = false, .output = "offline: assigned worker is not this machine; no local fallback", .code = "offline" };
+    } else if (request.operation == .mcp_call) {
+        result = try @import("mcp_operation.zig").operation(native, allocator, journal, machine_id, body, request, cancelled orelse return error.Unsupported, mcp, hub_service);
     } else if (request.operation == .rex_allocation_receipt) {
         // Historical evidence only: never accept/dispatch the embedded request or
         // publish a receipt under either the lookup ID or original allocation ID.
@@ -103,6 +105,11 @@ fn controlled(native: Native, allocator: std.mem.Allocator, journal: Io.Dir, mac
             else => return err,
         };
         if (previous) |bytes| {
+            const raw = try std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+            if (contracts.validMcpReceipt(raw.value)) {
+                result = .{ .ok = false, .code = "conflict", .output = "Operation ID already belongs to an MCP request" };
+                break :blk;
+            }
             const checked = try contracts.parseNativeReceipt(allocator, bytes);
             checked.deinit();
             const saved = try std.json.parseFromSlice(Receipt, allocator, bytes, .{});
@@ -211,7 +218,7 @@ const ProgressContext = struct {
     }
 };
 const State = struct {
-    slots: [4]Slot = .{ .{}, .{}, .{}, .{} },
+    slots: [6]Slot = @splat(.{}), // Four native process slots, two separate MCP slots.
     native: Native,
     mutex: Io.Mutex = .init,
     writes: Io.Mutex = .init,
@@ -224,6 +231,7 @@ const State = struct {
     machine_id: []const u8,
     network: bool = false,
     rex_client: ?contracts.WorkerRexClient = null,
+    mcp: ?*const @import("mcp_profiles.zig").Profiles = null,
     fn send(self: *State, response: []const u8) !void {
         errdefer if (self.network) {
             @import("remote_io.zig").shutdown(self.output.handle);
@@ -290,7 +298,7 @@ fn processJob(state: *State, slot: *Slot, body: []u8) void {
     defer arena.deinit();
     const allocator = arena.allocator();
     var progress = ProgressContext{ .state = state, .slot = slot };
-    const response = controlled(state.native, allocator, state.journal, state.machine_id, body, &slot.cancelled, .{ .context = &progress, .publish = ProgressContext.publish }, state.rex_client) catch blk: {
+    const response = controlled(state.native, allocator, state.journal, state.machine_id, body, &slot.cancelled, .{ .context = &progress, .publish = ProgressContext.publish }, state.rex_client, state.mcp, !state.network) catch blk: {
         const id = std.fmt.allocPrint(allocator, "{d}", .{slot.id}) catch return;
         break :blk std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = id, .result = Result{ .ok = false, .output = if (slot.id >= (@as(u64, 1) << 63)) "Inspection inconclusive" else "effect_uncertain: worker failed; inspect effects before retrying", .code = if (slot.id >= (@as(u64, 1) << 63)) "inspection_failed" else "effect_uncertain" } }, .{}) catch return;
     };
@@ -298,15 +306,21 @@ fn processJob(state: *State, slot: *Slot, body: []u8) void {
 }
 
 pub fn serve(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8) void {
-    serveImpl(native, read_fd, write_fd, control_fd, journal_path, machine_id, true, false, null);
+    serveImpl(native, read_fd, write_fd, control_fd, journal_path, machine_id, true, false, null, null);
 }
 pub fn serveRemote(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8) void {
-    serveImpl(native, read_fd, write_fd, control_fd, journal_path, machine_id, false, true, null);
+    serveImpl(native, read_fd, write_fd, control_fd, journal_path, machine_id, false, true, null, null);
 }
 pub fn serveRemoteClient(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8, client: contracts.WorkerRexClient) void {
-    serveImpl(native, read_fd, write_fd, control_fd, journal_path, machine_id, true, true, client);
+    serveImpl(native, read_fd, write_fd, control_fd, journal_path, machine_id, true, true, client, null);
 }
-fn serveImpl(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8, allow_rex: bool, network: bool, rex_client: ?contracts.WorkerRexClient) void {
+pub fn serveMcp(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8, mcp: ?*const @import("mcp_profiles.zig").Profiles) void {
+    serveImpl(native, read_fd, write_fd, control_fd, journal_path, machine_id, true, false, null, mcp);
+}
+pub fn serveRemoteMcp(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8, client: ?contracts.WorkerRexClient, mcp: ?*const @import("mcp_profiles.zig").Profiles) void {
+    serveImpl(native, read_fd, write_fd, control_fd, journal_path, machine_id, client != null, true, client, mcp);
+}
+fn serveImpl(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8, allow_rex: bool, network: bool, rex_client: ?contracts.WorkerRexClient, mcp: ?*const @import("mcp_profiles.zig").Profiles) void {
     const io = native.io;
     const input = Io.File{ .handle = read_fd, .flags = .{ .nonblocking = false } };
     const output = Io.File{ .handle = write_fd, .flags = .{ .nonblocking = false } };
@@ -316,7 +330,7 @@ fn serveImpl(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, 
     defer if (control_owned) Native.close(control_fd);
     var journal = Io.Dir.cwd().openDir(io, journal_path, .{}) catch return;
     defer journal.close(io);
-    var state = State{ .native = native, .journal = journal, .output = output, .machine_id = machine_id, .network = network, .rex_client = rex_client };
+    var state = State{ .native = native, .journal = journal, .output = output, .machine_id = machine_id, .network = network, .rex_client = rex_client, .mcp = mcp };
     const controller = std.Thread.spawn(.{}, control, .{ &state, control_fd }) catch return;
     control_owned = false;
     defer controller.join();
@@ -344,7 +358,7 @@ fn serveImpl(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, 
         // operations still drain; process groups are independently cancelled.
         if (state.stopping.load(.acquire)) return;
         const parsed = boundary.parseRequest(allocator, body) catch return;
-        if (!allow_rex and !@import("remote_link.zig").supported(parsed.value.operation)) {
+        if (if (parsed.value.operation == .mcp_call) mcp == null else !allow_rex and !@import("remote_link.zig").supported(parsed.value.operation)) {
             const response = resultFrame(allocator, parsed.value, .{ .ok = false, .code = "offline", .output = "Remote Rex capability unavailable; no operation accepted" }) catch return;
             state.send(response) catch return;
             continue;
@@ -374,7 +388,7 @@ fn serveImpl(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, 
             const response = std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = request.id, .progress = .{ .output = tail[0..used], .truncated = truncated, .lossyUtf8 = lossy } }, .{}) catch return;
             boundary.checkReply(allocator, request, response) catch return;
             state.send(response) catch return;
-        } else if (parsed.value.operation == .bash or parsed.value.operation == .rex_allocate or parsed.value.operation == .rex_inspect or parsed.value.operation == .rex_resolve) {
+        } else if (parsed.value.operation == .mcp_call or parsed.value.operation == .bash or parsed.value.operation == .rex_allocate or parsed.value.operation == .rex_inspect or parsed.value.operation == .rex_resolve) {
             const id = std.fmt.parseInt(u64, parsed.value.id, 10) catch return;
             state.mutex.lockUncancelable(io);
             var selected: ?*Slot = null;
@@ -382,7 +396,8 @@ fn serveImpl(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, 
             for (&state.slots) |*slot| if (slot.id == id) {
                 duplicate = true;
             };
-            if (!duplicate and id != 0) for (&state.slots) |*slot| {
+            const candidates = if (parsed.value.operation == .mcp_call) state.slots[4..6] else state.slots[0..4];
+            if (!duplicate and id != 0) for (candidates) |*slot| {
                 if (slot.id == 0) {
                     slot.id = id;
                     slot.used = 0;
@@ -416,6 +431,19 @@ fn serveImpl(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, 
                 state.send(response) catch return;
             }
         } else {
+            // Do not race a new file operation against an active process's receipt publication.
+            const id = std.fmt.parseInt(u64, parsed.value.id, 10) catch return;
+            state.mutex.lockUncancelable(io);
+            var duplicate = false;
+            for (&state.slots) |*slot| if (slot.id == id) {
+                duplicate = true;
+            };
+            state.mutex.unlock(io);
+            if (duplicate) {
+                const response = resultFrame(allocator, parsed.value, .{ .ok = false, .code = "busy", .output = "Operation already active; not repeated" }) catch return;
+                state.send(response) catch return;
+                continue;
+            }
             const response = operation(native, allocator, journal, machine_id, body) catch return;
             state.send(response) catch return;
         }

@@ -44,7 +44,7 @@ function config(bytes: Buffer) {
   const value = JSON.parse(bytes.toString("utf8")) as { version?: unknown; machine_id?: unknown };
   check(value && value.version === 1 && typeof value.machine_id === "string" && /^[\da-fA-F]{32}$/.test(value.machine_id));
 }
-function allowed(path: string) { return ["config.json", "session.sqlite", "auth.json"].includes(path) || /^worker\/operations\/\d{1,20}\.json$/.test(path); }
+function allowed(path: string) { return ["config.json", "session.sqlite", "auth.json"].includes(path) || /^worker\/operations\/(?:\d{1,20}\.json|mcp-[0-9a-f]{64}\.stale)$/.test(path); }
 async function absent(path: string) {
   try { await lstat(path); } catch (error) { if (missing(error)) return; throw error; }
   throw new BackupError();
@@ -65,8 +65,8 @@ async function contents(root: string, state: boolean): Promise<string[]> {
       const operations = join(root, name, "operations");
       try { await directory(operations); } catch (error) { if (missing(error)) continue; throw error; }
       for (const operation of await names(operations)) {
-        if (state && /^\d{1,20}\.json\.tmp$/.test(operation)) continue; // Unpublished receipt, not authority.
-        check(/^\d{1,20}\.json$/.test(operation)); paths.push(`worker/operations/${operation}`);
+        if (state && /^(?:\d{1,20}\.json\.tmp|\d{1,20}\.json\.[0-9a-f]{32}\.mcp-tmp)$/.test(operation)) continue; // Unpublished temporary name; any linked acceptance remains at the numeric receipt path.
+        check(/^(?:\d{1,20}\.json|mcp-[0-9a-f]{64}\.stale)$/.test(operation)); paths.push(`worker/operations/${operation}`);
         check(paths.length <= MAX_FILES);
       }
     } else {

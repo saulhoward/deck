@@ -283,6 +283,11 @@ pub const Link = struct {
                     const parsed = try boundary.parseRequest(a, copy);
                     defer if (!retained) parsed.deinit();
                     const request = parsed.value;
+                    const wrong_mcp_host = if (request.operation == .mcp_call) blk: {
+                        const plan = try wire.parseMcpCallPlan(a, request.args.plan.?);
+                        defer plan.deinit();
+                        break :blk !std.mem.eql(u8, plan.value.taskMachineId, request.machineId);
+                    } else false;
                     var duplicate = false;
                     for (pending.items) |p| {
                         if (std.mem.eql(u8, p.request.value.id, request.id)) duplicate = true;
@@ -293,7 +298,7 @@ pub const Link = struct {
                         const reply = try std.json.Stringify.valueAlloc(a, .{ .version = 1, .id = request.id, .result = .{ .ok = true, .code = "link_status", .output = if (connection != null) @as([]const u8, "connected") else "offline" } }, .{});
                         defer a.free(reply);
                         try to_pi.append(reply);
-                    } else if (connection == null or !std.mem.eql(u8, request.machineId, self.registry.hosts[self.index].machineId) or (!supported(request.operation) and self.clients == null)) {
+                    } else if (wrong_mcp_host or connection == null or !std.mem.eql(u8, request.machineId, self.registry.hosts[self.index].machineId) or (if (request.operation == .mcp_call) std.mem.indexOfScalar(wire.WorkerCapability, self.registry.hosts[self.index].capabilities.?, .mcp) == null else !supported(request.operation) and self.clients == null)) {
                         try failure(&to_pi, request, false);
                     } else {
                         try to_worker.append(copy);

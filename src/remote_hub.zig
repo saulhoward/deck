@@ -34,7 +34,7 @@ pub const Hub = struct {
                 if (host.listen != null) return error.InvalidWorkerListener;
                 continue;
             }
-            if (std.mem.eql(u8, host.machineId, local_machine) or !std.mem.eql(wire.WorkerCapability, host.capabilities.?, @import("remote_worker.zig").capabilitiesFor(host.rexClient))) return error.InvalidWorkerRegistration;
+            if (std.mem.eql(u8, host.machineId, local_machine) or !std.mem.eql(wire.WorkerCapability, host.capabilities.?, @import("remote_worker.zig").capabilitiesWithMcp(host.rexClient, std.mem.indexOfScalar(wire.WorkerCapability, host.capabilities.?, .mcp) != null))) return error.InvalidWorkerRegistration;
             const address = try @import("tailscale.zig").endpoint(host.listen orelse return error.MissingWorkerListener);
             for (self.registry.value.hosts[0..index]) |prior| if (prior.listen) |listen| {
                 if (std.meta.eql(address, try @import("tailscale.zig").endpoint(listen))) return error.DuplicateWorkerListener;
@@ -65,7 +65,7 @@ pub const Hub = struct {
             const link = try a.create(Link);
             link.* = .{ .native = native, .registry = self.registry.value, .index = index, .tailscale = executable, .listener = listener, .input = requests[0], .output = results[1], .control = controls[0], .clients = if (client_requests) |r| .{ .input = client_replies.?[0], .output = r[1] } else null };
             self.links.appendAssumeCapacity(link);
-            self.routes.appendAssumeCapacity(.{ .machineId = host.machineId, .readFd = results[0], .writeFd = requests[1], .controlFd = controls[1], .rexClient = host.rexClient, .clientReadFd = if (client_requests) |r| r[0] else null, .clientWriteFd = if (client_replies) |r| r[1] else null });
+            self.routes.appendAssumeCapacity(.{ .machineId = host.machineId, .mcp = if (std.mem.indexOfScalar(wire.WorkerCapability, host.capabilities.?, .mcp) != null) true else null, .readFd = results[0], .writeFd = requests[1], .controlFd = controls[1], .rexClient = host.rexClient, .clientReadFd = if (client_requests) |r| r[0] else null, .clientWriteFd = if (client_replies) |r| r[1] else null });
             if (client_requests) |r| for ([_]tcp.fd_t{ r[0], client_replies.?[1] }) |fd| self.inherit.appendAssumeCapacity(.{ .handle = fd, .flags = .{ .nonblocking = false } });
             for ([_]tcp.fd_t{ results[0], requests[1], controls[1] }) |fd| self.inherit.appendAssumeCapacity(.{ .handle = fd, .flags = .{ .nonblocking = false } });
         }

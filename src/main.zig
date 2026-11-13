@@ -20,6 +20,9 @@ const help =
     \\  deck restore --from BACKUP_DIRECTORY --directory NEW_STATE
     \\  deck serve [--mock | --api-key] [--model ID] [--port 52800] [--directory PATH]
     \\    [--workers /private/registry.json --tailscale /absolute/path/to/tailscale]
+    \\    [--mcp /private/host-profiles.json] [--mcp-catalog /private/catalog.json]
+    \\  deck mcp export --config /private/host-profiles.json
+    \\  deck mcp probe --config /private/host-profiles.json --profile ID [--workspace ABS]
     \\  deck worker peer|init|identity|run ... (deck worker --help for registration)
     \\  deck login [--port 52800]
     \\  deck rex open|reopen|status|inspect --task CHAT_ID [--port 52800]
@@ -38,6 +41,9 @@ const help =
     \\--workers enables pinned Tailscale links; Rex/task relay needs explicit worker opt-in.
     \\--workspace PATH sets the initial hub workspace (saved chats keep their binding).
     \\Native read/write/exact-edit/bash tools run as your user, without a sandbox.
+    \\MCP uses explicitly approved stdio profiles; --mcp requires --mcp-catalog.
+    \\Grant profiles through the trusted-local hub API while idle; no implicit grants.
+    \\Probe initializes/lists tools only, but server startup itself may have effects.
     \\The mock provider does not perform inference.
     \\Nix installs the runtime and Node privately. Checkout builds need npm run build.
     \\The plain hub client supports /tasks, /select CHAT_ID, /hub, /task TITLE,
@@ -85,6 +91,8 @@ const Options = struct {
     port: u16 = 52800,
     api_key: bool = false,
     model: []const u8 = "",
+    mcp: ?[]const u8 = null,
+    mcp_catalog: ?[]const u8 = null,
     workspace: ?[]const u8 = null,
     output: ?[]const u8 = null,
     from: ?[]const u8 = null,
@@ -108,6 +116,12 @@ fn parse(args: []const []const u8) !Options {
             i += 1;
             if (i == args.len or !std.fs.path.isAbsolute(args[i])) return error.InvalidArguments;
             const slot = if (std.mem.eql(u8, arg, "--workers")) &result.workers else &result.tailscale;
+            if (slot.* != null) return error.InvalidArguments;
+            slot.* = args[i];
+        } else if (std.mem.eql(u8, arg, "--mcp") or std.mem.eql(u8, arg, "--mcp-catalog")) {
+            i += 1;
+            if (i == args.len or !@import("mcp_profiles.zig").absolute(args[i])) return error.InvalidArguments;
+            const slot = if (std.mem.eql(u8, arg, "--mcp")) &result.mcp else &result.mcp_catalog;
             if (slot.* != null) return error.InvalidArguments;
             slot.* = args[i];
         } else if (std.mem.eql(u8, arg, "--output") or std.mem.eql(u8, arg, "--from")) {
@@ -137,6 +151,7 @@ fn parse(args: []const []const u8) !Options {
             result.mock = true;
         } else return error.InvalidArguments;
     }
+    if ((result.mcp != null or result.mcp_catalog != null) and (!std.mem.eql(u8, result.command, "serve") or (result.mcp != null and result.mcp_catalog == null))) return error.InvalidArguments;
     if (result.mock and (result.api_key or result.model.len != 0)) return error.InvalidArguments;
     if ((result.workers == null) != (result.tailscale == null) or (result.workers != null and (!std.mem.eql(u8, result.command, "serve") or result.stdio or result.runtime != null))) return error.InvalidArguments;
     return result;
@@ -211,6 +226,9 @@ fn run(native: Native, allocator: std.mem.Allocator, options: Options) !void {
     try std.Io.Dir.cwd().createDirPath(io, journal);
     const native_executable = try std.process.executablePathAlloc(io, allocator);
     defer allocator.free(native_executable);
+    var mcp = if (options.mcp) |path_mcp| try @import("mcp_profiles.zig").Profiles.load(native, path_mcp) else null;
+    defer if (mcp) |*p| p.deinit();
+    if (mcp) |p| if (!std.mem.eql(u8, p.config.machineId, config.value.machine_id)) return error.McpHostMismatch;
     var remote: ?@import("remote_hub.zig").Hub = if (options.workers) |registry| try @import("remote_hub.zig").Hub.init(native, registry, options.tailscale.?, config.value.machine_id) else null;
     defer if (remote) |*manager| manager.deinit();
     const routes = if (remote) |*manager| try manager.json() else null;
@@ -219,8 +237,9 @@ fn run(native: Native, allocator: std.mem.Allocator, options: Options) !void {
     defer inherited.deinit(allocator);
     try inherited.appendSlice(allocator, &.{ held, .{ .handle = requests[1], .flags = .{ .nonblocking = false } }, .{ .handle = results[0], .flags = .{ .nonblocking = false } }, .{ .handle = controls[1], .flags = .{ .nonblocking = false } } });
     if (remote) |manager| try inherited.appendSlice(allocator, manager.inherit.items);
+    const child_argv = [_][]const u8{ node_path, runtime, database, config.value.machine_id, cwd, descriptor, if (options.mock) "--mock" else if (options.api_key) "--api-key" else "--chatgpt", options.model, result_fd, request_fd, control_fd, native_executable, routes orelse "", options.mcp_catalog orelse "" };
     var child = try std.process.spawn(io, .{
-        .argv = &.{ node_path, runtime, database, config.value.machine_id, cwd, descriptor, if (options.mock) "--mock" else if (options.api_key) "--api-key" else "--chatgpt", options.model, result_fd, request_fd, control_fd, native_executable, routes orelse "" },
+        .argv = if (options.mcp_catalog != null) &child_argv else child_argv[0 .. child_argv.len - 1],
         .stdin = if (options.stdio) .inherit else .pipe,
         .stdout = if (options.stdio) .inherit else .pipe,
         .inherit_files = inherited.items,
@@ -229,7 +248,7 @@ fn run(native: Native, allocator: std.mem.Allocator, options: Options) !void {
     Native.close(results[0]);
     Native.close(controls[1]);
     child_ends_open = false;
-    const thread = std.Thread.spawn(.{}, worker.serve, .{ native, requests[0], results[1], controls[0], journal, config.value.machine_id }) catch |err| {
+    const thread = std.Thread.spawn(.{}, worker.serveMcp, .{ native, requests[0], results[1], controls[0], journal, config.value.machine_id, if (mcp) |*p| p else null }) catch |err| {
         child.kill(io);
         return err;
     };
@@ -324,6 +343,13 @@ pub fn main(init: std.process.Init) void {
         };
         return;
     }
+    if (args.len > 1 and std.mem.eql(u8, args[1], "mcp")) {
+        @import("mcp_cli.zig").run(native, args[2..]) catch |err| {
+            std.debug.print("deck: MCP diagnostic refused ({s})\n", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        return;
+    }
     if (args.len > 1 and std.mem.eql(u8, args[1], "remote-check")) {
         @import("remote_check.zig").run(native, allocator, args[2..]) catch |err| {
             std.debug.print("deck: remote peer unconfirmed ({s}); no connection enabled\n", .{@errorName(err)});
@@ -408,6 +434,7 @@ test {
     _ = @import("shell_test.zig");
     _ = @import("contracts_test.zig");
     _ = @import("phase1_test.zig");
+    _ = @import("mcp_test.zig");
     _ = @import("native_contracts_test.zig");
     _ = @import("command_policy_test.zig");
     _ = @import("model_settings.zig");

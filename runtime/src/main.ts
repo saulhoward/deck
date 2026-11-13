@@ -7,10 +7,11 @@ import { DeckError, DeckRuntime } from "./deck.js";
 import { PipeFiles } from "./host-files.js";
 import { parseRoutes, RoutedFiles } from "./remote-files.js";
 import { serveWorkerClients } from "./remote-clients.js";
+import { loadCatalog } from "./mcp-tools.js";
 import { serveIpc } from "./ipc.js";
 
 async function main() {
-  const [path, machineId, cwd, descriptor, mode, modelId, readFd, writeFd, controlFd, nativeExecutable, routesJson] = process.argv.slice(2);
+  const [path, machineId, cwd, descriptor, mode, modelId, readFd, writeFd, controlFd, nativeExecutable, routesJson, mcpCatalogPath] = process.argv.slice(2);
   const lockFd = Number(descriptor);
   if (!nativeExecutable || !path || !machineId || !cwd || !Number.isSafeInteger(lockFd) || lockFd < 3 || (mode !== "--mock" && mode !== "--chatgpt" && mode !== "--api-key")) throw new Error("Runtime must be launched by deck serve");
   if (!fstatSync(lockFd).isFile()) throw new Error("Missing inherited writer lock");
@@ -41,6 +42,7 @@ async function main() {
   try {
     runtime = await DeckRuntime.open(path, {
       ...(routes ? { expectedHubId: routes.hubId } : {}),
+      ...(mcpCatalogPath ? {mcpCatalog:await loadCatalog(mcpCatalogPath,machineId,routes)} : {}),
       models: provider.models, model: provider.model, admissionGuard: provider.guard, validateSavedModels: true,
       implementation: await fingerprintImplementation({ native: nativeExecutable, entry: process.argv[1]!, mode }),
       rexClient: basename(nativeExecutable) === ".deck-wrapped" ? join(dirname(nativeExecutable), "deck") : nativeExecutable,

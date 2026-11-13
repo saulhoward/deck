@@ -1,3 +1,4 @@
+import { validMcpArgs } from "./mcp-api.js";
 import { validHostArgs } from "./host-inventory.js";
 import { validModelSettingsArgs } from "./model-settings-contracts.js";
 import { validHubCommand, validRequestEnvelope, validTransportId, type RequestEnvelope } from "./generated/contracts.js";
@@ -11,12 +12,12 @@ import { validStatusLoginArgs } from "./status-login-contracts.js";
 // Pure semantic composition, not a second authored wire model or dispatcher.
 export function validCommandArgs(command: string, raw: unknown): boolean {
   const args = raw ?? {};
-  return validHubCommand(command) && validHostArgs(command, args) && validStatusLoginArgs(command, args) &&
+  return validHubCommand(command) && validMcpArgs(command,args) && validHostArgs(command, args) && validStatusLoginArgs(command, args) &&
     (command !== "list_chats" || validDiscoveryArgs(args)) && (command !== "history" || validHistoryArgs(args)) &&
     validModelSettingsArgs(command, args) && validRexArgs(command, args) && validViewArgs(command, args) && validMutationArgs(command, args);
 }
 export function validReplyContext(request: ReplyContext): boolean {
-  return (!["model_settings", "set_model_settings"].includes(request.command) || request.hubId !== undefined) && (request.hubId === undefined || (validTransportId(request.hubId) && request.hubId.length <= 200)) && validCommandArgs(request.command, request.args);
+  return (!["model_settings", "set_model_settings", "mcp_catalog", "tool_profiles", "set_tool_profiles"].includes(request.command) || request.hubId !== undefined) && (request.hubId === undefined || (validTransportId(request.hubId) && request.hubId.length <= 200)) && validCommandArgs(request.command, request.args);
 }
 export function validClientRequest(value: unknown): value is RequestEnvelope {
   return validRequestEnvelope(value) && validReplyContext(value);

@@ -117,7 +117,7 @@
           worker = pkgs.runCommand "deck-worker-0.1.0-dev" {
             nativeBuildInputs = [ pkgs.makeWrapper pkgs.removeReferencesTo ];
             disallowedRequisites = [ self.packages.${system}.default pkgs.nodejs_24 pkgs.zig_0_17 ];
-            meta = { description = "Deck native files/bash worker (no Pi runtime)"; mainProgram = "deck-worker"; platforms = systems; };
+            meta = { description = "Deck native files/bash/MCP worker (no Pi runtime)"; mainProgram = "deck-worker"; platforms = systems; };
           } ''
             mkdir -p "$out/bin"
             cp ${self.packages.${system}.default}/bin/.deck-worker-wrapped "$out/bin/deck-worker"

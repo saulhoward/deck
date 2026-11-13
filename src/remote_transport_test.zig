@@ -33,6 +33,9 @@ const Fixture = struct {
         return initClient(a, null);
     }
     fn initClient(a: std.mem.Allocator, client: ?wire.WorkerRexClient) !Fixture {
+        return initCapabilities(a, client, false);
+    }
+    fn initCapabilities(a: std.mem.Allocator, client: ?wire.WorkerRexClient, mcp: bool) !Fixture {
         tcp.ignorePipe();
         const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
         const listener = try address.listen(io, .{ .reuse_address = true });
@@ -42,7 +45,7 @@ const Fixture = struct {
         const client_requests = if (client != null) try Native.pipe() else null;
         const client_replies = if (client != null) try Native.pipe() else null;
         const hosts = try a.alloc(wire.RemoteHost, 1);
-        hosts[0] = .{ .machineId = machine, .peer = peer, .client = false, .implementation = implementation, .capabilities = worker.capabilitiesFor(client), .rexClient = client };
+        hosts[0] = .{ .machineId = machine, .peer = peer, .client = false, .implementation = implementation, .capabilities = worker.capabilitiesWithMcp(client, mcp), .rexClient = client };
         const link = try a.create(Link);
         link.* = .{ .native = Native.testing(), .registry = .{ .version = 1, .hubId = "hub", .hosts = hosts }, .index = 0, .tailscale = "test-only", .listener = listener, .verify = verified, .input = requests[0], .output = response[1], .control = control[0], .clients = if (client_requests) |r| .{ .output = r[1], .input = client_replies.?[0] } else null };
         const thread = try std.Thread.spawn(.{}, Link.serve, .{link});
@@ -93,8 +96,9 @@ const Runner = struct {
     error_seen: ?anyerror = null,
     client: ?wire.WorkerRexClient = null,
     hub_id: []const u8 = "hub",
+    mcp: ?[]const u8 = null,
     fn run(self: *Runner) void {
-        worker.session(Native.testing(), .{ .version = 1, .hubId = self.hub_id, .machineId = machine, .hubPeer = peer, .hubAddress = "test-injected-address", .rexClient = self.client }, implementation, "test-only", self.journal, self.address, verified, &self.stop) catch |err| {
+        worker.session(Native.testing(), .{ .version = 1, .hubId = self.hub_id, .machineId = machine, .hubPeer = peer, .hubAddress = "test-injected-address", .rexClient = self.client, .mcp = self.mcp }, implementation, "test-only", self.journal, self.address, verified, &self.stop) catch |err| {
             self.error_seen = err;
         };
     }
@@ -153,6 +157,84 @@ const Fake = struct {
         Native.close(self.control);
     }
 };
+
+test "MCP routes only through explicit capability and assigned worker, retaining exact results across reconnect" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try tmp.dir.realPathFileAlloc(io, ".", a);
+    try tmp.dir.createDir(io, "ops", .default_dir);
+    const journal = try std.fs.path.join(a, &.{ cwd, "ops" });
+    var config = try @import("mcp_fixture.zig").create(a, tmp.dir, machine);
+    defer config.deinit();
+    const config_path = try tmp.dir.realPathFileAlloc(io, "mcp.json", a);
+    const tool = config.public.profiles[0].tools[0];
+    const schema_hash = @import("mcp_profiles.zig").toolHash(tool);
+    const plan = try std.json.Stringify.valueAlloc(a, wire.McpCallPlan{ .version = 1, .profileId = "fixture", .revision = config.public.profiles[0].revision, .tool = tool.name, .schemaHash = &schema_hash, .conversationId = "1", .taskMachineId = machine, .grantRevision = 1, .argumentsJSON = "{}" }, .{});
+    var fixture = try Fixture.initCapabilities(a, null, true);
+    defer fixture.deinit();
+    const request = try fixture.request("42", cwd, "mcp_call", .{ .plan = plan });
+    const exact = try std.mem.concat(a, u8, &.{ "\n ", request, "\n" });
+    try fixture.send(exact);
+    try std.testing.expectEqualStrings("offline", (try fixture.reply()).object.get("code").?.string);
+    const lost = try Fake.connect(&fixture);
+    try fixture.send(exact);
+    const delivered = try tcp.receive(io, lost.data);
+    defer tcp.a.free(delivered);
+    try std.testing.expectEqualStrings(exact, delivered);
+    var journal_dir = try tmp.dir.openDir(io, "ops", .{});
+    defer journal_dir.close(io);
+    const parsed = try @import("native_contracts.zig").parseRequest(a, delivered);
+    var cancelled = std.atomic.Value(bool).init(false);
+    _ = try @import("mcp_operation.zig").operation(Native.testing(), a, journal_dir, machine, delivered, parsed.value, &cancelled, &config, false);
+    lost.close();
+    try std.testing.expectEqualStrings("effect_uncertain", (try fixture.reply()).object.get("code").?.string);
+    var runner: Runner = .{ .address = fixture.address, .journal = journal, .mcp = config_path };
+    defer runner.end();
+    try runner.start();
+    try fixture.send(exact);
+    const result = try fixture.reply();
+    try std.testing.expectEqualStrings("mcp_result", result.object.get("code").?.string);
+    try std.testing.expectEqualStrings("x", try tmp.dir.readFileAlloc(io, "counter", a, .limited(100)));
+    const name = try std.fs.path.join(a, &.{ journal, "42.json" });
+    const receipt = try std.Io.Dir.cwd().readFileAlloc(io, name, a, .limited(65536));
+    runner.end();
+    var next: Runner = .{ .address = fixture.address, .journal = journal, .mcp = config_path };
+    defer next.end();
+    try next.start();
+    try fixture.send(exact);
+    try std.testing.expect(@import("mcp_schema.zig").equal(result, try fixture.reply()));
+    try std.testing.expectEqualStrings(receipt, try std.Io.Dir.cwd().readFileAlloc(io, name, a, .limited(65536)));
+    try fixture.send(request);
+    try std.testing.expectEqualStrings("conflict", (try fixture.reply()).object.get("code").?.string);
+    try std.testing.expectEqualStrings("x", try tmp.dir.readFileAlloc(io, "counter", a, .limited(100)));
+    // A connected legacy worker cannot receive MCP merely because it handles files/bash.
+    var legacy = try Fixture.init(a);
+    defer legacy.deinit();
+    const fake = try Fake.connect(&legacy);
+    defer fake.close();
+    try legacy.send(request);
+    try std.testing.expectEqualStrings("offline", (try legacy.reply()).object.get("code").?.string);
+    try tcp.nonblock(fake.data, true);
+    var reader: tcp.Reader = .{};
+    defer reader.deinit();
+    try std.testing.expectEqual(null, try reader.read(io, fake.data));
+    var third = try Fixture.initCapabilities(a, null, true);
+    defer third.deinit();
+    const third_peer = try Fake.connect(&third);
+    defer third_peer.close();
+    var foreign = try wire.parseMcpCallPlan(a, plan);
+    foreign.value.taskMachineId = "cccccccccccccccccccccccccccccccc";
+    const foreign_plan = try std.json.Stringify.valueAlloc(a, foreign.value, .{});
+    try third.send(try third.request("43", cwd, "mcp_call", .{ .plan = foreign_plan }));
+    try std.testing.expectEqualStrings("offline", (try third.reply()).object.get("code").?.string);
+    try tcp.nonblock(third_peer.data, true);
+    var third_reader: tcp.Reader = .{};
+    defer third_reader.deinit();
+    try std.testing.expectEqual(null, try third_reader.read(io, third_peer.data));
+}
 
 test "link inventory is a hub-local bounded observation, never a worker effect" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

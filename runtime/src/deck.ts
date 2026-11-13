@@ -21,6 +21,9 @@ import { nativeFiles, type HostFiles } from "./host-files.js";
 import { foregroundSubagent } from "./subagent.js";
 import { taskControl } from "./task-control.js";
 import { taskTools } from "./task-tools.js";
+import { McpGrantsDoc, extensionName, grantKey, profileGrant, mcpExtensions } from "./mcp-tools.js";
+import { validCatalog } from "./mcp-contracts.js";
+import { validMcpGrantArgs, type McpCatalog, type McpGrantArgs, type McpGrantSnapshot } from "./generated/contracts.js";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
@@ -63,6 +66,7 @@ export type RuntimeOptions = {
   binding: Binding;
   environment: (binding: Binding) => ExecutionEnv | undefined;
   hostFiles?: HostFiles;
+  mcpCatalog?: McpCatalog;
   // Trusted native registration scope; checked before any recovered work resumes.
   expectedHubId?: string;
   // Trusted launcher supplies its own Deck wrapper, never public caller argv.
@@ -84,7 +88,7 @@ export class DeckRuntime {
     return this.serial(async () => { const chat = await this.chat(id); void chat.abort(context).catch(() => { process.stderr.write("deck runtime: stop failed; inspect activity\n"); }); });
   }
   private readonly inspector: RexInspector;
-  private constructor(readonly harness: Harness, readonly main: Conversation, private readonly guard: () => Promise<void>, readonly localFiles: boolean, readonly hubId: string, readonly implementation: string, private readonly instructionTask: ReturnType<typeof instructionImport>["task"], private readonly rexTask: ReturnType<typeof rexAllocation>["task"], private readonly reconcileTask: ReturnType<typeof rexReconciliation>["task"], private readonly models: Models, private readonly defaultModel: ModelRef, private readonly host?: HostFiles, readonly rexClient?: string, private readonly localMachineId?: string) { this.inspector = new RexInspector(this, host); }
+  private constructor(readonly harness: Harness, readonly main: Conversation, private readonly guard: () => Promise<void>, readonly localFiles: boolean, readonly hubId: string, readonly implementation: string, private readonly instructionTask: ReturnType<typeof instructionImport>["task"], private readonly rexTask: ReturnType<typeof rexAllocation>["task"], private readonly reconcileTask: ReturnType<typeof rexReconciliation>["task"], private readonly models: Models, private readonly defaultModel: ModelRef, private readonly host?: HostFiles, readonly rexClient?: string, private readonly localMachineId?: string, private readonly mcpCatalogValue: McpCatalog = { version: 1, profiles: [] }, private readonly mcpInstalled: ReturnType<typeof mcpExtensions> = []) { this.inspector = new RexInspector(this, host); }
 
   static async open(path: string, options: RuntimeOptions): Promise<DeckRuntime> {
     let runtime: DeckRuntime | undefined;
@@ -102,13 +106,19 @@ export class DeckRuntime {
     const importer = instructionImport(options.hostFiles); registry.install(importer.extension);
     const rex = rexAllocation(options.hostFiles); registry.install(rex.extension);
     const reconciler = rexReconciliation(options.hostFiles); registry.install(reconciler.extension);
-    const implementation = bindImplementation(options.implementation ?? await defaultImplementation(), !!options.hostFiles);
+    const baseExtensions = registry.snapshot().installed();
+    const catalog: McpCatalog = options.mcpCatalog === undefined ? {version:1,profiles:[]} : structuredClone(options.mcpCatalog);
+    if(!validCatalog(catalog) || (catalog.profiles.length && !options.hostFiles)) throw new DeckError("invalid","Invalid MCP catalog or missing native host");
+    const installed = options.hostFiles ? mcpExtensions(catalog, options.hostFiles, current) : [];
+    for(const extension of installed) registry.install(extension);
+    const baseImplementation = bindImplementation(options.implementation ?? await defaultImplementation(), !!options.hostFiles);
+    const implementation = catalog.profiles.length ? createHash("sha256").update(JSON.stringify(["deck.mcp.v1",baseImplementation,catalog])).digest("hex") : baseImplementation;
     const storage = await openNodeSqliteStorage(path);
     try { await checkCompatibility(storage, implementation); }
     catch (error) { await storage.close(context); throw error; }
     const harness = await Harness.open(storage, {
       models: options.models, registry,
-      settings: { steeringMode: "all", followUpMode: "one-at-a-time" },
+      settings: { steeringMode: "all", followUpMode: "one-at-a-time", extensions: baseExtensions },
       env: async ({ conversationId, read }) => {
         if (options.hostFiles) return undefined; // Native adapter resolves saved binding itself; never use a hub-local environment.
         const binding = await read.snapshot(ChatDoc, conversationId, context);
@@ -142,7 +152,7 @@ export class DeckRuntime {
       }
       const hubId = await harness.commit(async (tx) => (await tx.doc(Identity)).id, context);
       // Bind Deck tool callbacks before recovered Pi tool tasks can run.
-      runtime = new DeckRuntime(harness, main, options.admissionGuard ?? (async () => {}), !!options.hostFiles, hubId, implementation, importer.task, rex.task, reconciler.task, options.models, { provider: options.model.provider, modelId: options.model.modelId }, options.hostFiles, options.rexClient, options.binding.machineId);
+      runtime = new DeckRuntime(harness, main, options.admissionGuard ?? (async () => {}), !!options.hostFiles, hubId, implementation, importer.task, rex.task, reconciler.task, options.models, { provider: options.model.provider, modelId: options.model.modelId }, options.hostFiles, options.rexClient, options.binding.machineId, catalog, installed);
       harness.resume();
       return runtime;
     } catch (error) {
@@ -187,6 +197,42 @@ export class DeckRuntime {
       if (metadata) items.push({ ...observation, chatId: String(record.id), kind: metadata.kind, title: metadata.title, machineId: metadata.machineId, cwd: metadata.cwd, ...(metadata.parentChatId ? { parentChatId: metadata.parentChatId } : {}), ...(metadata.ownerTaskId ? { ownerTaskId: metadata.ownerTaskId } : {}), ...(metadata.brief ? { brief: metadata.brief } : {}) });
     }
     return { items, ...(page.next ? { next: String(page.items.at(-1)!.id) } : {}) };
+  }
+
+  private mcpActive=0;
+  async mcpCall<T>(work:()=>Promise<T>):Promise<T> { this.mcpActive++; try { return await work(); } finally { this.mcpActive--; } }
+  mcpBindingAllowed(profile: import("./generated/contracts.js").McpProfile, taskMachine: string): boolean {
+    return validMachineIdentity(taskMachine) && (profile.machineId===taskMachine || (profile.workspace==="fixed" && profile.machineId===this.localMachineId));
+  }
+  mcpCatalog(): McpCatalog { return structuredClone(this.mcpCatalogValue); }
+  async toolProfiles(id: string): Promise<McpGrantSnapshot> {
+    const chat=await this.chat(id); const grants=await this.harness.snapshot(McpGrantsDoc,chat.id,context);
+    return {chatId:id,revision:grants?.revision??0,profiles:grants?.profiles.map(g=>({...g}))??[]};
+  }
+  setToolProfiles(args: McpGrantArgs): Promise<McpGrantSnapshot> {
+    return this.serial(async()=>{
+      if(!validMcpGrantArgs(args)) throw new DeckError("invalid","Invalid MCP grant change");
+      const chat=await this.chat(args.chatId); const agent=await chat.agent(context);
+      return chat.commit(async tx=>{
+        const record=await tx.conversation(chat.id), binding=await tx.doc(ChatDoc,chat.id), saved=await tx.doc(McpGrantsDoc,chat.id);
+        if(!record || record.owner || binding.kind==="subagent") throw new DeckError("invalid","Only independent chats can change MCP grants");
+        if(this.mcpActive!==0 || !await configurationIdle(tx,chat.id)) throw new DeckError("busy","Stop/drain work before changing MCP grants");
+        if(saved.revision!==args.expectedRevision) throw new DeckError("settings_changed","MCP grants changed; observe before another change");
+        const selected=[]; const keys=new Set<string>();
+        for(const grant of args.profiles) {
+          const key=grantKey(grant); const profile=this.mcpCatalogValue.profiles.find(p=>grantKey(profileGrant(p))===key);
+          if(keys.has(key) || !profile || !this.mcpBindingAllowed(profile,binding.machineId)) throw new DeckError("invalid","MCP profile/host/revision is not approved for this binding");
+          keys.add(key); selected.push(this.mcpInstalled.find(e=>e.name===extensionName(profile))!);
+        }
+        if(selected.reduce((count,e)=>count+(e.tools?.length??0),0)>64) throw new DeckError("invalid","At most 64 MCP tools can be granted to one conversation");
+        if(JSON.stringify(saved.profiles)!==JSON.stringify(args.profiles)) {
+          if(saved.revision>=Number.MAX_SAFE_INTEGER) throw new DeckError("invalid","MCP grant revision exhausted; no change applied");
+          await configureAgent(tx,chat.id,{extensions:[...agent.extensions.filter(e=>!e.name.startsWith("deck.mcp.")),...selected]});
+          saved.profiles=args.profiles.map(g=>({...g})); saved.revision++;
+        }
+        return {chatId:args.chatId,revision:saved.revision,profiles:saved.profiles.map(g=>({...g}))};
+      },context);
+    });
   }
 
   async hosts(): Promise<HostInventory> {
@@ -277,7 +323,9 @@ export class DeckRuntime {
         const binding = await tx.doc(ChatDoc, chat.id);
         if (!existing && agent.cwd !== binding.cwd) throw new DeckError("invalid", "Agent cwd differs from its saved tool binding");
         // An admission observation, not a per-input override of Pi's later request resolution.
+        const mcpGrants=await tx.doc(McpGrantsDoc,chat.id);
         const observations = {
+          ...(mcpGrants.profiles.length ? {mcp:{revision:mcpGrants.revision,profiles:mcpGrants.profiles}} : {}),
           semantics: "observed-at-reservation", pi: "1.4.0", nativeTools: this.localFiles,
           model: agent.model ? { provider: agent.model.provider, modelId: agent.model.modelId } : null,
           thinkingLevel: agent.thinkingLevel, cwd: agent.cwd,

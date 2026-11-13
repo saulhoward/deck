@@ -1,5 +1,13 @@
 [
   {"command":"status","schema":"StatusArgs","valid":true},
+  {"command":"mcp_catalog","args":{},"valid":true},
+  {"command":"mcp_catalog","args":{"secret":true},"valid":false},
+  {"command":"tool_profiles","args":{"chatId":"1"},"valid":true},
+  {"command":"tool_profiles","args":{"chatId":"01"},"valid":false},
+  {"command":"set_tool_profiles","schema":"McpGrantArgs","valid":true},
+  {"command":"set_tool_profiles","args":{"chatId":"1","expectedRevision":0,"profiles":[]},"valid":true},
+  {"command":"set_tool_profiles","args":{"chatId":"1","expectedRevision":0,"profiles":[],"automatic":true},"valid":false},
+  {"command":"set_tool_profiles","args":{"chatId":"1","expectedRevision":9007199254740991,"profiles":[]},"valid":false},
   {"command":"status","args":null,"valid":true},
   {"command":"login_start","schema":"LoginStartArgs","valid":true},
   {"command":"login_status","schema":"LoginStatusArgs","valid":true},

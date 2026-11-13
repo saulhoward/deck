@@ -1,5 +1,7 @@
 {
   "bases": {
+    "McpGrantArgs": {"chatId":"1","expectedRevision":0,"profiles":[]},
+    "McpCallPlan": {"version":1,"profileId":"counter","revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tool":"counter","schemaHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","conversationId":"1","taskMachineId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","grantRevision":1,"argumentsJSON":"{}"},
     "AgentStatus": { "state": "done", "taskId": "2" },
     "ThinkingLevel": "medium",
     "ModelRef": { "provider": "mock", "modelId": "alpha" },

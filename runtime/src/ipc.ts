@@ -2,6 +2,7 @@ import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { Readable, Writable } from "node:stream";
 import { ChatDoc, DeckError, type DeckRuntime } from "./deck.js";
 import { briefFields } from "./task-brief.js";
+import { validMcpArgs } from "./mcp-api.js";
 import { validHostArgs } from "./host-inventory.js";
 import { validModelSettingsArgs } from "./model-settings-contracts.js";
 import type { SetModelSettingsArgs } from "./generated/contracts.js";
@@ -76,6 +77,12 @@ export async function dispatch(runtime: DeckRuntime, request: Record<string, unk
       if (!validLiveArgs(args)) throw new DeckError("invalid", "Invalid live view arguments");
       const id = args.chatId ?? String(runtime.main.id);
       return request.command === "activity" ? runtime.activity(id, args.includeAgentStatus === true) : runtime.progress(id);
+    }
+    case "mcp_catalog":
+    case "tool_profiles":
+    case "set_tool_profiles": {
+      if(taskClient || request.hubId!==runtime.hubId || !validMcpArgs(request.command,args)) throw new DeckError("invalid","MCP configuration requires the hub control surface, valid arguments and explicit hub identity");
+      return request.command==="mcp_catalog" ? runtime.mcpCatalog() : request.command==="tool_profiles" ? runtime.toolProfiles(String(args.chatId)) : runtime.setToolProfiles(args as unknown as import("./generated/contracts.js").McpGrantArgs);
     }
     case "list_hosts": {
       if (!validHostArgs("list_hosts", args)) throw new DeckError("invalid", "Host inventory takes no arguments");

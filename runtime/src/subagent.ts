@@ -1,5 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import { configure, defineExtension, defineTool, type EntryRecord, type Extension } from "@earendil-works/pi-durable";
+import { inheritedGrants } from "./mcp-tools.js";
 import { ChatDoc } from "./deck.js";
 import { instructionHash, InstructionSourceDoc } from "./instruction-import.js";
 
@@ -46,6 +47,7 @@ export function foregroundSubagent(control: Extension): Extension {
           kind: "subagent", title: args.title ?? "Subagent", machineId: binding.machineId, cwd: binding.cwd,
           parentChatId: String(api.conversationId), ownerTaskId: String(api.taskId),
         });
+        await inheritedGrants(tx,api.conversationId,created.id);
         if (source && source.sha256 === instructionHash(parent.instructions)) (await tx.doc(InstructionSourceDoc, created.id)).source = source;
         return created.id;
       }, context);

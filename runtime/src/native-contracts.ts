@@ -1,4 +1,5 @@
 import * as wire from "./generated/contracts.js";
+import { validCallPlan, validRpcReply } from "./mcp-contracts.js";
 
 export type { NativeRequest, NativeResponse, NativeOperation, NativeResult, NativeProgress } from "./generated/contracts.js";
 const bytes = (s: string, cap: number) => Buffer.byteLength(s, "utf8") <= cap;
@@ -23,9 +24,10 @@ export function validNativeRequest(value: unknown): value is wire.NativeRequest 
     case "edit": return wire.validNativeEditArgs(args) && path(args.path) && args.oldText.length > 0 && bytes(args.oldText, 128 * 1024) && bytes(args.newText, 128 * 1024);
     case "bash": return wire.validNativeBashArgs(args) && !args.command.includes("\0");
     default: {
-      if (!wire.validNativePlanArgs(args) || !bytes(args.plan, operation === "rex_allocation_receipt" ? 256 * 1024 : 16 * 1024)) return false;
+      if (!wire.validNativePlanArgs(args) || !bytes(args.plan, operation === "rex_allocation_receipt" || operation === "mcp_call" ? 256 * 1024 : 16 * 1024)) return false;
       let plan: unknown; try { plan = JSON.parse(args.plan); } catch { return false; }
       switch (operation) {
+        case "mcp_call": return wire.validMachineIdentity(value.machineId) && validCallPlan(plan);
         case "rex_allocate": return wire.validRexAllocationPlan(plan) && safeId(plan.chatId);
         case "rex_inspect": return wire.validRexInspectionQuery(plan);
         case "rex_resolve": return wire.validRexTargetOptions(plan);
@@ -38,11 +40,23 @@ export function validNativeReply(request: wire.NativeRequest, value: unknown): v
   if (!wire.validNativeResponse(value) || value.id !== request.id) return false;
   if (request.operation === "bash_progress") return value.result === undefined && value.progress !== undefined && bytes(value.progress.output, 2048);
   if (value.progress !== undefined || !value.result) return false;
+  if (request.operation === "mcp_call" && ["mcp_result", "mcp_tool_error", "mcp_rpc_error"].includes(value.result.code ?? "") && !validRpcReply(value.result.output, request.id)) return false;
   return validNativeResult(request.operation, value.result);
 }
 export function validNativeResult(operation: wire.NativeOperation, value: unknown): value is wire.NativeResult {
   if (!wire.validNativeResult(value) || operation === "bash_progress") return false;
   if (operation === "link_status" && value.ok) return value.code === "link_status" && ["connected", "offline"].includes(value.output) && value.exitCode == null && value.truncated !== true;
+  if (operation === "mcp_call") {
+    if (!bytes(value.output, 65536) || value.exitCode != null || value.truncated === true) return false;
+    if (["mcp_result", "mcp_tool_error", "mcp_rpc_error"].includes(value.code ?? "")) {
+      try {
+        const raw = JSON.parse(value.output); const id = typeof raw.id === "string" && raw.id.startsWith("call:") ? raw.id.slice(5) : "";
+        if (!safeId(id) || !validRpcReply(value.output, id)) return false;
+        return value.code === "mcp_rpc_error" ? !value.ok && !!raw.error : value.code === "mcp_tool_error" ? !value.ok && raw.result?.isError === true : value.ok && !!raw.result && raw.result.isError !== true;
+      } catch { return false; }
+    }
+    return !value.ok && !["ok", "allocated", "rex_inspected", "rex_resolved", "rex_receipt", "link_status"].includes(value.code ?? "");
+  }
   const shell = operation === "bash";
   const rex = operation.startsWith("rex_");
   if (!bytes(value.output, shell ? 64 * 1024 + 256 : rex ? 16 * 1024 : 128 * 1024)) return false;

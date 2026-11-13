@@ -24,6 +24,7 @@ export function parseRoutes(bytes: string, localMachine: string, reserved: numbe
 export class RoutedFiles implements HostFiles {
   private readonly remotes = new Map<string, PipeFiles>();
   private readonly clients = new Map<string, WorkerRexClient>();
+  private readonly mcp = new Set<string>();
   rexClientFor(machineId: string) { return this.clients.get(machineId); }
   private readonly observing = new Set<string>();
   async registeredHosts(): Promise<HostItem[]> {
@@ -45,14 +46,18 @@ export class RoutedFiles implements HostFiles {
     for (const host of routes.hosts) for (const fd of [host.readFd, host.writeFd, host.controlFd, ...(host.rexClient ? [host.clientReadFd!, host.clientWriteFd!] : [])]) {
       const stat = fstatSync(fd); if (!stat.isFIFO() && !stat.isSocket()) throw new Error("Invalid native worker pipe");
     }
-    try { for (const host of routes.hosts) { this.remotes.set(host.machineId, new PipeFiles(host.readFd, host.writeFd, host.controlFd, true)); if (host.rexClient) this.clients.set(host.machineId, host.rexClient); } }
+    try { for (const host of routes.hosts) { if (host.mcp) this.mcp.add(host.machineId); this.remotes.set(host.machineId, new PipeFiles(host.readFd, host.writeFd, host.controlFd, true)); if (host.rexClient) this.clients.set(host.machineId, host.rexClient); } }
     catch (error) { for (const remote of this.remotes.values()) void remote.close(); throw error; }
   }
   call(binding: Binding, id: string, operation: string, args: NativeArguments, signal?: AbortSignal, onProgress?: (progress: ShellProgress) => void): Promise<FileResult> {
     if (binding.machineId === this.machineId) return this.local.call(binding, id, operation, args, signal, onProgress);
     signal?.throwIfAborted();
+    if(operation==="mcp_call") {
+      let plan: unknown; try { plan=JSON.parse(args.plan??""); } catch { throw new Error("Invalid MCP request; not sent"); }
+      if(!plan || typeof plan!=="object" || (plan as {taskMachineId?:unknown}).taskMachineId!==binding.machineId) return Promise.resolve({ok:false,code:"mcp_refused",output:"MCP worker differs from assigned host; no fallback"});
+    }
     const remote = this.remotes.get(binding.machineId);
-    if (!remote || (!this.clients.has(binding.machineId) && !["read", "write", "edit", "bash"].includes(operation))) return Promise.resolve({ ok: false, code: "offline", output: "offline: assigned worker/capability unavailable; this attempt was not sent; earlier attempts may have happened; no local fallback" });
+    if (!remote || (operation === "mcp_call" ? !this.mcp.has(binding.machineId) : !this.clients.has(binding.machineId) && !["read", "write", "edit", "bash"].includes(operation))) return Promise.resolve({ ok: false, code: "offline", output: "offline: assigned worker/capability unavailable; this attempt was not sent; earlier attempts may have happened; no local fallback" });
     return remote.call(binding, id, operation, args, signal, onProgress);
   }
   async close(): Promise<void> { await Promise.all([this.local.close(), ...[...this.remotes.values()].map(remote => remote.close())]); }

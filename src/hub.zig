@@ -64,7 +64,7 @@ fn units(value: std.json.Value, maximum: usize) bool {
 pub fn validCommandArgs(command: []const u8, raw: std.json.Value) bool {
     if (!contracts.validHubCommand(.{ .string = command })) return false;
     const args: std.json.Value = if (raw == .null) .{ .object = .empty } else raw;
-    if (!model_settings.validArgs(command, args) or !status_login.validArgs(command, args) or !rex_open.validArgs(command, args) or !views.validArgs(command, args)) return false;
+    if (!@import("mcp_api.zig").validArgs(command, args) or !model_settings.validArgs(command, args) or !status_login.validArgs(command, args) or !rex_open.validArgs(command, args) or !views.validArgs(command, args)) return false;
     if (std.mem.eql(u8, command, "list_hosts")) return args == .object and args.object.count() == 0;
     if (std.mem.eql(u8, command, "list_chats")) {
         if (!contracts.validListChatsArgs(args)) return false;
@@ -96,7 +96,7 @@ pub fn validCommandArgs(command: []const u8, raw: std.json.Value) bool {
 pub fn validClientRequest(request: std.json.Value) bool {
     if (!contracts.validRequestEnvelope(request)) return false;
     const command = request.object.get("command").?.string;
-    if ((std.mem.eql(u8, command, "model_settings") or std.mem.eql(u8, command, "set_model_settings")) and !request.object.contains("hubId")) return false;
+    if ((std.mem.eql(u8, command, "mcp_catalog") or std.mem.eql(u8, command, "tool_profiles") or std.mem.eql(u8, command, "set_tool_profiles") or std.mem.eql(u8, command, "model_settings") or std.mem.eql(u8, command, "set_model_settings")) and !request.object.contains("hubId")) return false;
     if (request.object.get("hubId")) |hub_id| if (!contracts.validTransportId(hub_id) or !units(hub_id, 200)) return false;
     return validCommandArgs(request.object.get("command").?.string, request.object.get("args") orelse .null);
 }
@@ -244,6 +244,7 @@ pub fn validReply(request: std.json.Value, reply: std.json.Value) bool {
     const args = request.object.get("args") orelse .null;
     if (!validClientRequest(request)) return false;
     const result = reply.object.get("result").?;
+    if (!@import("mcp_api.zig").validReply(command, args, result)) return false;
     if (!model_settings.validReply(command, args, request.object.get("hubId"), result)) return false;
     if (!status_login.validReply(command, args, request.object.get("hubId"), result)) return false;
     if (!views.validReply(command, args, result) or !rex_open.validReply(command, args, request.object.get("hubId") orelse .null, result)) return false;

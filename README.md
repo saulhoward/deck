@@ -25,7 +25,7 @@ These documents distinguish current behavior from the target design. A local bui
 
 **Native MCP means Deck-owned MCP client transport and process supervision in Zig, with Pi owning durable tool invocations.** It does not mean loading Pi coding-agent extensions, reusing a running Pi session, or running another agent on each worker. MCP server programs are separate, explicitly installed software and may themselves need Node or Python. The native worker does not acquire those runtimes as mandatory dependencies. Service credentials stay with the configured tool host; model credentials stay at the hub. Reusing an MCP server configuration requires explicit Deck setup and approval, not automatic discovery of `.pi` files or arbitrary plugin execution.
 
-Assigned-host task clients have isolated tests and a recorded two-machine Darwin arm64 acceptance run. That run used disposable registrations and mock providers, not a permanent service deployment. **Phase 1 is implemented:** `deck hub`, creation-time task briefs, grouped inspection, registered-host selection and explicit task-to-hub messaging. The remote bootstrap launcher and native MCP remain **planned**. `deck agent` remains compatible; bare `deck agent` on another machine still does not create a remote task or Rex allocation.
+Assigned-host task clients have isolated tests and a recorded two-machine Darwin arm64 acceptance run. That run used disposable registrations and mock providers, not a permanent service deployment. **Phase 1 is implemented:** `deck hub`, creation-time task briefs, grouped inspection, registered-host selection and explicit task-to-hub messaging. Native stdio MCP and explicit per-task profiles are implemented, with source/installed tests and [fresh two-machine MCP acceptance](docs/HISTORY.md#mcp-two-machine-acceptance) on the recorded Darwin arm64 pair. The remote bootstrap launcher remains **planned**. `deck agent` remains compatible; bare `deck agent` on another machine still does not create a remote task or Rex allocation.
 
 Named interactive child terminals and captured, headless scheduled jobs remain later goals. Jobs will reuse their task/chat, with distinct per-run admission identities and captured file settings; jobs and their children will never allocate Rex terminals. See the [target architecture](docs/DEVELOPER.md#target-interactive-and-scheduled-architecture), [MCP boundary](docs/DEVELOPER.md#target-native-mcp-tools), and [phased plan](docs/ROADMAP.md#next-implementation-sequence). The instructions below describe what works now.
 
@@ -173,9 +173,80 @@ Models can inspect chats with `task_list`, `task_history`, and `task_activity`. 
 
 `subagent` creates a Pi-owned foreground child and waits for its answer. It inherits the parent's settings and binding, but not its transcript. Stopping the parent cancels its ordinary owned work. You can inspect or stop child chats, but you cannot send them direct input or change their model independently.
 
-### MCP status
+### Native stdio MCP
 
-Deck does not yet expose MCP servers as model tools. It does not load the Pi CLI's extensions, MCP connections, provider plugins or credential setup. A working integration in a separate Pi session is not automatically available here. Native MCP is the chosen integration goal; arbitrary Pi-extension compatibility is out of scope. See the [MCP plan](docs/ROADMAP.md#phase-2--native-mcp-on-one-host).
+Deck exposes explicitly approved MCP tools through the existing hub-owned Pi runtime. Zig supervises one isolated stdio server process per invocation/probe, on the assigned worker or hub. **No tools are granted by default.** Independent tasks start without grants; owned children inherit the parent's selection. Configuration/grant controls are currently an advanced **trusted-local hub API workflow**, not a TUI picker or model tool. Task-scoped clients cannot use them.
+
+The supported protocol is **MCP 2025-06-18**, with a strict bounded JSON Schema subset and text/structured tool results. No Pi coding-agent plugins, automatic `.pi` discovery, package installation, HTTP transport or OAuth are provided. Server programs and any Node/Python dependencies are separately installed. The worker package remains native-only. Source/installed checks and [fresh Phase 3 real-machine acceptance](docs/HISTORY.md#mcp-two-machine-acceptance) passed with fake models and disposable servers on one Darwin arm64 pair. This does not imply live-service/provider, HTTP/OAuth or Linux runtime acceptance.
+
+#### Configure and review a host
+
+Use a private, owner-only regular file (for example, mode `0600`); do not use a symlink. This illustrative profile needs **real host IDs, paths, hashes and server schemas** before use:
+
+```json
+{
+  "version": 1,
+  "machineId": "<32-hex host machine ID>",
+  "profiles": [{
+    "id": "workspace",
+    "executable": "/absolute/installed/server",
+    "sha256": "<64-hex SHA-256 of executable bytes>",
+    "argv": ["--stdio"],
+    "cwd": "$TASK",
+    "files": [],
+    "env": [],
+    "tools": [{
+      "name": "read",
+      "description": "Approved workspace read tool",
+      "inputSchema": "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}"
+    }]
+  }]
+}
+```
+
+Copy the exact approved input/output schemas into JSON **strings**; include `outputSchema` when the server declares it. Discovery must match them structurally and cannot add tools. Pin script/dependency files with `files: [{"path":"/absolute/file","sha256":"<hash>"}]`. Use immutable installed paths: digest checks are not race-free protection against someone replacing paths during launch, and cwd is not a sandbox.
+
+The environment starts empty. Add only explicitly required entries, either `{"name":"SERVICE_TOKEN","file":"/private/token","sha256":"<hash>"}` or a literal `{"name":"LANG","value":"C.UTF-8"}`. Secret files must be private, UTF-8, NUL-free and at most 4 KiB; their **exact bytes**, including a trailing newline, are passed through. No shell/secret-command expansion occurs. Loader/injection variables, `DECK_*`, `PI_*` and `OPENAI_API_KEY` are refused. Keep secrets out of public descriptions/schemas. A server has your OS-user authority and can return its supplied secret as tool data; MCP is **not a secret-removal boundary**.
+
+```sh
+# Export does not launch the server. Probe initializes/lists only: no tools/call.
+# Startup itself may have effects, even during a probe.
+umask 077
+deck mcp export --config /private/host-profiles.json > /private/catalog.json
+deck mcp probe --config /private/host-profiles.json --profile workspace --workspace /absolute/work
+
+# Controlled startup only; do not replace a live hub implicitly.
+deck serve --directory /private/hub-state \
+  --mcp /private/host-profiles.json --mcp-catalog /private/catalog.json
+```
+
+`$TASK` means the saved task cwd on that exact host. An absolute profile cwd is fixed and never adopts the caller's cwd. A task can receive profiles on its assigned machine and separately approved **fixed-cwd hub services**, not arbitrary third-worker profiles.
+
+For a worker, opt in with `deck-worker init ... --mcp /private/host-profiles.json`. Initialization creates its machine ID; use the new private `worker.json` identity when preparing the host profile file, before `identity`/`run`. For an existing stopped worker, preserve its identity/receipts and explicitly add the `mcp` configuration path. Review its new identity and approve the exact binary digest plus ordered `files,bash,mcp` or `files,bash,rex,mcp` capabilities on the hub. MCP does not require Rex. `deck-worker mcp export|probe` provides the same native diagnostics.
+
+Combine reviewed exports into one hub catalog (`{"version":1,"profiles":[...]}`), preserving exported profile rows unchanged. The catalog is private and at most 256 KiB. Every remote profile must belong to an explicitly MCP-enabled registered route. Catalog-only `serve --mcp-catalog ...` is allowed for remote-only tools; local profiles also need `--mcp`. These flags do not enroll or reconnect workers themselves.
+
+#### Grant a conversation explicit profiles
+
+Use the existing loopback `POST /v1/command` API. First read `status` to verify the intended `hubId` and chat ID. All three MCP commands require that explicit hub identity:
+
+```json
+{"version":1,"id":"catalog-1","hubId":"<hub ID>","command":"mcp_catalog","args":{}}
+```
+
+```json
+{"version":1,"id":"grants-1","hubId":"<hub ID>","command":"tool_profiles","args":{"chatId":"<chat ID>"}}
+```
+
+```json
+{"version":1,"id":"grant-1","hubId":"<hub ID>","command":"set_tool_profiles","args":{"chatId":"<chat ID>","expectedRevision":0,"profiles":[{"machineId":"<host ID>","profileId":"workspace","revision":"<exported revision>"}]}}
+```
+
+Send each JSON object as a separate request, for example `curl --fail-with-body -sS -H 'Content-Type: application/json' --data-binary @request.json http://127.0.0.1:52800/v1/command`. Check the response's `ok` and exact result, not just HTTP status. Use the **observed** grant revision, not an assumed zero. At most eight profiles / 64 MCP tools may be granted to a conversation. Only independent idle/drained chats can change grants. An empty profile array revokes the selection. After an uncertain grant ACK, observe `tool_profiles` before deciding on a new change; never automatically resend the mutation.
+
+Configuration/catalog changes require a controlled drained restart and explicit review/regrant of changed revisions. Schema drift or `tools/list_changed` creates a persistent revision fence; do not delete it to force a retry. Review the server/configuration, update its schemas/pins (or the optional `approval` label for an explicitly reviewed new revision), export again, and select that revision. Missing/withdrawn revisions expose no replacement tools. Reconnect and TUI detach/reopen do not refresh grants or change credentials.
+
+Native acceptance is retained **before launch**. An identical invocation recovers its original result, or reports accepted-without-result as uncertain; it is never repeated to fill a missing result. Changed request bytes conflict. Tool errors and JSON-RPC errors are distinct, and neither proves rollback. Results are untrusted data retained in hub history. Keep worker configuration/receipts together; backups include local MCP receipts/stale fences but **not** external profile/catalog files, server dependencies or host-local secret files. See the [implementation contract](docs/DEVELOPER.md#stdio-implementation-contract-phases-23).
 
 ### Project instructions
 

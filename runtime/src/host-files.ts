@@ -57,7 +57,7 @@ export class PipeFiles implements HostFiles {
   }
   private sample(binding: Binding, target: string): Promise<ShellProgress> | undefined {
     const id = `progress:${target}`;
-    if (this.failed || [...this.pending.values()].filter((item) => item.kind === "progress").length >= 4 || this.pending.has(id)) return;
+    if (this.failed || this.pending.size >= 20 || [...this.pending.values()].filter((item) => item.kind === "progress").length >= 4 || this.pending.has(id)) return;
     const { frame, request } = nativeFrame({ version: 1, id, ...binding, operation: "bash_progress", args: { target } });
     return new Promise((resolve, reject) => {
       this.pending.set(id, { request, kind: "progress", resolve, reject });
@@ -66,10 +66,10 @@ export class PipeFiles implements HostFiles {
   }
   async call(binding: Binding, id: string, operation: string, args: Args, signal?: AbortSignal, onProgress?: (progress: ShellProgress) => void): Promise<FileResult> {
     signal?.throwIfAborted();
-    const processOperation = operation === "bash" || operation === "rex_allocate" || operation === "rex_inspect" || operation === "rex_resolve";
+    const processOperation = operation === "mcp_call" || operation === "bash" || operation === "rex_allocate" || operation === "rex_inspect" || operation === "rex_resolve";
     if (processOperation && !this.control) throw new Error("offline: process cancellation channel unavailable");
     if (this.failed) throw new Error("offline: assigned worker unavailable");
-    if ([...this.pending.values()].filter((item) => item.kind === "result").length >= 16 || this.pending.has(id)) throw new Error("busy: native operation capacity reached");
+    if (this.pending.size >= 20 || [...this.pending.values()].filter((item) => item.kind === "result" && (item.request.operation === "mcp_call") === (operation === "mcp_call")).length >= (operation === "mcp_call" ? 2 : 16) || this.pending.has(id)) throw new Error("busy: native operation capacity reached");
     const { frame, request } = nativeFrame({ version: 1, id, ...binding, operation, args });
     if (request.id !== id || request.operation === "bash_progress") throw new Error("invalid: invalid native request; no operation sent");
     let ended = false;

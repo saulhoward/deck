@@ -51,11 +51,17 @@ pub fn validRequest(allocator: std.mem.Allocator, v: V) bool {
     if (eq(operation, "write")) return wire.validNativeWriteArgs(args) and path(field(args, "path")) and text(field(args, "content")).len <= 128 * 1024;
     if (eq(operation, "edit")) return wire.validNativeEditArgs(args) and path(field(args, "path")) and text(field(args, "oldText")).len > 0 and text(field(args, "oldText")).len <= 128 * 1024 and text(field(args, "newText")).len <= 128 * 1024;
     if (eq(operation, "bash")) return wire.validNativeBashArgs(args) and std.mem.indexOfScalar(u8, text(field(args, "command")), 0) == null;
-    const limit: usize = if (eq(operation, "rex_allocation_receipt")) 256 * 1024 else 16 * 1024;
+    const limit: usize = if (eq(operation, "rex_allocation_receipt") or eq(operation, "mcp_call")) 256 * 1024 else 16 * 1024;
     if (!wire.validNativePlanArgs(args) or text(field(args, "plan")).len > limit) return false;
     const parsed = std.json.parseFromSlice(V, allocator, text(field(args, "plan")), .{}) catch return false;
     defer parsed.deinit();
     const plan = parsed.value;
+    if (eq(operation, "mcp_call")) {
+        if (!wire.validMachineIdentity(field(v, "machineId")) or !wire.validMcpCallPlan(plan) or !safe(field(plan, "conversationId")) or text(field(plan, "argumentsJSON")).len > 32768 or std.mem.indexOfAny(u8, text(field(plan, "argumentsJSON")), "\r\n") != null) return false;
+        const args_json = std.json.parseFromSlice(V, allocator, text(field(plan, "argumentsJSON")), .{}) catch return false;
+        defer args_json.deinit();
+        return args_json.value == .object and @import("mcp_schema.zig").boundedJson(args_json.value);
+    }
     if (eq(operation, "rex_allocate")) return wire.validRexAllocationPlan(plan) and safe(field(plan, "chatId"));
     if (eq(operation, "rex_inspect")) return wire.validRexInspectionQuery(plan);
     if (eq(operation, "rex_resolve")) return wire.validRexTargetOptions(plan);
@@ -73,11 +79,35 @@ pub fn validReply(request_id: []const u8, operation: wire.NativeOperation, v: V)
     const result = field(v, "result");
     const progress = field(v, "progress");
     if (operation == .bash_progress) return result == .null and progress != .null and text(field(progress, "output")).len <= 2048;
+    if (operation == .mcp_call and mcpPayload(result)) {
+        const raw = std.json.parseFromSlice(V, std.heap.page_allocator, text(field(result, "output")), .{}) catch return false;
+        defer raw.deinit();
+        const rid = text(field(raw.value, "id"));
+        if (!std.mem.startsWith(u8, rid, "call:") or !std.mem.eql(u8, rid[5..], request_id)) return false;
+    }
     return progress == .null and validResult(operation, result);
+}
+fn mcpPayload(v: V) bool {
+    return eq(field(v, "code"), "mcp_result") or eq(field(v, "code"), "mcp_tool_error") or eq(field(v, "code"), "mcp_rpc_error");
 }
 pub fn validResult(operation: wire.NativeOperation, v: V) bool {
     if (!wire.validNativeResult(v) or operation == .bash_progress) return false;
     if (operation == .link_status and field(v, "ok").bool) return eq(field(v, "code"), "link_status") and (eq(field(v, "output"), "connected") or eq(field(v, "output"), "offline")) and field(v, "exitCode") == .null and !(field(v, "truncated") == .bool and field(v, "truncated").bool);
+    if (operation == .mcp_call) {
+        if (text(field(v, "output")).len > 65536 or field(v, "exitCode") != .null or (field(v, "truncated") == .bool and field(v, "truncated").bool)) return false;
+        if (mcpPayload(v)) {
+            const raw = std.json.parseFromSlice(V, std.heap.page_allocator, text(field(v, "output")), .{}) catch return false;
+            defer raw.deinit();
+            const rid = field(raw.value, "id");
+            if (rid != .string or !std.mem.startsWith(u8, rid.string, "call:") or !safe(.{ .string = rid.string[5..] }) or !@import("mcp_stdio.zig").validRpcReply(raw.value, rid.string)) return false;
+            const r = field(raw.value, "result");
+            const failed = field(r, "isError") == .bool and field(r, "isError").bool;
+            if (eq(field(v, "code"), "mcp_rpc_error")) return !field(v, "ok").bool and field(raw.value, "error") == .object;
+            if (eq(field(v, "code"), "mcp_tool_error")) return !field(v, "ok").bool and r == .object and failed;
+            return field(v, "ok").bool and r == .object and !failed;
+        }
+        if (field(v, "ok").bool) return false;
+    }
     const shell = operation == .bash;
     const rex = switch (operation) {
         .rex_allocate, .rex_inspect, .rex_resolve, .rex_allocation_receipt => true,
