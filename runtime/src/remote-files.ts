@@ -13,6 +13,7 @@ export function parseRoutes(bytes: string, localMachine: string, reserved: numbe
   const machines = new Set([localMachine]), fds = new Set(reserved);
   for (const host of value.hosts) {
     if (machines.has(host.machineId)) throw new Error("Duplicate native worker route");
+    if (host.launcher !== undefined && (host.launcher !== true || !host.rexClient)) throw new Error("Invalid launcher route");
     machines.add(host.machineId);
     if (!!host.rexClient !== (host.clientReadFd !== undefined && host.clientWriteFd !== undefined) || (!host.rexClient && (host.clientReadFd !== undefined || host.clientWriteFd !== undefined)) || (host.rexClient && !validRexClient(host.rexClient))) throw new Error("Invalid worker client route");
     for (const fd of [host.readFd, host.writeFd, host.controlFd, ...(host.rexClient ? [host.clientReadFd!, host.clientWriteFd!] : [])]) {

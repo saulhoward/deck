@@ -19,13 +19,13 @@ These documents distinguish current behavior from the target design. A local bui
 - Run the hub under an external service manager and open its control TUI with `deck hub`.
 - Give each task a name, problem statement, description, one primary chat, an explicit execution-machine/cwd binding, and optional Pi-owned subagents. List saved tasks with their children; distinguish connectivity, activity and terminal presence.
 - Let the hub model discover, create and message tasks. Let primary task agents message other tasks and explicitly report to the hub, with provenance and bounded message chains rather than automatic acknowledgement loops.
-- From the hub, inspect tasks read-only and open/reopen their assigned-host Rex sessions. A proposed remote `deck agent` launcher selects an existing task or explicitly creates one through the hub before Rex starts its task-locked TUI. It does not create another hub or infer task identity from the current directory.
+- From the hub, inspect tasks read-only and open/reopen their assigned-host Rex sessions. The opt-in remote `deck agent --launch-from ...` launcher selects an existing task or explicitly creates one through the hub before Rex starts its task-locked TUI. It does not create another hub or infer task identity from the current directory.
 - Keep direct human input and agent-origin messages in the same primary task conversation. Model/thinking changes remain chat-scoped and idle-only in writable clients.
 - Expose approved **native MCP tools**, hosted on the hub or the assigned worker. A task's saved tool profile determines access; attaching a different TUI does not change tools or credentials. Closing a terminal does not stop the agent or its tool host.
 
 **Native MCP means Deck-owned MCP client transport and process supervision in Zig, with Pi owning durable tool invocations.** It does not mean loading Pi coding-agent extensions, reusing a running Pi session, or running another agent on each worker. MCP server programs are separate, explicitly installed software and may themselves need Node or Python. The native worker does not acquire those runtimes as mandatory dependencies. Service credentials stay with the configured tool host; model credentials stay at the hub. Reusing an MCP server configuration requires explicit Deck setup and approval, not automatic discovery of `.pi` files or arbitrary plugin execution.
 
-Assigned-host task clients have isolated tests and a recorded two-machine Darwin arm64 acceptance run. That run used disposable registrations and mock providers, not a permanent service deployment. **Phase 1 is implemented:** `deck hub`, creation-time task briefs, grouped inspection, registered-host selection and explicit task-to-hub messaging. Native stdio MCP and explicit per-task profiles are implemented, with source/installed tests and [fresh two-machine MCP acceptance](docs/HISTORY.md#mcp-two-machine-acceptance) on the recorded Darwin arm64 pair. The remote bootstrap launcher remains **planned**. `deck agent` remains compatible; bare `deck agent` on another machine still does not create a remote task or Rex allocation.
+Assigned-host task clients have isolated tests and a recorded two-machine Darwin arm64 acceptance run. That run used disposable registrations and mock providers, not a permanent service deployment. **Phase 1 is implemented:** `deck hub`, creation-time task briefs, grouped inspection, registered-host selection and explicit task-to-hub messaging. Native stdio MCP and explicit per-task profiles are implemented, with source/installed tests and [fresh two-machine MCP acceptance](docs/HISTORY.md#mcp-two-machine-acceptance) on the recorded Darwin arm64 pair. The explicitly approved remote bootstrap launcher is implemented, with [fresh Phase 4 acceptance](docs/HISTORY.md#phase-4-remote-launcher). `deck agent` remains compatible; bare `deck agent` on another machine still does not create a remote task or Rex allocation.
 
 Named interactive child terminals and captured, headless scheduled jobs remain later goals. Jobs will reuse their task/chat, with distinct per-run admission identities and captured file settings; jobs and their children will never allocate Rex terminals. See the [target architecture](docs/DEVELOPER.md#target-interactive-and-scheduled-architecture), [MCP boundary](docs/DEVELOPER.md#target-native-mcp-tools), and [phased plan](docs/ROADMAP.md#next-implementation-sequence). The instructions below describe what works now.
 
@@ -435,9 +435,49 @@ All three sockets (effects, control, clients) independently verify their actual 
 
 Validation includes isolated sockets/FIFOs with injected peer verification and a separate [real two-machine run](docs/HISTORY.md#phase-0-two-machine-acceptance) with production Tailscale peer verification. The latter exercised managed startup, central task input/history, same-PID reconnect, lost-ACK draft recovery, native effect faults and explicit same-conversation reopen. It used a private Rex API 10/Unix server; the existing API 9 service was used only for operator access and remains unsupported for Deck allocation. No live provider or desktop GUI acceptance is implied.
 
+## Enable the remote launcher
+
+This is a separate, narrow permission—not an extension of a task client's authority. On a **new disposable or explicitly approved worker**, add `--launcher` alongside `--client /absolute/installed/deck` during `deck-worker init`. For an existing worker, stop/drain it, preserve its identity and receipts, and explicitly add `"launcher": true` to its private configuration. Review/reapprove its current binary digest, client/socket and ordered capabilities on the hub: `files,bash,rex,launcher`, or `files,bash,rex,mcp,launcher`. Restart through the controlled upgrade procedure; neither catalogs nor a client request can grant this permission.
+
+Approval covers independent tasks assigned to this **OS machine**, not an individual human login or a sandbox. It grants no hub chat, child-task, other-host, provider-login, configuration or MCP-grant authority. Task-scoped RPC remains allocation-bound. A full Deck client must be installed at the approved path; the standalone worker still has no Node/Pi dependency or model loop.
+
+From that worker:
+
+```sh
+# Explicit worker configuration selects the pinned hub. No cwd/task inference.
+deck agent --launch-from /private/worker-state
+deck agent --launch-from /private/worker-state --list --after 25
+
+# Exact title/cwd and optional immutable brief. --confirm is required.
+deck agent --launch-from /private/worker-state \
+  --new '{"title":"Fix tests","cwd":"/absolute/project","problem":"Failing tests","description":""}' \
+  --confirm
+
+# Existing assigned independent tasks only.
+deck agent --launch-from /private/worker-state --open 11 --confirm
+deck agent --launch-from /private/worker-state --inspect 11
+```
+
+Listing scans at most 25 conversations; follow the returned `next` cursor even if the filtered page is empty. IDs above are examples, not task selection by labels or paths. The launcher cannot select a Rex executable/endpoint: configure a supported local Rex default on the worker. An existing allocation retains its target. Rex API 8/10 over a worker-local Unix socket remains the supported allocation surface.
+
+Creation follows **save exact private draft → create → validate ACK → clear that draft → separate best-effort Rex open**. Creation starts no generation and grants no MCP profiles. Existing selections remain unchanged; only trusted-local hub controls can grant profiles. An open ACK means admission, not terminal readiness. The assigned worker launches the approved TUI, which must complete pinned hub/task/allocation/block startup before accepting input. Opening does not promise GUI focus or attach the invoking shell.
+
+On an unconfirmed result:
+
+```sh
+deck agent --launch-from /private/worker-state --drafts
+# Creation only: explicit retry recovers the same task, but does NOT open it.
+deck agent --launch-from /private/worker-state --retry CREATION_DRAFT_UUID --confirm
+# Inspect/reconcile an uncertain open first. Open drafts cannot be retried.
+deck agent --launch-from /private/worker-state --inspect CHAT_ID
+deck agent --launch-from /private/worker-state --discard DRAFT_UUID --confirm
+```
+
+Drafts live under the normal client-state root in a private `launcher-drafts` namespace keyed by hub and machine. Pending drafts block new launcher mutations until explicitly recovered/discarded. Discarding is local, not rollback; a new explicit open can create another terminal and supersede the old allocation. A failed open never recreates the acknowledged task. Reconnect/list/inspect never replay mutations, and a missing approval, offline worker or unsupported Rex never selects another host. Bare/local `deck agent`, the hub TUI and task inspection retain their existing behavior.
+
 ## Limits and trust
 
-- The chat API listens only on loopback and trusts local OS users. Worker listeners authenticate registered Tailscale machines, not individual OS users. Opt-in task relays expose only allocation-scoped commands, never the general HTTP/login/hub command surface.
+- The chat API listens only on loopback and trusts local OS users. Worker listeners authenticate registered Tailscale machines, not individual OS users. Task scopes expose allocation-scoped commands; separately approved launchers expose only list/create/open/inspect. Neither exposes the general HTTP/login/hub command surface.
 - File and shell tools can access paths outside the workspace, use ordinary symlinks, and contact external services.
 - File tools handle regular UTF-8 files up to 128 KiB. Exact edit requires one match. Bash has a 60-second default timeout, a 300-second maximum, and a 64 KiB output tail.
 - Stored chats, receipts, instructions, credentials, drafts, and backups can contain sensitive plaintext. Display sanitization is not secret redaction.

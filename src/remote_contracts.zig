@@ -10,7 +10,7 @@ pub fn validPeer(value: std.json.Value) bool {
 fn ordered(values: std.json.Value) bool {
     var previous: usize = 0;
     for (values.array.items) |value| {
-        const index: usize = if (std.mem.eql(u8, value.string, "files")) 1 else if (std.mem.eql(u8, value.string, "bash")) 2 else if (std.mem.eql(u8, value.string, "rex")) 3 else 4;
+        const index: usize = if (std.mem.eql(u8, value.string, "files")) 1 else if (std.mem.eql(u8, value.string, "bash")) 2 else if (std.mem.eql(u8, value.string, "rex")) 3 else if (std.mem.eql(u8, value.string, "mcp")) 4 else 5;
         if (index <= previous) return false;
         previous = index;
     }
@@ -37,11 +37,14 @@ pub fn validRegistry(value: std.json.Value) bool {
         const implementation = host.object.contains("implementation");
         const capabilities = host.object.get("capabilities");
         if (implementation != (capabilities != null) or (!host.object.get("client").?.bool and !implementation)) return false;
-        if (capabilities) |caps| if (!ordered(caps)) return false;
+        if (capabilities) |caps| {
+            if (!ordered(caps)) return false;
+            for (caps.array.items) |cap| if (std.mem.eql(u8, cap.string, "launcher") and !host.object.contains("rexClient")) return false;
+        }
         if (host.object.get("rexClient")) |client| {
             if (!implementation or !validRexClient(client)) return false;
             const caps = capabilities.?.array.items;
-            if ((caps.len != 3 and caps.len != 4) or !std.mem.eql(u8, caps[2].string, "rex")) return false;
+            if (caps.len < 3 or caps.len > 5 or !std.mem.eql(u8, caps[0].string, "files") or !std.mem.eql(u8, caps[1].string, "bash") or !std.mem.eql(u8, caps[2].string, "rex")) return false;
         }
         for (hosts[0..i]) |other| {
             if (std.mem.eql(u8, host.object.get("machineId").?.string, other.object.get("machineId").?.string) or
@@ -52,6 +55,7 @@ pub fn validRegistry(value: std.json.Value) bool {
 }
 pub fn validHello(value: std.json.Value) bool {
     if (!wire.validRemoteWorkerHello(value) or !ordered(value.object.get("capabilities").?)) return false;
+    for (value.object.get("capabilities").?.array.items) |cap| if (std.mem.eql(u8, cap.string, "launcher") and !value.object.contains("rexClient")) return false;
     if (value.object.get("rexClient")) |client| if (!validRexClient(client) or value.object.get("capabilities").?.array.items.len < 3 or !std.mem.eql(u8, value.object.get("capabilities").?.array.items[2].string, "rex")) return false;
     return true;
 }

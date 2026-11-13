@@ -4,6 +4,47 @@ This is the consolidated change and decision record. It replaces the progress re
 
 Test counts below are **recorded evidence for the named implementation stage**. Earlier counts do not describe a new run of the current tree. No count is a release guarantee or proof of deployment.
 
+## Phase 4 remote launcher
+
+**Implemented and validated on 2026-11-13, after `148b9fc`.** The explicitly approved remote bootstrap slice passed its source, installed and fresh two-machine gates. This is not deployment, general remote hub access or a per-human ACL system.
+
+- Added the ordered `launcher` worker capability, explicit worker opt-in and trusted native runtime-route permission. It requires the approved Rex client/socket. Task and launcher scopes are mutually exclusive on the existing independently verified client channel; correlation includes authority and generation. No new network listener, worker inference runtime, execution queue or transcript replica was added.
+- Added client-only `deck agent --launch-from ABS_WORKER_DIRECTORY` with bounded list, explicit confirmed create/open, inspection and private draft recovery. It never infers a task from cwd/labels/`REX_BLOCK`, enrolls a worker, selects another host, supplies executable/endpoint overrides, changes MCP grants or opens hub/child conversations. Local, inspector and managed task-client behavior remains separate.
+- Creation uses machine-namespaced durable IDs and preserves exact briefs/bindings, including omitted versus empty fields. Save → create → exact ACK → clear → separate saved Rex request remains explicit. Creation starts no generation or grants. Creation retry recovers without opening; uncertain open drafts cannot be retried. Normal pinned task/allocation/block startup still precedes input, and opening never resets existing grants.
+- Review added an explicit canonical-main exclusion to listing, even under misleading task metadata; opening already refused it. A regression assertion covers that case. The final artifacts below were rebuilt and the complete fresh real-machine sequence repeated after that change.
+
+### Phase 4 validation
+
+- Final native run, including isolated Rex API 10 and the installed launcher/TUI through verified-loopback worker routes: **66/66 passed** (`/tmp/deck-phase4-native-current.log`). Native coverage also tests missing approval, double authority, oversized launcher requests, exact forwarding, generation loss and forged cross-authority replies. Injected-peer tests are separate from production Tailscale acceptance.
+- Final Nix runtime/generator suite: **520 total, 518 passed, two opt-in skips, zero failures**, plus outside-checkout installcheck **1/1** (`/tmp/deck-phase4-nix-final.log`). Eight launcher cases cover authority, exact briefs, private drafts/configuration, owner/cwd/canonical-main refusal, serialized rechecks, grant preservation, malformed ACKs, lost creation/open responses and restart recovery.
+- Final installed regression run: **525/525**, no skips (`/tmp/deck-phase4-installed-final.log`). The **5/5** backup/compatibility fixtures ran separately against the raw installed native executable (`/tmp/deck-phase4-raw-final.log`), because the wrapper intentionally fixes the runtime root and is not the native code fingerprint. These are distinct evidence layers, not five additional wrapper-mode passes.
+- Full/worker Nix packages and current-system aarch64-darwin flake checks passed. Worker closure contains Bash/readline/ncurses/libiconv, not Node, Pi or Zig. Both native binaries cross-compiled for **x86_64-linux, aarch64-linux and x86_64-macos** (`/tmp/deck-phase4-cross.log`); this is compilation, not runtime acceptance. Generated-contract, TypeScript, formatting and diff checks passed.
+- Earlier fixture/command mistakes and intermediate runs are not counted as final passes. No production deadline was raised. The earlier full real-machine run at `/private/tmp/dp4-05c6h2hi` and its artifacts are superseded by the post-review run below.
+
+Accepted final artifacts are retained through `result-launcher-final` and `result-launcher-final-worker`:
+
+```text
+/nix/store/yiasgd5m5cj48nhz0mjfvsc3rb5brjjk-deck-0.1.0-dev
+/nix/store/0v0bxcbn655h23k3qlp117m2k1ssrrgc-deck-worker-0.1.0-dev
+```
+
+### Phase 4 two-machine acceptance
+
+**Passed 2026-11-13 at 06:15:15 UTC, including cleanup.** Evidence is retained at `/private/tmp/dp4f-4ja04twf`. New stores, identities, registrations, profiles, drafts, scopes and a dedicated administration session were used. Administration/transfer used Rex; Deck used production Tailscale peer verification on all three channels. A verified immutable Rex application archive was restaged, not its old server state. No prior request IDs, allocations or process IDs were reused as authority.
+
+- Hub OS node `nAzfeEZRBg11CNTRL` (`100.81.92.116`), worker OS node `nwPG27uaH611CNTRL` (`100.84.23.117`), user `7579044732280396`; Darwin arm64 pair. New hub `aa2e2ca6-f27c-4118-99d1-86468e8a8c8e`, hub machine `a42d330cf450bf987ccdc5c14eb4c162`, worker machine `2d1ea352df4443648b826f2466e09955`. Approval pinned `files,bash,rex,mcp,launcher`, the final binary digest and installed client/socket.
+- Actual native SHA-256: hub `06d600f15e3ce28c81ca6c279dbc19eac218c6cb61a2146010b40f04d94a8bac`; standalone worker `9ddd4ada9de1c60113b8ff004a7f66489e1dc18a9e00202b4e94a8567986be63`. The installed runtime/client and native binaries were used without a substitute runtime entry or verification bypass.
+- Missing launcher approval prevented the client endpoint from becoming available. After explicit approval, task **11** was created with an exact Unicode/empty/multiline brief. A byte-preserving private Unix fault injector withheld its creation ACK. The private draft survived worker/hub restart; explicit retry returned the same task and bytes, cleared that draft, and did not open Rex or generate input.
+- Lost open and startup ACKs retained uncertainty: operation **21** was admitted once, the managed TUI became fenced, attempted input was not admitted, and neither open nor startup was automatically resent. Inspection remained available; retrying the open draft refused. After explicit inspection/discard and closing the fenced TUI, a new deliberate open **23** completed normal startup.
+- One explicit remote TUI input produced one central mock generation. Its captured configuration and model-facing tools contained the selected worker profile and fixed-cwd hub service, at grant revision **1**. Reconnect and detach/reopen preserved history, machine/cwd and grants. The worker had no Pi process or SQLite execution store. This run exposed both approved aliases and ran a native discovery-only probe; it did **not** repeat MCP `tools/call` effects or use a live model provider. Phase 3 remains the separate real MCP-effect evidence.
+- Normal `--new ... --confirm` created task **40**, separately admitted open **49** and reached its managed task-locked TUI with empty grants and no generation. Main/nonexistent/other-host tasks and a wrong hub were refused. Task **51** remained created when its unsupported API-9/HTTPS Rex default refused opening; no terminal was requested and no fallback occurred.
+- Worker loss left the existing TUI process alive and stale. An offline creation attempt was not sent and created no draft/task. Reconnect did not replay it, change grants or add input. A later deliberate detach/reopen **59** recovered the same conversation/history. Exactly four worker operation receipts—**21, 23, 49, 59**—remain for the four intentional opens, not automatic terminal replay.
+- Private Rex API 10 (`0.0.1793645657-gd018d2`) used a new Unix endpoint, host `cd9d6790-ea48-4b18-93dd-cea3999db1bf`, instance `cc543fd7-c8f2-476f-af8f-23e27046b57b`, no tailnet and no restored sessions. Owned TUIs, workers, fault injectors, private Rex and administration session were stopped; the socket was removed, hub listeners closed, Pi exited and the existing writer lock was reacquired. The operator API-9 server retained PID **84040**, host/instance/start time/version and its original session count. Existing deployment links, registrations, credentials and production services were untouched.
+
+Evidence includes `acceptance-summary.json`, `fixture-sha256.json`, `final-run.log`, `exact-creation-draft.json`, the `proxy-*-proof.json` records, `creation-recovery-result.json`, `lost-open-inspection.json`, `lost-startup-screen.txt`, refusal results, `tui-input-history.json`, `reconnect-proof.json`, final history/grants/status, retained worker receipts, process proofs, `remote-cleanup.json`, `admin-cleanup.json` and `operator-server-preserved.json`. Helpers and saved IDs/PIDs are historical, run-specific evidence—not safely rerunnable instructions.
+
+This accepts the narrow launcher workflow on the recorded pair, not Linux/x86_64 runtime support, GUI focus/desktop behavior, live-provider/MCP-service access, HTTP/OAuth, child terminals or scheduling. Acceptance was completed before commit/push. No production enrollment or production deployment occurred.
+
 ## Native stdio MCP (Phases 2/3)
 
 **Implemented and validated on 2026-11-12, after `899fd26`.** Phases 2/3 passed their scoped source, installed and fresh two-machine gates below. Acceptance was completed before commit/push; it is not a deployment or blanket platform/service support claim.

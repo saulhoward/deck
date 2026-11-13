@@ -6,15 +6,18 @@ import { AgentDoc, type TaskId } from "@earendil-works/pi-durable";
 import { ChatDoc, DeckError, type DeckRuntime } from "./deck.js";
 import { RexDoc, REX_KIND, type RexInput } from "./rex-allocation.js";
 import { dispatch } from "./ipc.js";
+import { launcherResponse } from "./launcher-hub.js";
+import { validWorkerFrame } from "./remote-contracts.js";
 import { validClientRequest } from "./command-contracts.js";
 import { validSafePiId } from "./mutation-contracts.js";
-import { validTaskRelayFrame, validRexAllocationPlan, type TaskRelayFrame, type WorkerRexClient, type ResponseEnvelope } from "./generated/contracts.js";
+import { validRexAllocationPlan, type TaskRelayFrame, type WorkerRexClient, type ResponseEnvelope } from "./generated/contracts.js";
 import { FrameDecoder, encodeFrame } from "./protocol.js";
 import { responseFrame } from "./responses.js";
 const allowed = new Set(["status", "history", "activity", "progress", "instruction_status", "model_settings", "set_model_settings", "rex_status", "rex_inspect", "rex_startup", "admit", "stop", "import_instructions"]);
 // rex_open is deliberately hub-controlled: replacement revokes the old client's
 // allocation. A terminal cannot manufacture another terminal's authority.
 export async function taskClientResponse(runtime: DeckRuntime, machineId: string, client: WorkerRexClient, frame: TaskRelayFrame): Promise<string> {
+  if (!validWorkerFrame(frame) || !frame.scope || frame.launcher) throw new Error("Invalid task authority");
   const request: unknown = JSON.parse(frame.body);
   if (!validClientRequest(request)) throw new Error("Invalid task command");
   const scope = frame.scope, args = request.args as Record<string, unknown>;
@@ -42,7 +45,7 @@ export async function taskClientResponse(runtime: DeckRuntime, machineId: string
   catch (error) { response = { version: 1, id: request.id, ok: false, error: { code: error instanceof DeckError ? error.code : "runtime_failed", message: error instanceof DeckError ? error.message : "Task command failed; outcome unconfirmed" } }; }
   return responseFrame(response, request).subarray(4).toString("utf8");
 }
-export function serveWorkerClients(runtime: DeckRuntime, machineId: string, client: WorkerRexClient, readFd: number, writeFd: number) {
+export function serveWorkerClients(runtime: DeckRuntime, machineId: string, client: WorkerRexClient, readFd: number, writeFd: number, launcher = false) {
   const reader = new Socket({ fd: readFd, readable: true, writable: false });
   let writer: Socket;
   try { writer = new Socket({ fd: writeFd, readable: false, writable: true }); }
@@ -54,11 +57,11 @@ export function serveWorkerClients(runtime: DeckRuntime, machineId: string, clie
   void (async () => {
     try {
       for await (const raw of decoder) {
-        if (!validTaskRelayFrame(raw) || pending.size >= 8) throw new Error();
+        if (!validWorkerFrame(raw) || pending.size >= 8) throw new Error();
         const key = `${raw.connectionId}:${raw.id}`; if (pending.has(key)) throw new Error(); pending.add(key);
         void (async () => {
           try {
-            const body = await taskClientResponse(runtime, machineId, client, raw);
+            const body = raw.launcher ? await launcherResponse(runtime, machineId, launcher, raw) : await taskClientResponse(runtime, machineId, client, raw);
             if (closed) return;
             let frame: Buffer;
             try { frame = encodeFrame({ ...raw, body }); }

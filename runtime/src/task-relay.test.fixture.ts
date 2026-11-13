@@ -13,6 +13,7 @@ import { DeckRuntime } from "./deck.js";
 import { PipeFiles } from "./host-files.js";
 import { parseRoutes, RoutedFiles } from "./remote-files.js";
 import { serveWorkerClients } from "./remote-clients.js";
+import { launcherTarget,launcherCommand } from "./launcher-client.js";
 import { model, provider, IMPLEMENTATION } from "./instructions.test.support.js";
 const [mode, root, routesJson] = process.argv.slice(2) as [string, string, string];
 const local = "c".repeat(32); const binary = process.env.DECK_TEST_BINARY!;
@@ -21,7 +22,7 @@ const localFiles = { call: async () => { throw new Error("No local effects allow
 const routes = mode === "run" ? parseRoutes(routesJson, local, []) : undefined;
 const files = routes ? new RoutedFiles(local, localFiles, routes) : localFiles;
 const runtime = await DeckRuntime.open(join(root, "pi.sqlite"), { models, model, implementation: IMPLEMENTATION, binding: { machineId: local, cwd: root }, environment: () => undefined, hostFiles: files, rexClient: binary, ...(routes ? { expectedHubId: routes.hubId } : {}) });
-const clients = (routes?.hosts ?? []).map(h => serveWorkerClients(runtime, h.machineId, h.rexClient!, h.clientReadFd!, h.clientWriteFd!));
+const clients = (routes?.hosts ?? []).map(h => serveWorkerClients(runtime, h.machineId, h.rexClient!, h.clientReadFd!, h.clientWriteFd!, h.launcher === true));
 if (mode === "init") { console.log(runtime.hubId); await runtime.close(); }
 else {
   let stopping = false;
@@ -77,6 +78,28 @@ else {
     const second = await open(); assert.equal(second.sessionId, first.sessionId); assert.notEqual(second.blockId, first.blockId);
     await until(() => capture(second), text => text.includes("REMOTE_RELAY_INPUT"));
     assert.deepEqual(await runtime.history(chatId), history); assert.equal((await runtime.listChats()).items.length, 2);
+    // The bootstrap CLI has no task allocation scope. Its narrow permission is
+    // independently approved on both native peers; normal startup remains mandatory.
+    assert.equal(host.launcher,true);
+    await mkdir(join(root,"bin"));
+    const quote=(s:string)=>"'"+s.replaceAll("'","'\\''")+"'";
+    await writeFile(join(root,"bin/rex"),`#!/bin/sh\nexec ${quote(rexBinary)} --server ${quote(endpoint)} "$@"\n`,{mode:0o700});
+    await writeFile(join(root,"worker/worker.json"),JSON.stringify({version:1,machineId:host.machineId,hubId:runtime.hubId,hubAddress:"100.64.0.1:52901",hubPeer:{nodeId:"nFixture",userId:"1"},rexClient:host.rexClient,launcher:true}),{mode:0o600});
+    const cli=(args:string[]):Promise<string>=>new Promise((yes,no)=>execFile(binary,["agent","--launch-from",join(root,"worker"),...args],{env,timeout:10000,maxBuffer:1024*1024},(error,stdout,stderr)=>error?no(new Error(`Launcher CLI failed: ${stderr}`)):yes(stdout)));
+    const output=await cli(["--new",JSON.stringify({title:"launcher acceptance",cwd:root,problem:"",description:"exact launcher brief"}),"--confirm"]);
+    const created=JSON.parse(output.split("\n")[0]!);assert.equal(created.machineId,host.machineId);assert.deepEqual(created.brief,{problem:"",description:"exact launcher brief"});
+    const ack=JSON.parse(output.split("\n")[1]!).ack;await runtime.harness.waitForTask(Number(ack.taskId) as TaskId,context);
+    const launched=await runtime.terminalStatus(created.chatId);assert.equal(launched.status,"allocated");assert.ok(launched.binding);sessions.add(launched.binding.sessionId);
+    await until(()=>runtime.terminalStartup(created.chatId),v=>v.observation==="matched");await until(()=>capture(launched.binding!),s=>s.includes("task / Rex locked"));
+    assert.deepEqual((await runtime.toolProfiles(created.chatId)).profiles,[]);
+    await send("iREMOTE_LAUNCHER_INPUT",launched.binding);await until(()=>capture(launched.binding!),s=>s.includes("REMOTE_LAUNCHER_INPUT"));await send("\x1b",launched.binding);
+    await until(()=>capture(launched.binding!),s=>s.includes("NORMAL"));await send(":send",launched.binding);await until(()=>capture(launched.binding!),s=>s.includes(":send")&&s.includes("client idle"));await send("\r",launched.binding);
+    await until(()=>runtime.history(created.chatId),v=>JSON.stringify(v).includes("REMOTE_RELAY_REPLY"));
+    assert.equal(JSON.parse(await cli(["--inspect",created.chatId])).status.binding.machineId,host.machineId);
+    assert.deepEqual(JSON.parse(await cli(["--drafts"])),[]);
+    const launcher=await launcherTarget(join(root,"worker"));
+    await assert.rejects(launcherCommand(launcher,{version:1,id:randomUUID(),command:"launch_inspect",args:{chatId:String(runtime.main.id)}}),/unavailable/);
+    assert.equal((await runtime.listChats()).items.length,3);
     console.log("verified native relay/Rex acceptance passed");
   } finally {
     for (const id of sessions) await rex("session", "kill", id).catch(() => {});

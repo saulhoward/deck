@@ -6,18 +6,27 @@ const wire = @import("generated/contracts.zig");
 const tcp = @import("remote_io.zig");
 const a = tcp.a;
 pub const Pipes = struct { input: tcp.fd_t, output: tcp.fd_t };
-fn sameScope(x: wire.TaskClientScope, y: wire.TaskClientScope) bool {
-    return std.mem.eql(u8, x.hubId, y.hubId) and std.mem.eql(u8, x.chatId, y.chatId) and std.mem.eql(u8, x.allocationId, y.allocationId) and std.mem.eql(u8, x.blockId, y.blockId);
+fn sameScope(x: anytype, y: anytype) bool {
+    if (x.scope != null and y.scope != null) {
+        const s = x.scope.?;
+        const t = y.scope.?;
+        return x.launcher == null and y.launcher == null and std.mem.eql(u8, s.hubId, t.hubId) and std.mem.eql(u8, s.chatId, t.chatId) and std.mem.eql(u8, s.allocationId, t.allocationId) and std.mem.eql(u8, s.blockId, t.blockId);
+    }
+    return x.scope == null and y.scope == null and x.launcher != null and y.launcher != null and std.mem.eql(u8, x.launcher.?.hubId, y.launcher.?.hubId);
+}
+fn validAuthority(value: std.json.Value) bool {
+    return value.object.contains("scope") != value.object.contains("launcher");
 }
 fn frame(bytes: []const u8) !std.json.Parsed(wire.TaskRelayFrame) {
     if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidFrame;
     const raw = try std.json.parseFromSlice(std.json.Value, a, bytes, .{});
     defer raw.deinit();
-    if (!wire.validTaskRelayFrame(raw.value)) return error.InvalidFrame;
+    if (!wire.validTaskRelayFrame(raw.value) or !validAuthority(raw.value)) return error.InvalidFrame;
     return std.json.parseFromSlice(wire.TaskRelayFrame, a, bytes, .{ .allocate = .alloc_always });
 }
 pub const Hub = struct {
     pipes: Pipes,
+    launcher: bool = false,
     network: tcp.Reader = .{},
     replies: tcp.Reader = .{},
     to_pi: tcp.Queue = .{},
@@ -50,7 +59,7 @@ pub const Hub = struct {
             const reply = frame(bytes) catch return error.ClientPipeFailed;
             defer reply.deinit();
             var found: ?usize = null;
-            for (self.pending.items, 0..) |p, i| if (std.mem.eql(u8, p.value.id, reply.value.id) and std.mem.eql(u8, p.value.connectionId, reply.value.connectionId) and sameScope(p.value.scope, reply.value.scope)) {
+            for (self.pending.items, 0..) |p, i| if (std.mem.eql(u8, p.value.id, reply.value.id) and std.mem.eql(u8, p.value.connectionId, reply.value.connectionId) and sameScope(p.value, reply.value)) {
                 found = i;
                 break;
             };
@@ -66,6 +75,7 @@ pub const Hub = struct {
                 const request = try frame(bytes);
                 errdefer request.deinit();
                 if (!std.mem.eql(u8, request.value.connectionId, generation.?)) return error.StaleConnection;
+                if (request.value.launcher != null and (!self.launcher or request.value.body.len > 128 * 1024)) return error.LauncherNotApproved;
                 for (self.pending.items) |p| if (std.mem.eql(u8, p.value.id, request.value.id)) return error.DuplicateClientRequest;
                 try self.pending.ensureUnusedCapacity(a, 1);
                 try self.to_pi.append(bytes);
@@ -86,6 +96,7 @@ pub const Worker = struct {
     local_path: []const u8,
     local_inode: std.Io.File.INode,
     generation: []const u8,
+    launcher: bool = false,
     stopping: *std.atomic.Value(bool),
     data: tcp.fd_t,
     control: tcp.fd_t,
@@ -171,7 +182,7 @@ pub const Worker = struct {
                 if (!std.mem.eql(u8, reply.value.connectionId, self.generation)) return error.StaleConnection;
                 var found = false;
                 for (&slots) |*slot| if (slot.request) |request| {
-                    if (std.mem.eql(u8, &slot.id, reply.value.id) and sameScope(request.value.scope, reply.value.scope) and !slot.answered) {
+                    if (std.mem.eql(u8, &slot.id, reply.value.id) and sameScope(request.value, reply.value) and !slot.answered) {
                         slot.answered = true;
                         found = true;
                         if (slot.fd >= 0) try slot.output.append(reply.value.body) else slot.clear();
@@ -199,8 +210,13 @@ pub const Worker = struct {
                             slot.clear();
                             continue;
                         };
+                        if (request.value.launcher != null and (!self.launcher or request.value.body.len > 128 * 1024)) {
+                            request.deinit();
+                            slot.clear();
+                            continue;
+                        }
                         slot.request = request;
-                        const encoded = try std.json.Stringify.valueAlloc(a, wire.TaskRelayFrame{ .connectionId = self.generation, .id = &slot.id, .scope = request.value.scope, .body = request.value.body }, .{});
+                        const encoded = try std.json.Stringify.valueAlloc(a, wire.TaskRelayFrame{ .connectionId = self.generation, .id = &slot.id, .scope = request.value.scope, .launcher = request.value.launcher, .body = request.value.body }, .{});
                         defer a.free(encoded);
                         // The network envelope has more fields than the local one.
                         // Reject this client, not the independent effect/control link.
@@ -230,6 +246,6 @@ fn parseClient(bytes: []const u8) !std.json.Parsed(wire.TaskClientRequest) {
     if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidFrame;
     const raw = try std.json.parseFromSlice(std.json.Value, a, bytes, .{});
     defer raw.deinit();
-    if (!wire.validTaskClientRequest(raw.value)) return error.InvalidFrame;
+    if (!wire.validTaskClientRequest(raw.value) or !validAuthority(raw.value)) return error.InvalidFrame;
     return std.json.parseFromSlice(wire.TaskClientRequest, a, bytes, .{ .allocate = .alloc_always });
 }

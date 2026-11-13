@@ -11,6 +11,12 @@ pub const capabilities = [_]wire.WorkerCapability{ .files, .bash };
 const rex_capabilities = [_]wire.WorkerCapability{ .files, .bash, .rex };
 const mcp_capabilities = [_]wire.WorkerCapability{ .files, .bash, .mcp };
 const all_capabilities = [_]wire.WorkerCapability{ .files, .bash, .rex, .mcp };
+const launcher_capabilities = [_]wire.WorkerCapability{ .files, .bash, .rex, .launcher };
+const launcher_mcp_capabilities = [_]wire.WorkerCapability{ .files, .bash, .rex, .mcp, .launcher };
+pub fn configuredCapabilities(client: ?wire.WorkerRexClient, mcp: bool, launcher: bool) []const wire.WorkerCapability {
+    if (launcher and client != null) return if (mcp) &launcher_mcp_capabilities else &launcher_capabilities;
+    return capabilitiesWithMcp(client, mcp);
+}
 pub fn capabilitiesWithMcp(client: ?wire.WorkerRexClient, mcp: bool) []const wire.WorkerCapability {
     return if (mcp) (if (client != null) &all_capabilities else &mcp_capabilities) else capabilitiesFor(client);
 }
@@ -50,6 +56,7 @@ pub fn load(native: Native, path: []const u8) !std.json.Parsed(wire.RemoteWorker
     if (!trust.validPeer(peer_value.value.object.get("hubPeer").?)) return error.InvalidWorkerConfig;
     if (peer_value.value.object.get("rexClient")) |client| if (!trust.validRexClient(client)) return error.InvalidWorkerConfig;
     if (raw.value.mcp) |path_mcp| if (!@import("mcp_profiles.zig").absolute(path_mcp)) return error.InvalidWorkerConfig;
+    if (raw.value.launcher) |enabled| if (!enabled or raw.value.rexClient == null) return error.InvalidWorkerConfig;
     _ = try tailscale.endpoint(raw.value.hubAddress);
     return std.json.parseFromSlice(wire.RemoteWorkerConfig, a, bytes, .{ .allocate = .alloc_always });
 }
@@ -113,6 +120,7 @@ pub fn session(native: Native, config: wire.RemoteWorkerConfig, implementation: 
     return sessionConfigured(native, config, implementation, executable, journal, address, verify, stop_flag, if (mcp) |*p| p else null);
 }
 fn sessionConfigured(native: Native, config: wire.RemoteWorkerConfig, implementation: []const u8, executable: []const u8, journal: []const u8, address: std.Io.net.IpAddress, verify: @import("remote_link.zig").Verify, stop_flag: *std.atomic.Value(bool), mcp: ?*const @import("mcp_profiles.zig").Profiles) !void {
+    if (config.launcher) |enabled| if (!enabled or config.rexClient == null) return error.InvalidWorkerConfig;
     if (mcp) |p| if (!std.mem.eql(u8, p.config.machineId, config.machineId)) return error.McpHostMismatch;
     const data = try tcp.connect(address);
     defer Native.close(data);
@@ -123,7 +131,7 @@ fn sessionConfigured(native: Native, config: wire.RemoteWorkerConfig, implementa
     const challenge = try wire.parseRemoteWorkerHello(a, bytes);
     defer challenge.deinit();
     const hello = challenge.value;
-    if (!std.mem.eql(u8, hello.hubId, config.hubId) or !std.mem.eql(u8, hello.machineId, config.machineId) or !std.mem.eql(u8, hello.implementation, implementation) or !std.mem.eql(wire.WorkerCapability, hello.capabilities, capabilitiesWithMcp(config.rexClient, mcp != null)) or !trust.sameRexClient(hello.rexClient, config.rexClient)) return error.RegistrationMismatch;
+    if (!std.mem.eql(u8, hello.hubId, config.hubId) or !std.mem.eql(u8, hello.machineId, config.machineId) or !std.mem.eql(u8, hello.implementation, implementation) or !std.mem.eql(wire.WorkerCapability, hello.capabilities, configuredCapabilities(config.rexClient, mcp != null, config.launcher orelse false)) or !trust.sameRexClient(hello.rexClient, config.rexClient)) return error.RegistrationMismatch;
     try tcp.send(native.io, data, hello);
     var header: wire.RemoteLinkHeader = .{ .version = 1, .channel = .data, .hubId = config.hubId, .machineId = config.machineId, .connectionId = hello.connectionId };
     try ack(native.io, data, header);
@@ -171,7 +179,7 @@ fn sessionConfigured(native: Native, config: wire.RemoteWorkerConfig, implementa
     var relay: Relay = undefined;
     var relay_thread: ?std.Thread = null;
     if (clients) |fd| {
-        relay = .{ .native = native, .socket = fd, .listener = listener.?.server, .local_path = config.rexClient.?.socket, .local_inode = listener.?.inode, .generation = hello.connectionId, .stopping = &controller.done, .data = data, .control = control };
+        relay = .{ .native = native, .socket = fd, .listener = listener.?.server, .local_path = config.rexClient.?.socket, .local_inode = listener.?.inode, .generation = hello.connectionId, .launcher = config.launcher orelse false, .stopping = &controller.done, .data = data, .control = control };
         relay_thread = try std.Thread.spawn(.{}, Relay.serve, .{&relay});
         listener_owned = false;
     }
@@ -183,6 +191,7 @@ fn sessionConfigured(native: Native, config: wire.RemoteWorkerConfig, implementa
     input_owned = false;
     output_owned = false;
     local_owned = false;
+    if (config.launcher orelse false) std.Io.File.stderr().writeStreamingAll(native.io, "deck: approved launcher relay enabled (list/create/open/inspect only)\n") catch {};
     std.Io.File.stderr().writeStreamingAll(native.io, if (mcp != null) (if (clients != null) "deck: worker connected (files/bash/MCP/Rex task relay; no Pi runtime)\n" else "deck: worker connected (files/bash/MCP; no Pi runtime)\n") else if (clients != null) "deck: worker connected (files/bash/Rex task relay; no Pi runtime)\n" else "deck: worker connected (files/bash only; no Pi runtime)\n") catch {};
     @import("worker.zig").serveRemoteMcp(native, input, output, pipe[0], journal, config.machineId, config.rexClient, mcp);
 }
@@ -213,12 +222,14 @@ pub fn run(native: Native, args: []const []const u8) !void {
         try std.Io.File.stdout().writeStreamingAll(native.io,
             \\deck-worker (also available as deck worker):
             \\  peer --tailscale ABSOLUTE_EXECUTABLE
-            \\  init --directory NEW_ABSOLUTE_DIRECTORY --hub-id HUB_ID --hub-address TAILSCALE_IP:PORT --hub-node STABLE_NODE_ID --hub-user DECIMAL_USER_ID [--client /absolute/deck] [--mcp /private/profiles.json]
+            \\  init --directory NEW_ABSOLUTE_DIRECTORY --hub-id HUB_ID --hub-address TAILSCALE_IP:PORT --hub-node STABLE_NODE_ID --hub-user DECIMAL_USER_ID [--client /absolute/deck] [--mcp /private/profiles.json] [--launcher]
             \\  identity|run --directory ABSOLUTE_DIRECTORY --tailscale ABSOLUTE_EXECUTABLE
             \\Explicit peer/implementation approval is required. Default: files/bash only.
             \\--client opts into Rex (local Unix, API 8/10) and a private task relay socket.
             \\Approve its exact client path/socket and files,bash,rex capabilities on the hub.
             \\--mcp opts into native stdio MCP; approve files,bash,mcp (or files,bash,rex,mcp).
+            \\--launcher requires --client; explicitly approve launcher as the final capability.
+            \\Full-client entry: deck agent --launch-from ABS_WORKER_DIRECTORY (not a hub login).
             \\deck-worker mcp export --config /private/profiles.json
             \\deck-worker mcp probe --config /private/profiles.json --profile ID [--workspace ABS]
             \\No Pi store, inference, provider login, inbound TCP listener, or effect replay.
@@ -235,13 +246,21 @@ pub fn run(native: Native, args: []const []const u8) !void {
     var user: ?[]const u8 = null;
     var client: ?[]const u8 = null;
     var mcp_path: ?[]const u8 = null;
+    var launcher = false;
     var i: usize = 1;
-    while (i < args.len) : (i += 2) {
+    while (i < args.len) : (i += 1) {
+        if (std.mem.eql(u8, args[i], "--launcher")) {
+            if (launcher) return error.InvalidArguments;
+            launcher = true;
+            continue;
+        }
         if (i + 1 == args.len or args[i + 1].len == 0) return error.InvalidArguments;
         const slot = if (std.mem.eql(u8, args[i], "--directory")) &directory else if (std.mem.eql(u8, args[i], "--tailscale")) &executable else if (std.mem.eql(u8, args[i], "--hub-id")) &hub_id else if (std.mem.eql(u8, args[i], "--hub-address")) &hub_address else if (std.mem.eql(u8, args[i], "--hub-node")) &node else if (std.mem.eql(u8, args[i], "--hub-user")) &user else if (std.mem.eql(u8, args[i], "--client")) &client else if (std.mem.eql(u8, args[i], "--mcp")) &mcp_path else return error.InvalidArguments;
         if (slot.* != null) return error.InvalidArguments;
         slot.* = args[i + 1];
+        i += 1;
     }
+    if (launcher and (!std.mem.eql(u8, args[0], "init") or client == null)) return error.InvalidArguments;
     if (std.mem.eql(u8, args[0], "peer")) {
         if (directory != null or hub_id != null or hub_address != null or node != null or user != null or client != null or mcp_path != null) return error.InvalidArguments;
         const identity = try tailscale.localPeer(native, a, executable orelse return error.InvalidArguments);
@@ -265,7 +284,7 @@ pub fn run(native: Native, args: []const []const u8) !void {
         var random: [16]u8 = undefined;
         native.io.random(&random);
         const machine = std.fmt.bytesToHex(random, .lower);
-        const config: wire.RemoteWorkerConfig = .{ .version = 1, .machineId = &machine, .hubId = hub_id.?, .hubAddress = hub_address.?, .hubPeer = .{ .nodeId = node.?, .userId = user.? }, .rexClient = if (client) |c| .{ .executable = c, .socket = client_socket } else null, .mcp = mcp_path };
+        const config: wire.RemoteWorkerConfig = .{ .version = 1, .machineId = &machine, .hubId = hub_id.?, .hubAddress = hub_address.?, .hubPeer = .{ .nodeId = node.?, .userId = user.? }, .rexClient = if (client) |c| .{ .executable = c, .socket = client_socket } else null, .mcp = mcp_path, .launcher = if (launcher) true else null };
         if (mcp_path) |p| if (!@import("mcp_profiles.zig").absolute(p)) return error.InvalidArguments;
         if (client) |c| {
             try tailscale.validateExecutable(native, c);
@@ -316,7 +335,7 @@ pub fn run(native: Native, args: []const []const u8) !void {
     if (std.mem.eql(u8, args[0], "identity")) {
         const peer = try tailscale.localPeer(native, a, cli);
         defer peer.deinit();
-        const output = try std.json.Stringify.valueAlloc(a, wire.RemoteHost{ .machineId = config.value.machineId, .peer = peer.value, .client = false, .implementation = &implementation, .capabilities = capabilitiesWithMcp(config.value.rexClient, mcp != null), .rexClient = config.value.rexClient }, .{});
+        const output = try std.json.Stringify.valueAlloc(a, wire.RemoteHost{ .machineId = config.value.machineId, .peer = peer.value, .client = false, .implementation = &implementation, .capabilities = configuredCapabilities(config.value.rexClient, mcp != null, config.value.launcher orelse false), .rexClient = config.value.rexClient }, .{});
         defer a.free(output);
         try std.Io.File.stdout().writeStreamingAll(native.io, output);
         try std.Io.File.stdout().writeStreamingAll(native.io, "\n");

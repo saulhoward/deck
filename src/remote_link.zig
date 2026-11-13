@@ -121,6 +121,7 @@ pub const Link = struct {
         for ([_]tcp.fd_t{ self.input, self.output, self.control, self.listener.socket.handle }) |fd| try tcp.nonblock(fd, true);
         var gate = trust.Gate.init(io, self.registry);
         var client_relay: ?relay.Hub = if (self.clients) |pipes| try relay.Hub.init(pipes) else null;
+        if (client_relay) |*r| r.launcher = std.mem.indexOfScalar(wire.WorkerCapability, self.registry.hosts[self.index].capabilities.?, .launcher) != null;
         defer if (client_relay) |*r| r.deinit();
         var connection: ?Connection = null;
         defer if (connection) |c| c.close();

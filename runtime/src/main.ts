@@ -61,7 +61,7 @@ async function main() {
         })();
       }
     });
-    for (const host of routes?.hosts ?? []) if (host.rexClient) clients.push(serveWorkerClients(runtime, host.machineId, host.rexClient, host.clientReadFd!, host.clientWriteFd!));
+    for (const host of routes?.hosts ?? []) if (host.rexClient) clients.push(serveWorkerClients(runtime, host.machineId, host.rexClient, host.clientReadFd!, host.clientWriteFd!, host.launcher === true));
     await serveIpc(runtime, process.stdin, process.stdout, provider.login);
   } finally { await shutdown(); }
 }

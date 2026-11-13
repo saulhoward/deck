@@ -36,6 +36,9 @@ const Fixture = struct {
         return initCapabilities(a, client, false);
     }
     fn initCapabilities(a: std.mem.Allocator, client: ?wire.WorkerRexClient, mcp: bool) !Fixture {
+        return initLauncher(a, client, mcp, false, "hub");
+    }
+    fn initLauncher(a: std.mem.Allocator, client: ?wire.WorkerRexClient, mcp: bool, launcher: bool, hub_id: []const u8) !Fixture {
         tcp.ignorePipe();
         const address = try std.Io.net.IpAddress.parse("127.0.0.1", 0);
         const listener = try address.listen(io, .{ .reuse_address = true });
@@ -45,9 +48,9 @@ const Fixture = struct {
         const client_requests = if (client != null) try Native.pipe() else null;
         const client_replies = if (client != null) try Native.pipe() else null;
         const hosts = try a.alloc(wire.RemoteHost, 1);
-        hosts[0] = .{ .machineId = machine, .peer = peer, .client = false, .implementation = implementation, .capabilities = worker.capabilitiesWithMcp(client, mcp), .rexClient = client };
+        hosts[0] = .{ .machineId = machine, .peer = peer, .client = false, .implementation = implementation, .capabilities = worker.configuredCapabilities(client, mcp, launcher), .rexClient = client };
         const link = try a.create(Link);
-        link.* = .{ .native = Native.testing(), .registry = .{ .version = 1, .hubId = "hub", .hosts = hosts }, .index = 0, .tailscale = "test-only", .listener = listener, .verify = verified, .input = requests[0], .output = response[1], .control = control[0], .clients = if (client_requests) |r| .{ .output = r[1], .input = client_replies.?[0] } else null };
+        link.* = .{ .native = Native.testing(), .registry = .{ .version = 1, .hubId = hub_id, .hosts = hosts }, .index = 0, .tailscale = "test-only", .listener = listener, .verify = verified, .input = requests[0], .output = response[1], .control = control[0], .clients = if (client_requests) |r| .{ .output = r[1], .input = client_replies.?[0] } else null };
         const thread = try std.Thread.spawn(.{}, Link.serve, .{link});
         try tcp.nonblock(response[0], true);
         if (client_requests) |r| try tcp.nonblock(r[0], true);
@@ -97,8 +100,10 @@ const Runner = struct {
     client: ?wire.WorkerRexClient = null,
     hub_id: []const u8 = "hub",
     mcp: ?[]const u8 = null,
+    launcher: bool = false,
+    native: ?Native = null,
     fn run(self: *Runner) void {
-        worker.session(Native.testing(), .{ .version = 1, .hubId = self.hub_id, .machineId = machine, .hubPeer = peer, .hubAddress = "test-injected-address", .rexClient = self.client, .mcp = self.mcp }, implementation, "test-only", self.journal, self.address, verified, &self.stop) catch |err| {
+        worker.session(self.native orelse Native.testing(), .{ .version = 1, .hubId = self.hub_id, .machineId = machine, .hubPeer = peer, .hubAddress = "test-injected-address", .rexClient = self.client, .mcp = self.mcp, .launcher = if (self.launcher) true else null }, implementation, "test-only", self.journal, self.address, verified, &self.stop) catch |err| {
             self.error_seen = err;
         };
     }
@@ -671,7 +676,7 @@ test "verified third channel relays exact task calls; detach/reconnect never rep
     defer forged_client.close(io);
     try tcp.send(io, forged_client.socket.handle, wire.TaskClientRequest{ .scope = scope, .body = "{\"read\":true}" });
     var third = (try relayRequest(a, fixture.clients.?[0])).value;
-    third.scope.chatId = "18";
+    third.scope.?.chatId = "18";
     try relayReply(a, fixture.clients.?[1], third, "{\"private\":true}");
     try std.testing.expectError(error.EndOfStream, tcp.readUntil(io, forged_client.socket.handle, &dead, tcp.now(io) + 5000));
 }
@@ -702,7 +707,7 @@ test "opt-in isolated Rex uses inherited client routes through actual verified w
     const hub_id = std.mem.trim(u8, id_bytes, "\r\n");
     try std.testing.expect(wire.validRexUuid(.{ .string = hub_id }));
     const client: wire.WorkerRexClient = .{ .executable = binary, .socket = try std.fs.path.join(a, &.{ root, "worker", "client.sock" }) };
-    const hosts = [_]wire.RemoteHost{.{ .machineId = machine, .peer = peer, .client = false, .implementation = implementation, .capabilities = worker.capabilitiesFor(client), .rexClient = client, .listen = "100.64.0.1:52901" }};
+    const hosts = [_]wire.RemoteHost{.{ .machineId = machine, .peer = peer, .client = false, .implementation = implementation, .capabilities = worker.configuredCapabilities(client, false, true), .rexClient = client, .listen = "100.64.0.1:52901" }};
     const registry = try std.json.Stringify.valueAlloc(a, wire.RemoteRegistry{ .version = 1, .hubId = hub_id, .hosts = &hosts }, .{});
     const file = try dir.createFile(io, "registry.json", .{ .permissions = .fromMode(0o600) });
     try file.writeStreamingAll(io, registry);
@@ -716,7 +721,10 @@ test "opt-in isolated Rex uses inherited client routes through actual verified w
     defer hub.deinit();
     hub.links.items[0].verify = verified;
     try hub.start();
-    var runner: Runner = .{ .address = hub.links.items[0].listener.socket.address, .journal = try std.fs.path.join(a, &.{ root, "ops" }), .client = client, .hub_id = hub_id };
+    var worker_env = try native.environ.createMap(a);
+    try worker_env.put("PATH", try std.fmt.allocPrint(a, "{s}/bin:{s}", .{ root, native.environ.getPosix("PATH") orelse "/usr/bin:/bin" }));
+    const worker_block = try worker_env.createPosixBlock(a, .{});
+    var runner: Runner = .{ .address = hub.links.items[0].listener.socket.address, .journal = try std.fs.path.join(a, &.{ root, "ops" }), .client = client, .hub_id = hub_id, .launcher = true, .native = .{ .io = io, .environ = .{ .block = worker_block } } };
     defer runner.end();
     try runner.start();
     const config = try hub.json();
@@ -767,4 +775,73 @@ test "the worker independently refuses a wrong peer on its third socket before p
     try std.testing.expectEqual(@as(usize, 3), Third.count.load(.monotonic));
     try fixture.send(try fixture.request("1", "/tmp", "write", .{ .path = "must-not-run", .content = "no" }));
     try std.testing.expectEqualStrings("offline", (try fixture.reply()).object.get("code").?.string);
+}
+
+test "launcher opt-in isolates authority on verified relay; exact bytes and late results never replay" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const hub_id = "12345678-1234-4234-8234-123456789abc";
+    for ([_]bool{ false, true }) |approved| {
+        const root = try relayTemp(a);
+        defer std.Io.Dir.cwd().deleteTree(io, root) catch {};
+        const client: wire.WorkerRexClient = .{ .executable = "/bin/echo", .socket = try std.fs.path.join(a, &.{ root, "client.sock" }) };
+        var fixture = try Fixture.initLauncher(a, client, false, approved, hub_id);
+        defer fixture.deinit();
+        var runner: Runner = .{ .address = fixture.address, .journal = root, .client = client, .hub_id = hub_id, .launcher = approved };
+        defer runner.end();
+        try runner.start();
+        const authority: wire.LauncherScope = .{ .hubId = hub_id };
+        const scope: wire.TaskClientScope = .{ .hubId = hub_id, .chatId = "2", .allocationId = hub_id, .blockId = "block:12345678-1234-4234-8234-123456789abc" };
+        const original = " {\"version\":1, \"command\":\"launch_create\", \"args\":{\"title\":\" exact 🧪 title \"}} ";
+        const local = try clientConnect(client.socket);
+        defer local.close(io);
+        try tcp.send(io, local.socket.handle, wire.TaskClientRequest{ .launcher = authority, .body = original });
+        var eof: [1]u8 = undefined;
+        if (!approved) {
+            try std.testing.expectError(error.EndOfStream, tcp.readUntil(io, local.socket.handle, &eof, tcp.now(io) + 5000));
+            var reader: tcp.Reader = .{};
+            defer reader.deinit();
+            try std.testing.expect(try reader.read(io, fixture.clients.?[0]) == null);
+            continue;
+        }
+        const first = try relayRequest(a, fixture.clients.?[0]);
+        try std.testing.expectEqualStrings(original, first.value.body);
+        try std.testing.expect(first.value.scope == null);
+        try std.testing.expectEqualStrings(hub_id, first.value.launcher.?.hubId);
+        for ([_]bool{ false, true }) |oversized| {
+            const bad = try clientConnect(client.socket);
+            defer bad.close(io);
+            const bytes = try a.alloc(u8, 128 * 1024 + 1);
+            @memset(bytes, 'x');
+            const encoded = try std.json.Stringify.valueAlloc(a, wire.TaskClientRequest{ .launcher = authority, .scope = if (oversized) null else scope, .body = if (oversized) bytes else "{}" }, .{});
+            var header: [4]u8 = undefined;
+            std.mem.writeInt(u32, &header, @intCast(encoded.len), .big);
+            try tcp.writeUntil(io, bad.socket.handle, &header, tcp.now(io) + 5000);
+            try tcp.writeUntil(io, bad.socket.handle, encoded, tcp.now(io) + 5000);
+            try std.testing.expectError(error.EndOfStream, tcp.readUntil(io, bad.socket.handle, &eof, tcp.now(io) + 5000));
+        }
+        runner.end();
+        runner.stop.store(false, .release);
+        try runner.start();
+        try relayReply(a, fixture.clients.?[1], first.value, "{\"old\":true}");
+        const next = try clientConnect(client.socket);
+        defer next.close(io);
+        try tcp.send(io, next.socket.handle, wire.TaskClientRequest{ .launcher = authority, .body = "{\"observe\":true}" });
+        const second = try relayRequest(a, fixture.clients.?[0]);
+        try std.testing.expectEqualStrings("{\"observe\":true}", second.value.body);
+        try std.testing.expect(!std.mem.eql(u8, first.value.connectionId, second.value.connectionId));
+        try relayReply(a, fixture.clients.?[1], second.value, "{\"new\":true}");
+        const result = try tcp.receive(io, next.socket.handle);
+        defer tcp.a.free(result);
+        try std.testing.expectEqualStrings("{\"new\":true}", result);
+        const forged_client = try clientConnect(client.socket);
+        defer forged_client.close(io);
+        try tcp.send(io, forged_client.socket.handle, wire.TaskClientRequest{ .launcher = authority, .body = "{}" });
+        var forged = (try relayRequest(a, fixture.clients.?[0])).value;
+        forged.launcher = null;
+        forged.scope = scope;
+        try relayReply(a, fixture.clients.?[1], forged, "{\"private\":true}");
+        try std.testing.expectError(error.EndOfStream, tcp.readUntil(io, forged_client.socket.handle, &eof, tcp.now(io) + 5000));
+    }
 }

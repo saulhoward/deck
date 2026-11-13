@@ -1,12 +1,12 @@
 // Operator registration and handshake claims, not peer authentication. Only the
 // native transport can supply observed socket identity to the connection gate.
 import { isAbsolute } from "node:path";
-import { validWorkerRexClient, type WorkerRexClient, validRemoteRegistry, validRemoteWorkerHello, validTailPeer, type RemoteRegistry, type RemoteWorkerHello, type TailPeer } from "./generated/contracts.js";
+import { validTaskRelayFrame, type TaskRelayFrame, validWorkerRexClient, type WorkerRexClient, validRemoteRegistry, validRemoteWorkerHello, validTailPeer, type RemoteRegistry, type RemoteWorkerHello, type TailPeer } from "./generated/contracts.js";
 export function validPeer(value: unknown): value is TailPeer {
   return validTailPeer(value) && /^(0|[1-9][0-9]*)$/.test(value.userId) && BigInt(value.userId) <= 18446744073709551615n;
 }
 function ordered(values: string[]): boolean {
-  const order = ["files", "bash", "rex", "mcp"]; let previous = -1;
+  const order = ["files", "bash", "rex", "mcp", "launcher"]; let previous = -1;
   for (const value of values) { const index = order.indexOf(value); if (index <= previous) return false; previous = index; }
   return true;
 }
@@ -20,11 +20,15 @@ export function validRegistry(value: unknown): value is RemoteRegistry {
     if (!validPeer(host.peer) || machines.has(host.machineId) || nodes.has(host.peer.nodeId) ||
         (host.implementation === undefined) !== (host.capabilities === undefined) ||
         (!host.client && !host.implementation) || (host.capabilities && !ordered(host.capabilities))) return false;
-    if (host.rexClient && (!validRexClient(host.rexClient) || !host.implementation || !/^files,bash,rex(,mcp)?$/.test(host.capabilities?.join(",") ?? ""))) return false;
+    if (host.capabilities?.includes("launcher") && !host.rexClient) return false;
+    if (host.rexClient && (!validRexClient(host.rexClient) || !host.implementation || !/^files,bash,rex(,mcp)?(,launcher)?$/.test(host.capabilities?.join(",") ?? ""))) return false;
     machines.add(host.machineId); nodes.add(host.peer.nodeId);
   }
   return true;
 }
 export function validHello(value: unknown): value is RemoteWorkerHello {
-  return validRemoteWorkerHello(value) && ordered(value.capabilities) && (!value.rexClient || (validRexClient(value.rexClient) && /^files,bash,rex(,mcp)?$/.test(value.capabilities.join(","))));
+  return validRemoteWorkerHello(value) && ordered(value.capabilities) && (!value.capabilities.includes("launcher") || !!value.rexClient) && (!value.rexClient || (validRexClient(value.rexClient) && /^files,bash,rex(,mcp)?(,launcher)?$/.test(value.capabilities.join(","))));
+}
+export function validWorkerFrame(value: unknown): value is TaskRelayFrame {
+  return validTaskRelayFrame(value) && (value.scope !== undefined) !== (value.launcher !== undefined);
 }

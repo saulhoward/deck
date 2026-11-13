@@ -37,7 +37,7 @@ The order is deliberate: establish task identity/coordination first, prove MCP e
 | 4 | Authorized remote create/open launcher | Remote shell → one hub task → assigned Rex TUI, without general hub authority |
 | 5 | Streamable HTTP and selected service integration | Tested TLS/auth/session/retry contracts; approved real-service evidence |
 
-Phase 0 is accepted for the recorded pair. Phase 1 is implemented with deterministic workflow, recovery and TUI acceptance. Phases 2/3 passed their scoped source/installed and fresh real-machine gates. Phase 4 is next and must repeat real-machine acceptance for its new bootstrap authority rather than treating the earlier runs as proof of that behavior. New hosts/builds still require explicit approval and appropriate acceptance. Do not widen Rex compatibility or production deadlines to make a milestone appear complete.
+Phase 0 is accepted for the recorded pair. Phase 1 is implemented with deterministic workflow, recovery and TUI acceptance. Phases 2/3 passed their scoped source/installed and fresh real-machine gates. Phase 4 passed its source/installed and fresh two-machine bootstrap gates on 2026-11-13; see the [recorded scope and evidence](HISTORY.md#phase-4-remote-launcher). Phase 5 is next, not implicitly authorized by that acceptance. New hosts/builds still require explicit approval and appropriate acceptance. Do not widen Rex compatibility or production deadlines to make a milestone appear complete.
 
 ### First milestone scenario
 
@@ -111,10 +111,16 @@ Use fake models and disposable MCP servers for deterministic acceptance. Real pr
 
 ## Phase 4 — Add the remote create/open launcher
 
+**Status: passed for the recorded scope on 2026-11-13.** Final source/installed tests and fresh two-machine acceptance cover the explicit launcher authority, normal create/open, exact recovery, lost open/startup ACKs, refusals, central mock generation with selected MCP profiles, and cleanup. This is not deployment or live-provider/service acceptance; see [History](HISTORY.md#phase-4-remote-launcher).
+
+The first launcher is an explicit, plain command surface: `deck agent --launch-from ABS_WORKER_DIRECTORY` lists at most 25 scanned conversations per page; `--new JSON --confirm` creates and separately requests opening, `--open ID --confirm` opens an assigned independent task, and `--inspect ID` observes it. `--drafts`, explicit creation `--retry UUID --confirm`, and `--discard UUID --confirm` handle local uncertainty. No implicit cwd/task selection, login or mutation-on-reconnect is permitted.
+
+**Boundary frozen for this slice:** ordered `launcher` capability requires an approved Rex client and an explicit worker `--launcher` opt-in. Launcher and allocation-bound task scopes are mutually exclusive on the existing independently verified client channel; only list/create/open/inspect are available to launcher scope. Approval covers independent tasks assigned to that machine, not children, the main chat or another host; it is an OS-machine permission, not a per-human ACL. Creation IDs are machine-namespaced, briefs/cwd retain existing byte bounds, new tasks start with empty MCP grants, and existing selections remain unchanged. Launcher request bodies are at most 128 KiB inside the existing 1 MiB frame, eight relay slots and unchanged 10-second client/15-second relay fences. Exact drafts are stored privately before mutation; failed open replies are retained for inspection, never automatically retried. There is no new queue, store of execution history or exposed HTTP endpoint.
+
 **Scope:** make starting work from a remote shell convenient without granting an unattached client the task or hub role.
 
-- Define a narrow, explicitly approved launcher permission over the verified worker link. It is separate from allocation-bound task RPC. It may request creation on that worker or opening an authorized task already bound there; it cannot enroll workers, change bindings, access hub chat/login, or become a general command client.
-- Implement the proposed remote `deck agent` workflow: select the configured hub and an existing task, or explicitly confirm a new task's brief/cwd. Set the final flags/prompt contract during this phase. Preserve current local/inspector behavior; never silently infer a task from cwd, labels or `REX_BLOCK`.
+- Provide a narrow, explicitly approved launcher permission over the verified worker link. It is separate from allocation-bound task RPC. It may request creation on that worker or opening an authorized task already bound there; it cannot enroll workers, change bindings, access hub chat/login, or become a general command client.
+- Use the explicit `deck agent --launch-from ...` workflow: select the configured hub and an existing task, or explicitly confirm a new task's brief/cwd. This slice uses a plain CLI with explicit JSON/IDs and `--confirm`, not implicit selection or a new interactive picker. Preserve current local/inspector behavior; never silently infer a task from cwd, labels or `REX_BLOCK`.
 - Reuse durable creation drafts and exact-identity recovery. Obtain creation ACK before the separate best-effort Rex request; a lost open reply never recreates the task. The hub authorizes the allocation and the assigned worker launches the approved task TUI.
 - Require normal pinned hub/task/allocation/block startup before input. Keep bootstrap UI authority and the launched task client's authority separate. A worker link authenticates the approved machine, not a new individual OS-user identity; do not claim a per-human ACL system.
 

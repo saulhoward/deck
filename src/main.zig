@@ -78,6 +78,8 @@ const help =
     \\Rex task clients are allocation-verified and locked to one task.
     \\Direct --task launches are read-only, including plain and one-shot paths.
     \\Remote task clients reuse the verified worker link; no extra login or exposed HTTP.
+    \\Approved remote launcher: deck agent --launch-from ABS_WORKER_DIRECTORY [--help].
+    \\Launcher list/create/open/inspect is separate from task input and hub authority.
     \\Rex uses worker-local Unix endpoints (API 8/10 only). Jobs/child terminals remain future.
     \\
 ;
@@ -317,7 +319,8 @@ fn maintenance(native: Native, allocator: std.mem.Allocator, options: Options) !
 fn launchClient(native: Native, allocator: std.mem.Allocator, args: []const []const u8) !std.process.Child.Term {
     const node_path = try runtime_paths.node(native, allocator);
     defer allocator.free(node_path);
-    const path = try runtime_paths.entry(native, allocator, null, "client.js");
+    const launcher = args.len > 2 and std.mem.eql(u8, args[1], "agent") and std.mem.eql(u8, args[2], "--launch-from");
+    const path = try runtime_paths.entry(native, allocator, null, if (launcher) "launcher-main.js" else "client.js");
     defer allocator.free(path);
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(allocator);
@@ -368,7 +371,8 @@ pub fn main(init: std.process.Init) void {
             if (!std.mem.eql(u8, arg, "--tui") and !std.mem.eql(u8, arg, "--no-tui") and !std.mem.eql(u8, arg, "--login")) i += 1;
         }
     }
-    if (args.len > 1 and (std.mem.eql(u8, args[1], "agent") or std.mem.eql(u8, args[1], "hub"))) {
+    const launcher = args.len > 2 and std.mem.eql(u8, args[1], "agent") and std.mem.eql(u8, args[2], "--launch-from");
+    if (!launcher and args.len > 1 and (std.mem.eql(u8, args[1], "agent") or std.mem.eql(u8, args[1], "hub"))) {
         const interactive = tui.selected(args[2..], std.c.isatty(0) == 1 and std.c.isatty(1) == 1) catch {
             std.debug.print("--tui cannot be combined with --no-tui or --message\n", .{});
             std.process.exit(2);
