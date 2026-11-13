@@ -2,7 +2,7 @@
 import { fstatSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { CompatibilityError, fingerprintImplementation } from "./compatibility.js";
-import { providers } from "./providers.js";
+import { startupProviders } from "./providers.js";
 import { DeckError, DeckRuntime } from "./deck.js";
 import { PipeFiles } from "./host-files.js";
 import { parseRoutes, RoutedFiles } from "./remote-files.js";
@@ -13,11 +13,12 @@ import { serveIpc } from "./ipc.js";
 async function main() {
   const [path, machineId, cwd, descriptor, mode, modelId, readFd, writeFd, controlFd, nativeExecutable, routesJson, mcpCatalogPath] = process.argv.slice(2);
   const lockFd = Number(descriptor);
-  if (!nativeExecutable || !path || !machineId || !cwd || !Number.isSafeInteger(lockFd) || lockFd < 3 || (mode !== "--mock" && mode !== "--chatgpt" && mode !== "--api-key")) throw new Error("Runtime must be launched by deck serve");
+  if (!nativeExecutable || !path || !machineId || !cwd || !Number.isSafeInteger(lockFd) || lockFd < 3 || (mode !== "--mock" && mode !== "--chatgpt" && mode !== "--api-key" && mode !== "--auto")) throw new Error("Runtime must be launched by deck serve");
   if (!fstatSync(lockFd).isFile()) throw new Error("Missing inherited writer lock");
   // Upstream's callback bind override must not expose a public listener.
-  if (mode === "--chatgpt") process.env.PI_OAUTH_CALLBACK_HOST = "127.0.0.1";
-  const provider = providers(mode, join(dirname(path), "auth.json"), machineId, modelId || undefined);
+  process.env.PI_OAUTH_CALLBACK_HOST = "127.0.0.1";
+  const provider = await startupProviders(mode, join(dirname(path), "auth.json"), machineId, modelId || undefined);
+  process.stderr.write(`deck: authentication ${provider.mode === "--mock" ? "mock" : provider.mode === "--api-key" ? "API key (billable)" : "ChatGPT OAuth"}\n`);
   const routes = routesJson ? parseRoutes(routesJson, machineId, [lockFd, Number(readFd), Number(writeFd), Number(controlFd)]) : undefined;
   const local = readFd && writeFd ? new PipeFiles(Number(readFd), Number(writeFd), controlFd ? Number(controlFd) : undefined) : undefined;
   if (routes && !local) throw new Error("Remote routing requires the native launcher");
@@ -44,7 +45,8 @@ async function main() {
       ...(routes ? { expectedHubId: routes.hubId } : {}),
       ...(mcpCatalogPath ? {mcpCatalog:await loadCatalog(mcpCatalogPath,machineId,routes)} : {}),
       models: provider.models, model: provider.model, admissionGuard: provider.guard, validateSavedModels: true,
-      implementation: await fingerprintImplementation({ native: nativeExecutable, entry: process.argv[1]!, mode }),
+      authentication: provider.mode === "--mock" ? "mock" : provider.mode === "--api-key" ? "api_key" : "chatgpt_oauth",
+      implementation: await fingerprintImplementation({ native: nativeExecutable, entry: process.argv[1]!, mode: provider.mode }),
       rexClient: basename(nativeExecutable) === ".deck-wrapped" ? join(dirname(nativeExecutable), "deck") : nativeExecutable,
       binding: { machineId, cwd }, environment: () => undefined, ...(files ? { hostFiles: files } : {}),
     });

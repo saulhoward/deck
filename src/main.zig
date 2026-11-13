@@ -18,13 +18,13 @@ const help =
     \\  deck init [--directory PATH]
     \\  deck backup --output NEW_DIRECTORY [--directory STATE] [--include-credentials]
     \\  deck restore --from BACKUP_DIRECTORY --directory NEW_STATE
-    \\  deck serve [--mock | --api-key] [--model ID] [--port 52800] [--directory PATH]
+    \\  deck serve [--mock] [--model ID] [--port 52800] [--directory PATH]
     \\    [--workers /private/registry.json --tailscale /absolute/path/to/tailscale]
     \\    [--mcp /private/host-profiles.json] [--mcp-catalog /private/catalog.json]
     \\  deck mcp export --config /private/host-profiles.json
     \\  deck mcp probe --config /private/host-profiles.json --profile ID [--workspace ABS]
     \\  deck worker peer|init|identity|run ... (deck worker --help for registration)
-    \\  deck login [--port 52800]
+    \\  deck login openai [--directory PATH] [--port 52800]
     \\  deck rex open|reopen|status|inspect --task CHAT_ID [--port 52800]
     \\    [--rex /path/to/rex] [--server unix:///path/to/socket] [--host-id UUID] [--instance-id UUID]
     \\  deck serve --stdio --mock [--directory PATH] [--runtime PATH]
@@ -60,8 +60,11 @@ const help =
     \\These are ownerless: stopping the caller does not stop target work.
     \\subagent waits for a Pi-owned child answer; caller stop drains ordinary owned work.
     \\Owned child chats can be inspected/stopped, but do not accept direct input.
-    \\Default provider: OpenAI with ChatGPT OAuth; use deck login after serving.
-    \\--api-key explicitly opts into ambient OPENAI_API_KEY (may incur charges).
+    \\Default provider: OPENAI_API_KEY, otherwise stored ChatGPT OAuth.
+    \\serve resolves private ~/.config/deck/.env references using op before locking state.
+    \\Missing credentials refuse startup; run deck login openai (also works offline).
+    \\--api-key is a deprecated alias for default authentication selection.
+    \\API-key authentication may incur charges. No failure-driven auth fallback.
     \\Backup requires the writer to be stopped; it never stops or resumes work.
     \\Restore preserves identity/bindings and refuses existing destinations.
     \\Restoring old state can repeat later external effects; reconcile before serving.
@@ -92,6 +95,7 @@ const Options = struct {
     mock: bool = false,
     port: u16 = 52800,
     api_key: bool = false,
+    credentials_resolved: bool = false,
     model: []const u8 = "",
     mcp: ?[]const u8 = null,
     mcp_catalog: ?[]const u8 = null,
@@ -140,6 +144,8 @@ fn parse(args: []const []const u8) !Options {
             i += 1;
             if (i == args.len or args[i].len == 0) return error.InvalidArguments;
             result.model = args[i];
+        } else if (std.mem.eql(u8, arg, "--credentials-resolved")) {
+            result.credentials_resolved = true;
         } else if (std.mem.eql(u8, arg, "--api-key")) {
             result.api_key = true;
         } else if (std.mem.eql(u8, arg, "--port")) {
@@ -154,6 +160,7 @@ fn parse(args: []const []const u8) !Options {
         } else return error.InvalidArguments;
     }
     if ((result.mcp != null or result.mcp_catalog != null) and (!std.mem.eql(u8, result.command, "serve") or (result.mcp != null and result.mcp_catalog == null))) return error.InvalidArguments;
+    if (result.credentials_resolved and (!std.mem.eql(u8, result.command, "serve") or result.mock)) return error.InvalidArguments;
     if (result.mock and (result.api_key or result.model.len != 0)) return error.InvalidArguments;
     if ((result.workers == null) != (result.tailscale == null) or (result.workers != null and (!std.mem.eql(u8, result.command, "serve") or result.stdio or result.runtime != null))) return error.InvalidArguments;
     return result;
@@ -239,7 +246,7 @@ fn run(native: Native, allocator: std.mem.Allocator, options: Options) !void {
     defer inherited.deinit(allocator);
     try inherited.appendSlice(allocator, &.{ held, .{ .handle = requests[1], .flags = .{ .nonblocking = false } }, .{ .handle = results[0], .flags = .{ .nonblocking = false } }, .{ .handle = controls[1], .flags = .{ .nonblocking = false } } });
     if (remote) |manager| try inherited.appendSlice(allocator, manager.inherit.items);
-    const child_argv = [_][]const u8{ node_path, runtime, database, config.value.machine_id, cwd, descriptor, if (options.mock) "--mock" else if (options.api_key) "--api-key" else "--chatgpt", options.model, result_fd, request_fd, control_fd, native_executable, routes orelse "", options.mcp_catalog orelse "" };
+    const child_argv = [_][]const u8{ node_path, runtime, database, config.value.machine_id, cwd, descriptor, if (options.mock) "--mock" else "--auto", options.model, result_fd, request_fd, control_fd, native_executable, routes orelse "", options.mcp_catalog orelse "" };
     var child = try std.process.spawn(io, .{
         .argv = if (options.mcp_catalog != null) &child_argv else child_argv[0 .. child_argv.len - 1],
         .stdin = if (options.stdio) .inherit else .pipe,
@@ -316,6 +323,65 @@ fn maintenance(native: Native, allocator: std.mem.Allocator, options: Options) !
     }
 }
 
+fn credentialBootstrap(native: Native, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    const node = try runtime_paths.node(native, allocator);
+    defer allocator.free(node);
+    const entry = try runtime_paths.entry(native, allocator, null, "auth-bootstrap-main.js");
+    defer allocator.free(entry);
+    const executable = try std.process.executablePathAlloc(native.io, allocator);
+    defer allocator.free(executable);
+    var argv: std.ArrayList([]const u8) = .empty;
+    defer argv.deinit(allocator);
+    try argv.appendSlice(allocator, &.{ node, entry, "resolve", executable });
+    try argv.appendSlice(allocator, args);
+    return std.process.replace(native.io, .{ .argv = argv.items });
+}
+
+// Login never opens Pi. Taking the same writer lock decides offline versus
+// online; a busy/unreachable hub never authorizes a second credential writer.
+fn login(native: Native, allocator: std.mem.Allocator, args: []const []const u8) !void {
+    var directory: ?[]const u8 = null;
+    var port: []const u8 = "52800";
+    var seen_port = false;
+    var i: usize = if (args.len > 0 and std.mem.eql(u8, args[0], "openai")) 1 else 0;
+    while (i < args.len) : (i += 2) {
+        if (i + 1 >= args.len) return error.InvalidArguments;
+        if (std.mem.eql(u8, args[i], "--directory") and directory == null) {
+            directory = args[i + 1];
+        } else if (std.mem.eql(u8, args[i], "--port") and !seen_port) {
+            if ((try std.fmt.parseInt(u16, args[i + 1], 10)) == 0) return error.InvalidArguments;
+            port = args[i + 1];
+            seen_port = true;
+        } else return error.InvalidArguments;
+    }
+    const path = try state.directory(native, allocator, directory);
+    defer allocator.free(path);
+    var dir = try std.Io.Dir.cwd().openDir(native.io, path, .{});
+    defer dir.close(native.io);
+    const held: ?std.Io.File = state.lock(native.io, dir) catch |err| switch (err) {
+        error.WouldBlock => null,
+        else => return err,
+    };
+    defer if (held) |file| file.close(native.io);
+    const config = try state.load(native.io, allocator, dir);
+    defer config.deinit();
+    const node = try runtime_paths.node(native, allocator);
+    defer allocator.free(node);
+    const entry = try runtime_paths.entry(native, allocator, null, "login-main.js");
+    defer allocator.free(entry);
+    const descriptor = try std.fmt.allocPrint(allocator, "{d}", .{if (held) |file| file.handle else -1});
+    defer allocator.free(descriptor);
+    const inherited: [1]std.Io.File = .{held orelse .{ .handle = -1, .flags = .{ .nonblocking = false } }};
+    // Darwin SETEXEC applies CLOEXEC before addinherit_np. Clear it only at
+    // this quiescent handoff (no worker/tool threads exist); Node alone keeps
+    // the lock, and its subprocess launcher closes non-stdio descriptors.
+    if (held) |file| _ = try Native.fcntl(file.handle, std.posix.F.SETFD, 0);
+    return std.process.replace(native.io, .{
+        .argv = &.{ node, entry, if (held != null) "offline" else "online", path, config.value.machine_id, descriptor, port },
+        .inherit_files = if (held != null) &inherited else &.{},
+    });
+}
+
 fn launchClient(native: Native, allocator: std.mem.Allocator, args: []const []const u8) !std.process.Child.Term {
     const node_path = try runtime_paths.node(native, allocator);
     defer allocator.free(node_path);
@@ -339,6 +405,13 @@ pub fn main(init: std.process.Init) void {
     const allocator = init.gpa;
     const native: Native = .{ .io = init.io, .environ = init.minimal.environ };
     const args = init.minimal.args.toSlice(init.arena.allocator()) catch std.process.exit(1);
+    if (args.len > 1 and std.mem.eql(u8, args[1], "login")) {
+        login(native, allocator, args[2..]) catch |err| {
+            std.debug.print("deck: login unavailable ({s}); check initialized --directory and hub --port\n", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        return;
+    }
     if (args.len > 1 and std.mem.eql(u8, args[1], "worker")) {
         @import("remote_worker.zig").run(native, args[2..]) catch |err| {
             std.debug.print("deck: worker unavailable ({s}); no Pi runtime started\n", .{@errorName(err)});
@@ -399,6 +472,13 @@ pub fn main(init: std.process.Init) void {
         std.Io.File.stderr().writeStreamingAll(init.io, "deck: invalid arguments; use --help\n") catch {};
         std.process.exit(2);
     };
+    if (std.mem.eql(u8, options.command, "serve") and !options.mock and !options.credentials_resolved) {
+        credentialBootstrap(native, allocator, args[1..]) catch {
+            std.debug.print("deck: credential bootstrap unavailable; check installation\n", .{});
+            std.process.exit(1);
+        };
+        return;
+    }
     run(native, allocator, options) catch |err| {
         const message = switch (err) {
             error.RestoreIncomplete => "deck: incomplete restore; leave it offline and restore into a new directory\n",

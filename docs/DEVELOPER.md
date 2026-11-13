@@ -207,7 +207,8 @@ Streamable HTTP follows the stdio/worker milestone: authenticated endpoint ident
 | `runtime/src/instruction-import.ts`, `instructions-view.ts` | Explicit import task and read-only provenance |
 | `runtime/src/progress.ts`, `agent-status.ts` | Bounded live projections from Pi records |
 | `runtime/src/rex-*.ts` | Pi-owned Rex attempts, startup, inspection, and receipt repair |
-| `runtime/src/providers.ts`, `credentials.ts`, `login*.ts` | Provider mode, private credentials, and transient login |
+| `runtime/src/providers.ts`, `credentials.ts`, `login*.ts` | Startup auth selection, private OAuth credentials, online/offline login |
+| `runtime/src/auth-bootstrap*.ts` | Pre-lock 1Password reference validation and process handoff |
 | `runtime/src/compatibility.ts`, `backup*.ts` | Implementation gate and offline backup/restore |
 | `contracts/wire.schema.json` | Authored source for Deck wire shapes |
 | `scripts/generate-contracts.mjs` | Deterministic Zig/TypeScript contract generation |
@@ -693,9 +694,17 @@ Internal reconciliation admits a separate Pi task, reads the original native rec
 
 Inference and model credentials stay on the hub. Production modes register OpenAI chat models or the mock provider, not every installed Pi provider. Validate saved model/provider choices before resume. Mock and real stores are not silently converted.
 
-Default ChatGPT mode requires OAuth and ignores ambient paid keys. API-key mode is an explicit billing choice and rejects stored OAuth. Wrong credential types fail on every read/refresh. Refresh failure preserves prior credentials and does not change auth mode.
+Real-provider startup uses `--auto` internally: a nonempty `OPENAI_API_KEY` wins, otherwise stored ChatGPT OAuth is required. The CLI needs no `--api-key`; that spelling is retained as a deprecated alias, not a force/fallback policy. Empty means absent; unresolved `op://`, whitespace/control-containing and oversized keys refuse rather than selecting OAuth. `startupProviders` validates/resolves authentication (including necessary OAuth refresh, with a 30-second auth-resolution signal) under the native writer lock, before `Harness.open`. Missing credentials report `deck login openai`. Startup and status expose only `api_key`, `chatgpt_oauth` or `mock`, never credential values. The selected mode remains part of the implementation fingerprint.
 
-The private plaintext `auth.json` store serializes reads/writes/refreshes under the one writer. It validates permissions and bounds, then publishes a synced 0600 temporary file by rename. This is not keychain encryption or isolation from the same OS user. Never put tokens in prompts, captures, source, derivations, arguments, or logs.
+API-key mode captures its key once in the auth resolver and uses an empty read-only inference credential store, so an existing OAuth record cannot override it and no key is persisted. OAuth mode exposes no ambient API key to Pi; missing/expired/failed refresh never falls through to one. Stored API-key records are not a supported startup source. A separate OAuth-login models instance shares the same serialized file store, permitting explicit login while API-key inference continues without changing its selected source.
+
+Before state/lock acquisition, real `serve` replaces itself with the client-only `auth-bootstrap-main` helper. It reads fixed `~/.config/deck/.env` via no-follow/nonblocking bounded owned-private regular-file access. Only literal `OPENAI_API_KEY=op://...` references, optional quotes, blank lines and comments are accepted; no plaintext, interpolation, duplicates or arbitrary environment names. Maximum file/reference/key sizes are 16 KiB/4,096 characters/16,384 characters. An absent or empty mapping set does not invoke `op`. Configured mappings replace the corresponding ambient value in a validated environment snapshot; `op run --no-masking` resolves it and launches a handoff helper, which removes `OP_SESSION*`, `OP_SERVICE_ACCOUNT_TOKEN` and `OP_CONNECT_TOKEN` and execs native `serve`. Passing references in the environment instead of `--env-file` prevents a second mutable dotenv read. No resolved value appears in argv or a temporary file. `op` failure never launches the hub or falls back. The internal `--credentials-resolved` flag prevents recursion; it is not an authentication boundary against the local OS user.
+
+The Node 24 exec handoffs occur before inherited native-effect descriptors exist; `op` must not wrap the Pi child (it would not preserve those descriptors). Output masking is disabled to preserve exact framed IPC, not as a claim that output is safe to log. Native shell defaults still remove `OPENAI_API_KEY`; MCP environments remain explicitly empty/pinned. `--mock`, clients, worker startup and OAuth login do not invoke this helper. No live vault access or biometric prompt is implied by fake-executable tests. Unattended service authorization and interactive `op signin` remain operator setup.
+
+`deck login openai [--directory STATE] [--port PORT]` first attempts the native state writer lock. If acquired, native loads the existing machine identity and replaces itself with `login-main`, explicitly inheriting the lock descriptor. At this quiescent handoff CLOEXEC must be cleared for Darwin SETEXEC; Node keeps the lock until exit and closes non-stdio descriptors in its subprocess launches. The auth-only runner never opens a Harness or execution store. If the lock is held, it instead verifies the loopback hub's native startup `machineId`, pins the observed `hubId`, and uses the existing login RPCs; connection loss/mismatch never creates an offline credential writer. This requires a compatible hub advertising `machineId`. An explicit offline login can replace a legacy stored API-key record with OAuth. `SIGINT`/`SIGTERM` cancel the login interaction; the callback remains loopback-bound. Bare `deck login` is retained as an alias.
+
+The private plaintext `auth.json` OAuth store serializes reads/writes/refreshes under the one writer. It validates permissions and bounds, then publishes a synced 0600 temporary file by rename. This is not keychain encryption or isolation from the same OS user. Never put tokens in prompts, captures, source, derivations, arguments, or logs.
 
 Login interactions are transient, not transcript entries. The callback binds `127.0.0.1:1455`. Abandoned flows expire after ten minutes. Views whitelist up to 16 public events and bounded prompt/options data; entered answers and tokens are omitted. The plain client refuses secret-entry prompts.
 
@@ -705,13 +714,13 @@ Login interactions are transient, not transcript entries. The callback binds `12
 
 ### State layout
 
-The default hub root is `~/Library/Application Support/deck` on macOS. Linux uses `$XDG_STATE_HOME/deck`, or `~/.local/state/deck`. `--directory` overrides it. Config and state currently share this root.
+The default hub root is `~/Library/Application Support/deck` on macOS. Linux uses `$XDG_STATE_HOME/deck`, or `~/.local/state/deck`. `--directory` overrides it. Machine config and Pi state share this root; optional 1Password reference mappings live separately at `~/.config/deck/.env`.
 
 ```text
 config.json                    persistent machine identity
 session.sqlite                 Pi conversations and Deck documents
 writer.lock                    shared native/writer exclusion
-auth.json                      optional private provider credentials
+auth.json                      optional private OAuth credentials
 worker/operations/*.json       native acceptance/result receipts
 ```
 
@@ -733,7 +742,7 @@ Both commands hold the shared writer lock and never open the Pi Harness, resume 
 
 Backup format 1 contains `manifest.json` and a `files/` tree. It includes config, a standalone SQLite snapshot, published native receipts, and optional stored credentials. SQLite's backup API incorporates committed WAL without rewriting the source. The synced manifest records path, size, and SHA-256 and is published last by exclusive hard link.
 
-Exclude locks, WAL/SHM sidecars, unpublished temporaries, and known logs. Refuse unknown state files instead of silently omitting possible authoritative data. Workspace files, runtime packages, client drafts, ambient credentials, and Rex objects are outside the backup.
+Exclude locks, WAL/SHM sidecars, unpublished temporaries, and known logs. Refuse unknown state files instead of silently omitting possible authoritative data. Workspace files, runtime packages, client drafts, ambient/1Password credentials and reference mappings, and Rex objects are outside the backup.
 
 Bounds are 10,000 included files, 512 MiB payload, and a 2 MiB manifest. Roots must be private and user-owned. Read paths must be allowed regular files/directories, not symlinks or devices. New files/directories use 0600/0700. Reject source/destination overlap and existing outputs. Trusted parents must already exist. Hard-link support is required.
 

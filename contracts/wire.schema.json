@@ -196,6 +196,7 @@
       "description": "Startup/selection identity. Optional capabilities are not inferred when missing on older peers; current producers emit all capabilities and implementation.",
       "type": "object", "additionalProperties": false,
       "properties": {
+        "authentication": { "enum": ["mock", "api_key", "chatgpt_oauth"] }, "machineId": { "$ref": "#/$defs/ChatListLabel" },
         "implementation": { "$ref": "#/$defs/Sha256" }, "hubId": { "$ref": "#/$defs/TransportId" },
         "taskBrief": { "type": "integer", "minimum": 0, "maximum": 1 }, "hostInventory": { "type": "integer", "minimum": 0, "maximum": 1 }, "modelSettings": { "type": "integer", "minimum": 0, "maximum": 1 }, "hubGuard": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexStartup": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexOpen": { "type": "integer", "minimum": 0, "maximum": 1 },
         "mainChatId": { "$ref": "#/$defs/PiId" }, "chatId": { "$ref": "#/$defs/PiId" }, "binding": { "$ref": "#/$defs/StatusBinding" },

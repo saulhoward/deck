@@ -18,6 +18,7 @@ export async function loginClient(command: (name: string, args?: Record<string, 
   let cancelled = false; let completed = false; let failure: Error | undefined;
   const cancel = () => { cancelled = true; pending?.abort.abort(); };
   process.once("SIGINT", cancel);
+  process.once("SIGTERM", cancel);
   editor.once("SIGINT", cancel);
   editor.once("close", cancel);
   try {
@@ -62,7 +63,7 @@ export async function loginClient(command: (name: string, args?: Record<string, 
     }
     throw new Error("Sign-in cancelled");
   } finally {
-    pending?.abort.abort(); editor.close(); process.off("SIGINT", cancel);
+    pending?.abort.abort(); editor.close(); process.off("SIGINT", cancel); process.off("SIGTERM", cancel);
     if (!completed) await command("login_cancel", { loginId: requestId }).catch(() => {});
   }
 }

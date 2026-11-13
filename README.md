@@ -258,35 +258,48 @@ Deck does not load this file automatically. The import starts no inference and r
 
 ## Connect a provider
 
-Use separate state directories for mock, ChatGPT, and API-key testing. Deck rejects incompatible saved provider choices rather than silently converting them.
+`deck serve` selects authentication at startup: **environment API key first, otherwise saved ChatGPT OAuth**. No `--api-key` flag is needed (the old flag remains a deprecated alias for the default selection). API keys may incur charges. The startup message and `/status` identify the selected method. Authentication does not switch after a request fails, and changes to credentials/configuration do not switch a running hub's method. Use separate state directories for mock and real-provider testing; change builds/authentication methods only after work is drained.
 
-### ChatGPT mode
+### 1Password API keys
 
-With `deck` installed and your workspace path selected:
+Install `op` separately and enable its desktop-app integration, or authenticate it from the terminal. Create a private `~/.config/deck/.env` containing **references only**:
+
+```dotenv
+OPENAI_API_KEY="op://deck/local-openai-key/credential"
+```
+
+Use directory mode `0700` and file mode `0600`. Deck accepts blank lines, comments, and this one mapping with optional single/double quotes; no plaintext values, shell expansion, interpolation, extra variables or final-component symlinks. The file is bounded to 16 KiB. The path is fixed under HOME on both macOS and Linux, independent of the hub's `--directory`.
 
 ```sh
 deck init
 deck serve --workspace /absolute/path/to/project
 # In another terminal:
-deck login
-deck agent
+deck hub
 ```
 
-The hub drives OpenAI's ChatGPT OAuth flow. Open the displayed URL and follow its prompts. Credentials stay on the hub. Default mode does not fall back to an ambient paid API key.
+Before opening state, the server bootstrap validates the file and passes its reference snapshot to `op run`. This is the reference-environment equivalent of `op run --env-file=... -- deck serve`: passing the validated snapshot avoids a second mutable dotenv read and arbitrary environment-variable injection. Configured references override an ambient key. Missing `op`, denied authentication or failed resolution stops startup; none silently falls back to OAuth. With no mappings, an existing `OPENAI_API_KEY` is used directly, otherwise stored OAuth is selected. Blank/comment-only files disable lookup. `--mock`, clients, workers and login never perform this lookup.
 
-**Live ChatGPT login, account access, and refresh are not yet verified.** Automated tests use fake providers. A user previously reported a successful live API-key smoke test; see [History](docs/HISTORY.md#manual-evidence).
+Biometric authorization depends on 1Password desktop integration and the supported terminal/session. A headless Linux/Rex terminal may need an explicit `op signin` first; Deck cannot guarantee an automatic prompt. Unattended services need a separately provisioned, narrowly scoped 1Password service account or Connect setup—not a GUI prompt. `op` is not bundled into Deck. Its session/service/Connect tokens are stripped before the hub launches. Service managers must supervise the process tree: an `op` supervisor exiting is not proof that the Pi writer has drained.
 
-### Paid API-key mode
+Resolved keys remain in process environment/memory, not Deck's credential file or request arguments. `op run --no-masking` is used because output rewriting can corrupt framed `--stdio` traffic; **output is not secret-redacted**. Tools still have OS-user authority. This mechanism handles the OpenAI model key, not MCP profile credentials or OAuth refresh tokens.
 
-Supply `OPENAI_API_KEY` securely in the hub environment, not in command arguments or chat. Then use a separate state directory:
+### ChatGPT OAuth login
+
+With no environment key or active 1Password mapping:
 
 ```sh
-deck init --directory "$HOME/.local/state/deck-api"
-deck serve --api-key --model gpt-4o-mini \
-  --directory "$HOME/.local/state/deck-api" --workspace /absolute/path/to/project
+deck init
+deck login openai
+deck serve --workspace /absolute/path/to/project
+# In another terminal:
+deck hub
 ```
 
-This mode can incur charges. Do not run `deck login` for an API-key hub. Deck does not silently exchange OAuth and API-key credentials.
+`deck login openai` works while the hub is stopped: it holds the state writer lock, runs only the OAuth interaction, and saves private `auth.json` credentials without opening Pi or starting agent work. If the state already has a writer, it delegates to the running hub after verifying its machine/hub identity. Use the same `--directory` and, for a running hub, `--port`; an unreachable or mismatched hub never authorizes an offline fallback. Bare `deck login` remains an alias.
+
+Login can also save OAuth while API-key authentication is active, but does not switch the running hub. Remove the environment key and comment/remove its 1Password mapping, drain work, then restart to select OAuth. Missing credentials or failed OAuth refresh stops startup and directs you to `deck login openai`. Stored legacy API-key records are no longer an authentication source.
+
+**Live biometric/1Password, ChatGPT account login and refresh are not verified by these automated checks.** Tests use a fake `op` executable and fake OAuth providers; no real vault or provider is accessed. A user previously reported a live API-key smoke test; see [History](docs/HISTORY.md#manual-evidence).
 
 ### Model and thinking settings
 

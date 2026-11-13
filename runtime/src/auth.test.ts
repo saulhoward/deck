@@ -120,7 +120,7 @@ test("real-provider runtime saves concrete models and refuses unconfigured admis
   });
 });
 
-test("default ChatGPT guard rejects API credentials; explicit key mode rejects stored OAuth", async () => {
+test("OAuth mode rejects stored API credentials; key mode never reads stored OAuth", async () => {
   await fixture(async (store, path) => {
     const chatgpt = providers("--chatgpt", path, "machine");
     await assert.rejects(chatgpt.guard(), { code: "auth_required" });
@@ -131,7 +131,7 @@ test("default ChatGPT guard rejects API credentials; explicit key mode rejects s
     await chatgpt.guard();
     const keyMode = providers("--api-key", path, "machine");
     await assert.rejects(keyMode.guard(), { code: "auth_required" });
-    await assert.rejects(keyMode.models.getAuth("openai"));
+    assert.equal(await keyMode.models.getAuth("openai"), undefined);
     assert.throws(() => providers("--chatgpt", path, "machine", "not-a-model"), { code: "invalid" });
   });
 });

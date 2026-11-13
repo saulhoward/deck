@@ -74,6 +74,7 @@ export type RuntimeOptions = {
   rexClient?: string;
   admissionGuard?: () => Promise<void>;
   validateSavedModels?: boolean;
+  authentication?: "mock" | "api_key" | "chatgpt_oauth";
   // Trusted embedded callers identify injected code; production main fingerprints
   // the actual runtime/dependency closure, Node and native executable.
   implementation?: string;
@@ -89,7 +90,7 @@ export class DeckRuntime {
     return this.serial(async () => { const chat = await this.chat(id); void chat.abort(context).catch(() => { process.stderr.write("deck runtime: stop failed; inspect activity\n"); }); });
   }
   private readonly inspector: RexInspector;
-  private constructor(readonly harness: Harness, readonly main: Conversation, private readonly guard: () => Promise<void>, readonly localFiles: boolean, readonly hubId: string, readonly implementation: string, private readonly instructionTask: ReturnType<typeof instructionImport>["task"], private readonly rexTask: ReturnType<typeof rexAllocation>["task"], private readonly reconcileTask: ReturnType<typeof rexReconciliation>["task"], private readonly models: Models, private readonly defaultModel: ModelRef, private readonly host?: HostFiles, readonly rexClient?: string, private readonly localMachineId?: string, private readonly mcpCatalogValue: McpCatalog = { version: 1, profiles: [] }, private readonly mcpInstalled: ReturnType<typeof mcpExtensions> = []) { this.inspector = new RexInspector(this, host); }
+  private constructor(readonly harness: Harness, readonly main: Conversation, private readonly guard: () => Promise<void>, readonly localFiles: boolean, readonly hubId: string, readonly implementation: string, private readonly instructionTask: ReturnType<typeof instructionImport>["task"], private readonly rexTask: ReturnType<typeof rexAllocation>["task"], private readonly reconcileTask: ReturnType<typeof rexReconciliation>["task"], private readonly models: Models, private readonly defaultModel: ModelRef, private readonly host?: HostFiles, readonly rexClient?: string, readonly localMachineId?: string, private readonly mcpCatalogValue: McpCatalog = { version: 1, profiles: [] }, private readonly mcpInstalled: ReturnType<typeof mcpExtensions> = [], readonly authentication?: RuntimeOptions["authentication"]) { this.inspector = new RexInspector(this, host); }
 
   static async open(path: string, options: RuntimeOptions): Promise<DeckRuntime> {
     let runtime: DeckRuntime | undefined;
@@ -169,7 +170,7 @@ export class DeckRuntime {
       }
       const hubId = await harness.commit(async (tx) => (await tx.doc(Identity)).id, context);
       // Bind Deck tool callbacks before recovered Pi tool tasks can run.
-      runtime = new DeckRuntime(harness, main, options.admissionGuard ?? (async () => {}), !!options.hostFiles, hubId, implementation, importer.task, rex.task, reconciler.task, options.models, { provider: options.model.provider, modelId: options.model.modelId }, options.hostFiles, options.rexClient, options.binding.machineId, catalog, installed);
+      runtime = new DeckRuntime(harness, main, options.admissionGuard ?? (async () => {}), !!options.hostFiles, hubId, implementation, importer.task, rex.task, reconciler.task, options.models, { provider: options.model.provider, modelId: options.model.modelId }, options.hostFiles, options.rexClient, options.binding.machineId, catalog, installed, options.authentication);
       harness.resume();
       return runtime;
     } catch (error) {
