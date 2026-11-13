@@ -27,7 +27,7 @@ These documents distinguish current behavior from the target design. A local bui
 
 Assigned-host task clients have isolated tests and a recorded two-machine Darwin arm64 acceptance run. That run used disposable registrations and mock providers, not a permanent service deployment. **Phase 1 is implemented:** `deck hub`, creation-time task briefs, grouped inspection, registered-host selection and explicit task-to-hub messaging. Native stdio MCP and explicit per-task profiles are implemented, with source/installed tests and [fresh two-machine MCP acceptance](docs/HISTORY.md#mcp-two-machine-acceptance) on the recorded Darwin arm64 pair. The explicitly approved remote bootstrap launcher is implemented, with [fresh Phase 4 acceptance](docs/HISTORY.md#phase-4-remote-launcher). `deck agent` remains compatible; bare `deck agent` on another machine still does not create a remote task or Rex allocation.
 
-Named interactive child terminals and captured, headless scheduled jobs remain later goals. Jobs will reuse their task/chat, with distinct per-run admission identities and captured file settings; jobs and their children will never allocate Rex terminals. See the [target architecture](docs/DEVELOPER.md#target-interactive-and-scheduled-architecture), [MCP boundary](docs/DEVELOPER.md#target-native-mcp-tools), and [phased plan](docs/ROADMAP.md#next-implementation-sequence). The instructions below describe what works now.
+Interactive child terminals and captured, headless scheduled jobs remain later goals. Jobs will reuse their task/chat, with distinct per-run admission identities and captured file settings; jobs and their children will never allocate Rex terminals. See the [target architecture](docs/DEVELOPER.md#target-interactive-and-scheduled-architecture), [MCP boundary](docs/DEVELOPER.md#target-native-mcp-tools), and [phased plan](docs/ROADMAP.md#next-implementation-sequence). The instructions below describe what works now.
 
 ## Current workflow
 
@@ -79,6 +79,8 @@ Interactive terminals use the TUI by default. The hub has teal status bars; Rex 
 ```sh
 deck hub --task CHAT_ID
 ```
+
+Every task, child agent, and the hub agent has a stored `agentName`, separate from its title and numeric chat ID. The TUI uses this name instead of **assistant** above answers and shows it in the task picker. Names such as `wintermute`, `glasscut`, and `staticdrift` are unique within the hub's store and survive retries, restarts, and changes to the naming algorithm. The first algorithm combines two word banks; after its 100 pairs, it adds numeric suffixes such as `wintermute-2`. Existing tasks receive names on upgrade before work resumes. Names are labels, not routing or authorization identifiers.
 
 In the hub, `/tasks` opens the task picker. It groups parents and children within each bounded scan page; parent IDs can reference another page. Saved binding, sampled connection/activity and historical Rex allocation are separate rows. Offline tasks remain visible. None of these observations is an open/completed task lifecycle. Move with `j/k` or arrows and press Enter to inspect. Use `n` for the next page, `g` for the first page, and Esc to close. `/hub` returns to the hub chat. Inspection cannot edit, send, retry/discard task drafts, stop, or change task settings. Saved task requests remain untouched. Use `/rex open` to participate in its Rex client.
 

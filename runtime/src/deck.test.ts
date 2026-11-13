@@ -45,7 +45,8 @@ test("chat discovery pages canonical Pi records, preserves offline bindings and 
     assert.deepEqual(page1.items.map((chat) => chat.chatId), [String(runtime.main.id), String(first.id)]);
     assert.equal(page1.next, String(first.id)); assert.equal(validDiscoveryPage(page1, { limit: 2 }), true);
     const page2 = await runtime.listChats({ limit: 2, after: page1.next! });
-    assert.deepEqual(page2.items, [{ chatId: String(offline.id), kind: "task", title: "Offline task", machineId: "offline-worker", cwd: "/saved/work" }]);
+    const named = await runtime.harness.snapshot(ChatDoc, offline.id, context);
+    assert.deepEqual(page2.items, [{ chatId: String(offline.id), kind: "task", title: "Offline task", machineId: "offline-worker", cwd: "/saved/work", agentName: named!.agentName, agentNameAlgorithm: named!.agentNameAlgorithm }]);
     assert.equal(await runtime.harness.snapshot(ChatDoc, unmanaged.id, context), undefined);
     assert.equal(validDiscoveryPage(page2, { limit: 2, after: page1.next }), true);
     const sparse = await runtime.listChats({ limit: 1, after: String(first.id) });

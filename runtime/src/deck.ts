@@ -32,7 +32,8 @@ import { validHosts } from "./host-inventory.js";
 import { briefFields, briefInstructions, validBriefBinding } from "./task-brief.js";
 import { validChain, type MessageChain } from "./message-causality.js";
 import { validMachineIdentity, type TaskBrief, type HostInventory } from "./generated/contracts.js";
-type Chat = { kind: "main" | "task" | "subagent"; title: string; machineId: string; cwd: string; parentChatId?: string; ownerTaskId?: string; brief?: TaskBrief };
+import { assignAgentName, agentNameFields, type AgentNameMetadata } from "./agent-names.js";
+type Chat = AgentNameMetadata & { kind: "main" | "task" | "subagent"; title: string; machineId: string; cwd: string; parentChatId?: string; ownerTaskId?: string; brief?: TaskBrief };
 export const ChatDoc = defineDoc<Chat>({
   kind: "deck.chat", version: 1, scope: "conversation", history: "latest", fork: "initial",
   initial: () => ({ kind: "main", title: "Main", machineId: "", cwd: "" }), checkpointWhen: () => true,
@@ -137,8 +138,24 @@ export class DeckRuntime {
       const initialModel = options.models.getModel(options.model.provider, options.model.modelId);
       const main = await harness.root(context, {
         agent: { model: options.model, thinkingLevel: initialModel ? clampThinkingLevel(initialModel, "medium") : "medium", cwd: options.binding.cwd },
-        init: async (tx, id) => { Object.assign(await tx.doc(ChatDoc, id), options.binding); },
+        init: async (tx, id) => {
+          const metadata = await tx.doc(ChatDoc, id);
+          Object.assign(metadata, { machineId: options.binding.machineId, cwd: options.binding.cwd });
+          await assignAgentName(tx, id, metadata);
+        },
       });
+      // Upgrade Deck conversations before recovered work resumes. Do not create
+      // Deck metadata for unmanaged Pi conversations or rewrite history/receipts.
+      let namesCursor: Cursor | undefined;
+      do {
+        const page = await harness.commit(tx => tx.scanConversations({ order: "ascending" }, 100, namesCursor), context);
+        for (const record of page.items) {
+          if (await harness.snapshot(ChatDoc, record.id, context)) {
+            await harness.commit(async tx => assignAgentName(tx, record.id, await tx.doc(ChatDoc, record.id)), context);
+          }
+        }
+        namesCursor = page.next;
+      } while (namesCursor);
       if (options.validateSavedModels) {
         let cursor: Cursor | undefined;
         do {
@@ -194,7 +211,7 @@ export class DeckRuntime {
         try { const activity = await this.activity(String(record.id)); observation.activity = activity.busy || activity.queued > 0 ? "busy" : "idle"; } catch { /* Unknown is not idle. */ }
         try { observation.rexState = (await this.terminalStatus(String(record.id))).status; } catch { /* Saved allocation observation only, not terminal health. */ }
       }
-      if (metadata) items.push({ ...observation, chatId: String(record.id), kind: metadata.kind, title: metadata.title, machineId: metadata.machineId, cwd: metadata.cwd, ...(metadata.parentChatId ? { parentChatId: metadata.parentChatId } : {}), ...(metadata.ownerTaskId ? { ownerTaskId: metadata.ownerTaskId } : {}), ...(metadata.brief ? { brief: metadata.brief } : {}) });
+      if (metadata) items.push({ ...observation, ...agentNameFields(metadata), chatId: String(record.id), kind: metadata.kind, title: metadata.title, machineId: metadata.machineId, cwd: metadata.cwd, ...(metadata.parentChatId ? { parentChatId: metadata.parentChatId } : {}), ...(metadata.ownerTaskId ? { ownerTaskId: metadata.ownerTaskId } : {}), ...(metadata.brief ? { brief: metadata.brief } : {}) });
     }
     return { items, ...(page.next ? { next: String(page.items.at(-1)!.id) } : {}) };
   }
@@ -285,7 +302,9 @@ export class DeckRuntime {
         ownership: { kind: "ownerless" },
         agent: { ...(agent.model ? { model: agent.model } : {}), thinkingLevel: agent.thinkingLevel, cwd: binding.cwd, ...(hasBrief ? { instructions: briefInstructions(title, brief) } : {}) },
         init: async (tx, id) => {
-          Object.assign(await tx.doc(ChatDoc, id), { ...binding, title, kind: "task", ...(hasBrief ? { brief } : {}) });
+          const metadata = await tx.doc(ChatDoc, id);
+          Object.assign(metadata, { machineId: binding.machineId, cwd: binding.cwd, title, kind: "task", ...(hasBrief ? { brief } : {}) });
+          await assignAgentName(tx, id, metadata);
           (await tx.doc(TaskRequest, requestId, hash)).chatId = id;
         },
       }, context);

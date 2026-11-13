@@ -78,7 +78,7 @@ export function taskTools(runtime: () => DeckRuntime) {
         context.abortSignal?.throwIfAborted();
         const page = await runtime().listChats({ includeObservations: true, limit: args.limit ?? 10, ...(args.after === undefined ? {} : { after: args.after }) });
         const items = groupedTasks(page.items).filter((item) => args.query === undefined || item.title.toLowerCase().includes(args.query.toLowerCase())).map((item) => ({
-          chatId: item.chatId, kind: item.kind, activity: item.activity, rexState: item.rexState, title: clipped(item.title, 160), ...(item.brief ? { brief: { problem: clipped(item.brief.problem ?? "", 512), description: clipped(item.brief.description ?? "", 1024) } } : {}), machineId: clipped(item.machineId, 80), cwd: clipped(item.cwd, 256),
+          chatId: item.chatId, kind: item.kind, agentName: item.agentName, agentNameAlgorithm: item.agentNameAlgorithm, activity: item.activity, rexState: item.rexState, title: clipped(item.title, 160), ...(item.brief ? { brief: { problem: clipped(item.brief.problem ?? "", 512), description: clipped(item.brief.description ?? "", 1024) } } : {}), machineId: clipped(item.machineId, 80), cwd: clipped(item.cwd, 256),
           ...(validId(item.parentChatId) ? { parentChatId: item.parentChatId } : {}),
           ...(validId(item.ownerTaskId) ? { ownerTaskId: item.ownerTaskId } : {}),
           ...((item.parentChatId && !validId(item.parentChatId)) || (item.ownerTaskId && !validId(item.ownerTaskId)) ? { linksOmitted: true } : {}),

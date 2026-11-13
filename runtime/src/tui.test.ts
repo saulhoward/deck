@@ -272,17 +272,17 @@ test("real PTY: real isolated mock hub retains input and answer after TUI detach
     for (let i = 0; i < 100; i++) {
       try { status = await hubCommand(port, "status"); break; } catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
     }
-    assert.ok(status, errors);
+    assert.ok(status, errors); assert.match(status.binding.agentName, /^[a-z]+$/);
     await pty(port, local.env, [
       { wait: `${status.model.provider}/${status.model.modelId}` }, { keys: "ihello from real Zig TUI" }, { keys: "\x13" },
-      { wait: "Input admitted" }, { wait: "Deck prototype response" }, { keys: ":q\r" },
+      { wait: "Input admitted" }, { wait: "Deck prototype response" }, { wait: `${status.binding.agentName} · #` }, { keys: ":q\r" },
     ]);
     const history: any = await hubCommand(port, "history", { chatId: status.chatId, limit: 80 }, status.hubId);
     assert.ok(history.items.some((v: any) => v.kind === "deck.input" && v.data.text === "hello from real Zig TUI"));
     assert.ok(history.items.some((v: any) => v.kind === "pi.assistant"));
     const settings: any = await hubCommand(port, "model_settings", { chatId: status.chatId }, status.hubId);
     await pty(port, local.env, [
-      { wait: `${status.model.provider}/${status.model.modelId}` },
+      { wait: `${status.model.provider}/${status.model.modelId}` }, { wait: `${status.binding.agentName} · #` },
       { keys: "/task TUI created task" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Rex open unconfirmed" },
       { keys: "/tasks" }, { wait: "client idle" }, { keys: "\r" }, { wait: "TASKS" }, { keys: "j\r" },
       { wait: "deck / hub · TUI created task" }, { wait: `[${settings.selection.thinkingLevel}]` }, { wait: "READ ONLY" },

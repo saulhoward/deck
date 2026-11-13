@@ -4,6 +4,21 @@ This is the consolidated change and decision record. It replaces the progress re
 
 Test counts below are **recorded evidence for the named implementation stage**. Earlier counts do not describe a new run of the current tree. No count is a release guarantee or proof of deployment.
 
+## Stable task agent names
+
+**Implemented and validated on 2026-11-13, after `24554be`.** Hub, independent-task and child-agent metadata now retain `agentName` and `agentNameAlgorithm`. The immutable `wintermute-v1` word banks generate lowercase compounds, then numeric suffixes after 100 pairs. A central Pi transaction reserves each name across algorithm versions and advances a shared ordinal; task creation and naming commit or roll back together. Retries/restarts preserve names, children get their own names, and existing Deck metadata is backfilled before work resumes without changing history, briefs, bindings, creation hashes or receipts. Unmanaged Pi conversations remain unmanaged.
+
+Names are human-readable identities **within a hub store**, not globally unique IDs or routing/authorization keys. The versioned registry in `runtime/src/agent-names.ts` allows new algorithms without renaming existing agents. Status, discovery and launcher metadata expose the name/version. The TUI labels answers with the saved name instead of `assistant` and includes names in its task picker; canonical message roles and numeric chat IDs remain unchanged. Binding projection was narrowed to machine/cwd so passing full parent metadata cannot copy the parent's name.
+
+Validation on the final implementation:
+
+- Four new naming tests cover 10,000 unique generated names, frozen examples, suffixes/bounds, concurrent creation, duplicate request recovery, transactional rollback, cross-version collisions, restart stability, paginated legacy backfill, unmanaged conversations and TUI projections. Existing child/launcher/settings tests now assert name preservation. Shared generated-contract fixtures reject invalid display names in both languages.
+- Native suite: **65 passed, one opt-in Rex skip**. Final focused runtime/contract/launcher/child/TUI suite: **31/31**, including real PTY checks that the saved name labels the mock answer and survives detach/reopen (`/tmp/deck-agent-names-final-focused.log`).
+- Full Nix build: **524 runtime/generator tests, 522 passed, two opt-in skips, zero failures**, plus outside-checkout installed smoke **1/1** (`/tmp/deck-agent-names-nix-tests.log`). Package retained through `result-agent-names`: `/nix/store/3r1xjq4k1d12ngsqykvlacqmwizsp41f-deck-0.1.0-dev`.
+- Installed TUI/package checks: **14/14**, zero skips (`/tmp/deck-agent-names-installed.log`). Generated-contract, TypeScript, formatting and diff checks passed.
+
+These are local source/package/PTY checks, not a fresh two-machine or live-provider acceptance run. Validation was completed before commit/push or production deployment; no production state was migrated or service restarted during validation.
+
 ## Phase 4 remote launcher
 
 **Implemented and validated on 2026-11-13, after `148b9fc`.** The explicitly approved remote bootstrap slice passed its source, installed and fresh two-machine gates. This is not deployment, general remote hub access or a per-human ACL system.

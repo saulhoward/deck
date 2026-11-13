@@ -1,6 +1,7 @@
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { Readable, Writable } from "node:stream";
 import { ChatDoc, DeckError, type DeckRuntime } from "./deck.js";
+import { agentNameFields } from "./agent-names.js";
 import { briefFields } from "./task-brief.js";
 import { validMcpArgs } from "./mcp-api.js";
 import { validHostArgs } from "./host-inventory.js";
@@ -50,7 +51,7 @@ export async function dispatch(runtime: DeckRuntime, request: Record<string, unk
       const model = (await chat.agent(context)).model;
       // Project Deck metadata without rewriting retained documents. Pi model
       // parameters and global inspection records remain compatible opaque data.
-      const binding = saved && { machineId: saved.machineId, cwd: saved.cwd, kind: saved.kind, title: saved.title, ...(saved.parentChatId === undefined ? {} : { parentChatId: saved.parentChatId }), ...(saved.ownerTaskId === undefined ? {} : { ownerTaskId: saved.ownerTaskId }), ...(saved.brief ? { brief: saved.brief } : {}) };
+      const binding = saved && { ...agentNameFields(saved), machineId: saved.machineId, cwd: saved.cwd, kind: saved.kind, title: saved.title, ...(saved.parentChatId === undefined ? {} : { parentChatId: saved.parentChatId }), ...(saved.ownerTaskId === undefined ? {} : { ownerTaskId: saved.ownerTaskId }), ...(saved.brief ? { brief: saved.brief } : {}) };
       return { implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, modelSettings: 1, taskBrief: 1, ...(taskClient ? {} : { hostInventory: 1 }), rexStartup: 1, rexOpen: runtime.rexClient && runtime.localFiles ? 1 : 0, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding, ...(taskClient ? {} : { activity: await runtime.harness.inspect(context) }), provider: model?.provider, model: taskClient && model ? { provider: model.provider, modelId: model.modelId } : model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
     }
     case "model_settings":

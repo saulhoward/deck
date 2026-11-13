@@ -5,6 +5,7 @@ import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { AgentDoc, type ConversationId } from "@earendil-works/pi-durable";
 import { ChatDoc, DeckError, type DeckRuntime } from "./deck.js";
 import { briefFields } from "./task-brief.js";
+import { agentNameFields } from "./agent-names.js";
 import { prefixUnits } from "./view-text.js";
 import { validSafePiId } from "./mutation-contracts.js";
 import { validWorkerFrame } from "./remote-contracts.js";
@@ -41,7 +42,7 @@ export async function launcherResponse(runtime: DeckRuntime, machineId: string, 
           for(const record of page.items) {
             if(record.owner || record.id===runtime.main.id)continue;
             const binding=await runtime.harness.snapshot(ChatDoc,record.id,context),agent=await runtime.harness.snapshot(AgentDoc,record.id,context);
-            if(binding?.kind==="task" && binding.machineId===machineId && agent?.cwd===binding.cwd)items.push({chatId:String(record.id),title:prefixUnits(binding.title,200)||"Untitled task",cwd:binding.cwd});
+            if(binding?.kind==="task" && binding.machineId===machineId && agent?.cwd===binding.cwd)items.push({...agentNameFields(binding),chatId:String(record.id),title:prefixUnits(binding.title,200)||"Untitled task",cwd:binding.cwd});
           }
           return {...identity,items,...(page.next?{next:String(page.items.at(-1)!.id)}:{})};
         }
@@ -51,7 +52,7 @@ export async function launcherResponse(runtime: DeckRuntime, machineId: string, 
           const created=await runtime.createTask(a.title,{machineId,cwd:a.cwd},`launcher:${machineId}:${a.requestId}`,undefined,brief);
           const chatId=String(created.id),saved=await task(chatId);
           if(saved.title!==a.title || saved.cwd!==a.cwd || JSON.stringify(briefFields(saved.brief??{}))!==JSON.stringify(brief))refused();
-          return {...identity,requestId:a.requestId,chatId,title:a.title,cwd:a.cwd,brief};
+          return {...identity,...agentNameFields(saved),requestId:a.requestId,chatId,title:a.title,cwd:a.cwd,brief};
         }
         case "launch_open":
           // Approved remote clients always use the worker Unix socket. The port

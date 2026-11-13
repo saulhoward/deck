@@ -764,7 +764,7 @@ const Model = struct {
                 for (order[start..@min(page.items.len, start + count)], start..) |raw, index| {
                     const task = page.items[raw];
                     const parent = if (task.parentChatId) |id| try std.fmt.allocPrint(ctx.arena, " child of {s}", .{id}) else "";
-                    const text = try std.fmt.allocPrint(ctx.arena, "{s} {s} [{s}]{s} {s}", .{ if (index == self.task_index) ">" else " ", task.chatId, if (task.kind == .main) "hub" else @tagName(task.kind), parent, task.title });
+                    const text = try std.fmt.allocPrint(ctx.arena, "{s} {s} [{s}]{s} {s} · {s}", .{ if (index == self.task_index) ">" else " ", task.chatId, if (task.kind == .main) "hub" else @tagName(task.kind), parent, task.agentName orelse "unnamed", task.title });
                     const detail = try std.fmt.allocPrint(ctx.arena, "  saved {s}:{s}", .{ task.machineId, task.cwd });
                     const sample = try std.fmt.allocPrint(ctx.arena, "  link {s} · agent {s} · saved Rex {s}", .{ if (task.connection) |v| @tagName(v) else "unknown", if (task.activity) |v| @tagName(v) else "unknown", task.rexState orelse "unknown" });
                     var style = base;
@@ -866,7 +866,7 @@ const Model = struct {
             var role_style = accent;
             if (entry.role == .assistant) role_style.fg = .{ .rgb = .{ 153, 177, 247 } };
             if (entry.role == .tool or entry.role == .note) role_style = dim;
-            const label = try std.fmt.allocPrint(ctx.arena, "{s} · #{d}", .{ @tagName(entry.role), entry.id });
+            const label = try std.fmt.allocPrint(ctx.arena, "{s} · #{d}", .{ if (entry.role == .assistant) snap.agentName orelse "assistant" else @tagName(entry.role), entry.id });
             try rows(ctx, &chat, label, w - 4, role_style);
             try rows(ctx, &chat, entry.text, w - 4, if (entry.role == .note or entry.role == .tool) dim else base);
             try rows(ctx, &chat, "", w - 4, base);
@@ -1024,6 +1024,7 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
             .clientMode = .hub,
             .hubChatId = "1",
             .title = "Hub",
+            .agentName = "wintermute",
             .model = "mock",
             .tools = "offline",
             .activityKnown = false,
@@ -1065,6 +1066,11 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     const draw_ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 100, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
     const surface = try Model.draw(&model, draw_ctx);
     try std.testing.expectEqual(8, surface.cursor.?.col);
+    var rendered: std.ArrayList(u8) = .empty;
+    defer rendered.deinit(a);
+    for (surface.buffer) |cell| try rendered.appendSlice(a, cell.char.grapheme);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.items, "wintermute · #1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.items, "assistant · #1") == null);
     for (surface.buffer) |cell| {
         try std.testing.expect(std.mem.indexOfScalar(u8, cell.char.grapheme, 27) == null);
         try std.testing.expect(std.mem.indexOf(u8, cell.char.grapheme, "\xc2\x9b") == null);

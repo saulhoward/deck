@@ -35,10 +35,11 @@ test("hub model catalog defaults to medium, changes are chat-scoped and Pi uses/
     assert.deepEqual(initial.models.find((m) => m.modelId === "plain")!.thinkingLevels, ["off"]);
     assert.deepEqual(initial.defaultModel, f.options.model);
     const task = await r.createTask("Other", f.options.binding); const child = String(task.id);
+    const taskMetadata = await r.harness.snapshot(ChatDoc, task.id, context);
     const chosen = { provider: "faux", modelId: "beta", thinkingLevel: "high" as const };
     await r.setModelSettings({ chatId: child, expected: initial.selection, selection: chosen });
     assert.deepEqual((await r.modelSettings(id)).selection, initial.selection);
-    assert.deepEqual(await r.harness.snapshot(ChatDoc, task.id, context), { kind: "task", title: "Other", ...f.options.binding });
+    assert.deepEqual(await r.harness.snapshot(ChatDoc, task.id, context), taskMetadata);
     f.faux.setResponses([(ctx, options, state, model) => { assert.equal(model.id, "beta"); assert.equal(options?.reasoning, "high"); return fauxAssistantMessage("selected model answered"); }]);
     const receipt = await r.admit(child, { requestId: "input", text: "hello", mode: "steer" }); await receipt.wait(context);
     await task.waitForIdle(context);

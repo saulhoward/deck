@@ -58,7 +58,8 @@ test("launcher creates once with exact brief/binding, no generation/grants, and 
   const first=await f.send(request);assert.ok(first.ok);assert.ok(validLaunchResponse(first,request,f.runtime.hubId,machine));assert.ok(first.ok);const created=first.result as LauncherCreated;
   assert.deepEqual((await f.send(request)).result,created);assert.equal((await f.send(req("launch_create",{...args,problem:"changed"}))).ok,false);
   assert.equal((await f.runtime.history(created.chatId)).items.filter(e=>e.kind==="deck.input").length,0);assert.equal((await f.runtime.activity(created.chatId)).busy,false);assert.deepEqual((await f.runtime.toolProfiles(created.chatId)).profiles,[]);assert.equal(f.calls(),0);
-  const list=await f.send(req("launch_list"));assert.deepEqual(list.result.items,[{chatId:created.chatId,title:args.title,cwd:args.cwd}]);
+  assert.match(created.agentName!, /^[a-z]+$/);assert.equal(created.agentNameAlgorithm,"wintermute-v1");
+  const list=await f.send(req("launch_list"));assert.deepEqual(list.result.items,[{chatId:created.chatId,title:args.title,cwd:args.cwd,agentName:created.agentName,agentNameAlgorithm:created.agentNameAlgorithm}]);
   const selection=await f.runtime.setToolProfiles({chatId:created.chatId,expectedRevision:0,profiles:[profileGrant(workerProfile),profileGrant(serviceProfile)]});
   const open=await f.send(req("launch_open",{chatId:created.chatId,requestId:randomUUID()}));assert.ok(open.ok);await f.runtime.harness.waitForTask(Number(open.result.ack.taskId) as TaskId,context);
   assert.deepEqual(await f.runtime.toolProfiles(created.chatId),selection);
