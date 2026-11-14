@@ -34,6 +34,10 @@ pub fn peer(fd: fd_t) !std.Io.net.IpAddress {
     if (address.any.family != std.posix.AF.INET and address.any.family != std.posix.AF.INET6) return error.InvalidPeerAddress;
     return std.Io.Threaded.addressFromPosix(&address);
 }
+pub fn requireLoopback(fd: fd_t) !void {
+    const address = try peer(fd);
+    if (address != .ip4 or !std.mem.eql(u8, &address.ip4.bytes, &.{ 127, 0, 0, 1 })) return error.PeerIdentityMismatch;
+}
 pub fn accept(listener: fd_t) !fd_t {
     var address: std.Io.Threaded.PosixAddress = undefined;
     var length: std.posix.socklen_t = @sizeOf(@TypeOf(address));

@@ -44,7 +44,7 @@ else {
   server.stderr!.resume(); const sessions = new Set<string>();
   try {
     await until(() => access(`${rexRoot}/server.sock`).then(() => true, () => false), Boolean);
-    const status = await json("server", "status", "--json"); assert.ok([8, 10].includes(status.api_revision));
+    const status = await json("server", "status", "--json"); assert.ok([8, 10, 14].includes(status.api_revision));
     process.stderr.write(`deck test: isolated Rex API ${status.api_revision}; no tailnet\n`);
     assert.equal(status.you.transport, "unix"); assert.equal(status.tailscale.state, "disabled"); assert.equal(status.session_count, 0);
     const host = routes!.hosts[0]!;
@@ -59,12 +59,11 @@ else {
     const capture = (b = first) => rex("capture", "--session", b.sessionId, "--block", b.blockId, "--trim", "--unwrap");
     const processState = (b = first) => json("block", "call", "process", "--session", b.sessionId, "--block", b.blockId);
     const send = (text: string, b = first) => rex("send", "--session", b.sessionId, "--block", b.blockId, text);
-    await until(() => capture(), text => text.includes("task / Rex locked"));
+    await until(() => capture(), text => text.includes("Rex startup registered"));
     const pid = (await processState()).child.pid;
-    // Command mode pauses polling; a neutral footer alone is not readiness.
-    await send("iREMOTE_RELAY_INPUT"); await until(() => capture(), text => text.includes("REMOTE_RELAY_INPUT"));
-    await send("\x1b"); await until(() => capture(), text => text.includes("NORMAL"));
-    await send(":send"); await until(() => capture(), text => text.includes(":send") && text.includes("client idle")); await send("\r");
+    // Insert is initial; the current UI has no mode/idle banner. Startup
+    // registration plus canonical admission, not footer labels, is evidence.
+    await send("REMOTE_RELAY_INPUT\x13");
     const history = await until(() => runtime.history(chatId), value => JSON.stringify(value).includes("REMOTE_RELAY_REPLY"));
     assert.match(JSON.stringify(history), /REMOTE_RELAY_INPUT/); assert.doesNotMatch(JSON.stringify(await runtime.history(String(runtime.main.id))), /REMOTE_RELAY_INPUT/);
     await writeFile(join(root, "disconnect"), "");
@@ -73,7 +72,9 @@ else {
     await until(() => access(join(root, "reconnected")).then(() => true, () => false), Boolean);
     await until(() => capture(), text => !text.includes("STALE") && text.includes("REMOTE_RELAY_REPLY"));
     assert.equal((await processState()).child.pid, pid); assert.deepEqual(await runtime.history(chatId), history);
-    await send(":q"); await until(() => capture(), text => text.includes(":q") && text.includes("client idle")); await send("\r");
+    await rex("send-key", "--session", first.sessionId, "--block", first.blockId, "Escape");
+    await new Promise(resolve => setTimeout(resolve, 100)); // Separate Esc and colon, not Alt-:.
+    await send(":q"); await until(() => capture(), text => text.includes(":q")); await send("\r");
     await until(() => processState(), value => value.last_exit?.exit_code === 0);
     const second = await open(); assert.equal(second.sessionId, first.sessionId); assert.notEqual(second.blockId, first.blockId);
     await until(() => capture(second), text => text.includes("REMOTE_RELAY_INPUT"));
@@ -90,10 +91,9 @@ else {
     const created=JSON.parse(output.split("\n")[0]!);assert.equal(created.machineId,host.machineId);assert.deepEqual(created.brief,{problem:"",description:"exact launcher brief"});
     const ack=JSON.parse(output.split("\n")[1]!).ack;await runtime.harness.waitForTask(Number(ack.taskId) as TaskId,context);
     const launched=await runtime.terminalStatus(created.chatId);assert.equal(launched.status,"allocated");assert.ok(launched.binding);sessions.add(launched.binding.sessionId);
-    await until(()=>runtime.terminalStartup(created.chatId),v=>v.observation==="matched");await until(()=>capture(launched.binding!),s=>s.includes("task / Rex locked"));
+    await until(()=>runtime.terminalStartup(created.chatId),v=>v.observation==="matched");await until(()=>capture(launched.binding!),s=>s.includes("Rex startup registered"));
     assert.deepEqual((await runtime.toolProfiles(created.chatId)).profiles,[]);
-    await send("iREMOTE_LAUNCHER_INPUT",launched.binding);await until(()=>capture(launched.binding!),s=>s.includes("REMOTE_LAUNCHER_INPUT"));await send("\x1b",launched.binding);
-    await until(()=>capture(launched.binding!),s=>s.includes("NORMAL"));await send(":send",launched.binding);await until(()=>capture(launched.binding!),s=>s.includes(":send")&&s.includes("client idle"));await send("\r",launched.binding);
+    await send("REMOTE_LAUNCHER_INPUT\x13",launched.binding);
     await until(()=>runtime.history(created.chatId),v=>JSON.stringify(v).includes("REMOTE_RELAY_REPLY"));
     assert.equal(JSON.parse(await cli(["--inspect",created.chatId])).status.binding.machineId,host.machineId);
     assert.deepEqual(JSON.parse(await cli(["--drafts"])),[]);

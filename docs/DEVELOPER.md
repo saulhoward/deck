@@ -7,6 +7,7 @@ This guide describes implemented behavior unless a section is marked **target de
 - [Architecture and ownership](#architecture-and-ownership)
 - [Target interactive and scheduled architecture](#target-interactive-and-scheduled-architecture)
 - [Target native MCP tools](#target-native-mcp-tools)
+- [Automatic startup and enrollment](#automatic-startup-and-enrollment)
 - [Source map](#source-map)
 - [Build and test](#build-and-test)
 - [Wire contracts](#wire-contracts)
@@ -68,13 +69,13 @@ Keep these boundaries:
 6. Preserve request identities and retained bytes. An unknown outcome is not permission to repeat an effect.
 7. Treat tool access as trusted-user access, not a sandbox or multi-user permission system.
 
-The hub requires prior `init`. Zig holds a nonblocking exclusive writer lock and passes its descriptor to the Node writer. A surviving child keeps the lock after supervisor death. Shell and Rex children must not inherit it.
+`serve` initializes fresh/default state while continuously holding the actual nonblocking exclusive writer lock, then passes its descriptor to the Node writer. Existing identity is retained; existing store contents without identity refuse. Fresh client-only state is allowed. Explicit `init` remains available, but is not required. A surviving child keeps the lock after supervisor death. Shell and Rex children must not inherit it.
 
 Unexpected writer exit or failed Harness closure stops the hub with a nonzero exit. There is no automatic respawn. Process checks detect death, not a live hang. Private-channel closure cancels owned shell groups and drains issued file work where possible.
 
 ### Target interactive and scheduled architecture
 
-**Target design, partly implemented.** Local and assigned-host managed Rex task clients and verified native workers have isolated tests. A separate [two-machine Darwin arm64 acceptance run](HISTORY.md#phase-0-two-machine-acceptance) passed with actual Tailscale peers, mock providers and a private Rex API 10 server. Phase 1 adds creation briefs, grouped inspection, registered-host selection and bounded task-to-hub messaging. Native stdio MCP and task grants have source/installed coverage and separate [fresh two-machine acceptance](HISTORY.md#mcp-two-machine-acceptance) on the recorded Darwin arm64 pair; this does not broaden platform or live-service claims. Remote bootstrap, scheduled jobs and subagent terminals below remain planned.
+**Target design, partly implemented.** Local and assigned-host managed Rex task clients and verified native workers have isolated tests. A separate [two-machine Darwin arm64 acceptance run](HISTORY.md#phase-0-two-machine-acceptance) passed with actual Tailscale peers, mock providers and a private Rex API 10 server. Phase 1 adds creation briefs, grouped inspection, registered-host selection and bounded task-to-hub messaging. Native stdio MCP and task grants have source/installed coverage and separate [fresh two-machine acceptance](HISTORY.md#mcp-two-machine-acceptance) on the recorded Darwin arm64 pair; this does not broaden platform or live-service claims. Automatic remote bootstrap is implemented with separate API-14 isolated evidence; scheduled jobs and subagent terminals below remain planned.
 
 Every chat uses the hub. One hub-owned Pi runtime stores conversations and runs interactive agents, scheduled jobs, and their children. Background execution uses Pi tasks in that runtime, not a new process or store for each job. Registered host connections carry native effects to the assigned execution machine. Model credentials stay at the hub.
 
@@ -180,6 +181,34 @@ Do not initially advertise sampling, elicitation, arbitrary server-initiated ope
 
 Streamable HTTP follows the stdio/worker milestone: authenticated endpoint identity, TLS, session/correlation rules, redirects refused by default and deliberate retry behavior must be tested first. Start with explicitly provisioned service credentials. OAuth is a separate increment only when required by a selected integration; no silent reuse of a Pi application's live connection or credential format. Live Slack or other service tests require explicit account/scope approval and disposable test targets. MCP HTTP support does not change Rex's separate API/Unix-endpoint gates.
 
+## Automatic startup and enrollment
+
+`serve` defaults to the platform state directory and port 52800. Initialization, identity loading and the runtime handoff share one uninterrupted writer lock. A missing identity over an existing SQLite store is damage/restore work, not permission to assign a new machine. Real-provider 1Password bootstrap still happens before locking; provider selection and credential failures still precede Pi resume.
+
+`deck hub` keeps a private `client/hubs/<hubId>/session.json` and launcher lock. It observes canonical hub/machine identity and actual Rex object/process state, then reuses a running client or replaces only definitively exited/missing objects. The saved pending flag precedes creation; uncertain presence/ACKs fence later launches. The hub has its own launcher, never a task allocation. `--here` retains direct-terminal behavior, and the selected client root follows the managed client.
+
+Normal `deck agent` selects explicit `--hub`, then `DECK_HUB_REX_HOST`, otherwise local; `--local` ignores the environment. Authenticated `whoami` host/account equality, not URL spelling, determines whether an explicit remote is this host. Worker/TUI/cwd remain on the invoking machine. Invalid/unavailable remote selection never switches to local. Normal startup requires exactly **Rex API 14**. Advanced allocation independently supports exactly **8/10/14**; a higher number is not implicit compatibility.
+
+### Transport and worker lifetime
+
+Native `rex_forward.zig` owns session-scoped foreground `rex forward open` processes, loopback binds and byte streams. It validates bounded HTTPS coordinator endpoints (or explicit Unix test endpoints), authenticates host/account/instance before and after opening, and kills only owned tunnel children. It never scrapes terminal text or uses a direct Tailscale/unauthenticated remote HTTP fallback. Rex host access is the remote trust boundary; local loopback remains trusted-local access. It does not invent Tailscale peer attestations for tunnel sockets. Legacy actual-socket peer verification remains separate and unchanged.
+
+Automatic serve mode has eight permanent pinned registration slots and five pipe pairs per slot. Enrollment binds `127.0.0.1:port+1` (65534 when the hub port is 65535); per-worker link listeners use ephemeral loopback ports. Native registration is saved in `rex-workers.json` under writer exclusion. Machine/build/ordered capabilities/client/socket are pinned, duplicate/local machines refuse, and a failed runtime metadata handshake fences that slot for the process lifetime. Delayed ACKs cannot register another worker. Runtime routes use evented pipes and the existing generation gate, native effects, receipts and task/launcher relay—not a new execution engine. Offline inventory remains visible. Explicit `--workers` selects the legacy inventory instead; the two managers do not overlap.
+
+The client root contains `workers/<sha256([authenticated host, account, port])>`. A connection launcher lock plus the worker's actual writer lock serialize startup; readiness is a real scoped relay exchange, never PID-file liveness. `rex-connection.json` retains host/account/hub/client/build pins, transport session identity and a diagnostic PID. The detached native daemon calls `setsid`, ignores terminal stdio, and survives TUI closure. An uncertain-start daemon is left intact because it may own work. Session creation intent is saved before Rex; missing-session proof is required to replace it. No daemon replacement, identity reset, pin rewrite, receipt removal or uncertain-effect replay occurs automatically. Current automatic capabilities are files/bash/Rex/launcher; worker MCP still requires the explicit approved setup. No worker Pi store, inference or model credentials are introduced.
+
+### Form, adoption and recovery
+
+The native form and client-only Node helper share a bounded correlated bridge. Problem is nonblank and at most 2,048 UTF-8 bytes; optional description is at most 8,192. Omission differs from empty. Cwd is visible and fixed. Enter navigates, Shift-Enter/Ctrl-J inserts text, Ctrl-E controls description presence, and only **Create & start**/Ctrl-S authorizes mutation. Initial read-only polling does not swallow typing. Paste/external editing never submits or interprets commands.
+
+Before any Rex mutation, save a startup index and per-hub/machine launch fence. Native `rex_bootstrap.zig` saves private provenance, creates the form terminal and records its exact session/window/block/PID. The helper verifies its native parent PID and `REX_BLOCK`. A form saves stable creation/adoption/input IDs and exact brief bytes before sending. Creation ACK is validated before saving the ordinary input draft and admitting adoption.
+
+`rex_adopt` / scoped `launch_adopt` reuse Pi's allocation task. Native adoption requires the private original root/record, matching machine/cwd/client/socket/hub/port/target, authenticated Rex identity, exact live block/process and a single chat/allocation claim. Missing/foreign/changed records cannot authorize an arbitrary terminal. The wizard observes the matching public allocation before the native parent rechecks its claim and enters the existing task TUI **without replacing the process or block**. `rex_startup` verification precedes initial input. Normal reopen removes bootstrap-only authority but preserves the client draft root.
+
+Private startup metadata lives under `client/startups`: `<UUID>.json` indexes, per-scope `.lock`/`.pending.json` launch fences, and `<UUID>/{record,form,created,adopted,input-attempt,completed,discarded,recovered}.json` stages. Directories/files are owned 0700/0600, bounded and no-follow; immutable stages use fsynced exclusive publication. These are client recovery metadata, not a queue, transcript replica or task lifecycle. `input-attempt.json` is an attempt fence, not completion evidence. A crash or lost ACK never automatically resubmits input.
+
+`--list` and `--resume NAME` resolve independent same-worker chats to IDs. Resume saves its open request and uses `confirmedOnly`; an unconfirmed allocation cannot trigger another creation. Unknown open outcomes retain the request for inspection, not retry. `--recover ID --confirm` retrieves the exact creation and retains its initial input draft without opening/admitting; retry the original form if still present, otherwise resume and explicitly `:retry`. `--discard ID --confirm` removes only local intent/drafts, including a stale launch fence after index cleanup; possible tasks/sessions/work remain. Read-only wizard polls never advance a saved uncertain mutation. All actual execution history and allocation/receipt authority remain at the hub/native effect boundary.
+
 ## Source map
 
 | Path | Responsibility |
@@ -190,7 +219,10 @@ Streamable HTTP follows the stdio/worker milestone: authenticated endpoint ident
 | `src/tailscale.zig`, `src/remote*.zig`, `runtime/src/remote-contracts.ts` | Peer verification, private registrations, bounded outbound worker transport, and connection-generation fencing |
 | `src/worker.zig`, `src/shell.zig` | Native effects, receipts, capacity, and cancellation |
 | `src/mcp_*.zig`, `runtime/src/mcp-*.ts` | Native stdio supervision/profiles/receipts; strict schemas, central Pi tool adapters and hub-only grants |
-| `src/rex*.zig` | Rex discovery, endpoint validation, creation, and inspection |
+| `src/rex*.zig` | Rex discovery, forwarding, enrollment, native worker transport, terminal creation/adoption and inspection |
+| `src/agent_startup.zig`, `src/hub_session.zig`, `src/private_store.zig` | Managed selection, worker/session lifetime and private native recovery metadata |
+| `src/agent_form*.zig`, `runtime/src/agent-{wizard,storage,control-main}*.ts` | Creation form, exact client startup stages and list/resume/recovery |
+| `runtime/src/rex-routes.ts`, `startup-status.ts` | Dynamic pinned native routes and client-only canonical readiness observation |
 | `src/tui*.zig` | TUI widget, Vesper theme/layout, Markdown cells, modal editor, bridge and terminal status |
 | `runtime/src/deck.ts` | Pi adapter, saved chat bindings, admission, and settings |
 | `runtime/src/main.ts`, `ipc.ts`, `protocol.ts` | Runtime startup, command dispatch, and framing |
@@ -254,6 +286,18 @@ git diff --check
 ```
 
 `npm run check` verifies generated contracts without rewriting them, then checks TypeScript. `npm test` compiles TypeScript and runs offline tests with four test files at a time. `DECK_TEST_BINARY` enables real Zig supervisor and native-effect tests. Without it, those tests skip. Native test execution is uncached: socket/process tests and opt-in Rex checks depend on the live environment, so an earlier ordinary run cannot substitute for an enabled integration run.
+
+New-flow integration is opt-in and uses a separately supplied API-14 Rex binary, private Unix servers and disposable state:
+
+```sh
+DECK_TEST_REX_FORWARD=/absolute/test/rex \
+DECK_TEST_BINARY="$PWD/zig-out/bin/deck" \
+  nix develop path:. -c node --test --test-concurrency=1 \
+    runtime/dist/agent-startup.test.js runtime/dist/rex-enrollment.test.js
+DECK_TEST_REX_FORWARD=/absolute/test/rex nix develop path:. -c zig build test
+```
+
+`DECK_TEST_REX` separately enables the older allocation/managed-hub contract suite. Neither opt-in upgrades an operator Rex installation. Private Unix “remote-selected” tests are not actual HTTPS/two-machine acceptance. The enrollment fixture injects only a disposable faux provider to exercise native bash cancellation; production deadlines and transport code are unchanged.
 
 After editing the schema, regenerate and review both outputs:
 
@@ -388,7 +432,7 @@ The hub's `--workers` private registry additionally specifies `listen` on each w
 
 A worker establishes outbound data and control TCP connections to its assigned listener. Both sockets independently verify the actual peer through the local Tailscale daemon. The data challenge/hello pins hub, machine, implementation, capabilities, optional client/socket pair and connection generation; subsequent channel headers bind the same generation and verified peer. Rex workers pair a third independently verified client socket before requests flow. No channel accepts HTTP; task RPC is confined to that optional third channel and hub-side allocation scope. OS-machine authority is not OS-user authentication; the hello fingerprint is a compatibility pin, not hardware attestation.
 
-Each host owns independent inherited native request/result/control pipes and one serialized gate owner. TypeScript routes by the exact saved `machineId`, using evented `uv_pipe` sockets for remote descriptors rather than occupying the filesystem threadpool. No labels, client PATH, default host, or current terminal can retarget a binding. Unregistered/offline hosts return `offline` without sending this attempt; that does not disprove effects from an earlier attempt, including before a hub restart. Remote Rex operations are rejected in both the router and worker unless the exact Rex/client registration was approved. Discovery, allocation, inspection and receipt lookup then use the assigned host's native implementation. The hub selects the registered client path/socket; native allocation checks them against worker config before invoking Rex. Existing API 8/10 and Unix-endpoint checks are unchanged; selected API 9/HTTPS probe evidence is not permission to widen them.
+Each host owns independent inherited native request/result/control pipes and one serialized gate owner. TypeScript routes by the exact saved `machineId`, using evented `uv_pipe` sockets for remote descriptors rather than occupying the filesystem threadpool. No labels, client PATH, default host, or current terminal can retarget a binding. Unregistered/offline hosts return `offline` without sending this attempt; that does not disprove effects from an earlier attempt, including before a hub restart. Remote Rex operations are rejected in both the router and worker unless the exact Rex/client registration was approved. Discovery, allocation, inspection and receipt lookup then use the assigned host's native implementation. The hub selects the registered client path/socket; native allocation checks them against worker config before invoking Rex. Allocation supports only API 8/10/14 and local Unix endpoints. Coordinator forwarding is a distinct API-14 transport; historical API-9/HTTPS probes are not allocation acceptance.
 
 The transport keeps at most 20 in-flight/result slots per host (16 effects plus four progress samples upstream), with 1 MiB frames; it never persists a second execution queue. Connect is bounded to four seconds, handshake frames to 4 KiB/five seconds, and each additional channel pairing to 20 seconds. Network frame reads/writes use absolute five-second deadlines, including partial progress; captures keep the verifier's existing limits. Control heartbeats run independently at one second with a five-second loss threshold. Cancellation uses its own bounded fixed-size records and retains a 16-ID cancellation ring across reconnection. Result backpressure cannot block control delivery. File/progress requests have a 30-second transport deadline; bash has its requested/default timeout plus five seconds. These deadlines establish uncertainty, **not rollback or file-effect drainage**.
 
@@ -517,7 +561,7 @@ Do not implement required instruction policy by throwing from a Pi prompt hook. 
 
 ## Hub workflow contracts
 
-`deck hub` is a client entry point, not a service installer. It preserves normal client options and `--task` read-only inspection, but refuses allocation startup/worker-socket flags. Rex still launches `deck agent` with its pinned allocation identity. `deck serve` stays foreground under an explicitly configured external service manager; build, service restart and deployment remain separate actions.
+`deck hub` launches/reuses its managed local Rex session and exits; `--here` is the direct client entry point. Neither is a service installer. Explicit direct modes preserve normal client options and `--task` read-only inspection, but refuses allocation startup/worker-socket flags. Rex still launches `deck agent` with its pinned allocation identity. `deck serve` stays foreground under an explicitly configured external service manager; build, service restart and deployment remain separate actions.
 
 ### Briefs and creation
 
@@ -682,7 +726,7 @@ Public open/reopen supports managed ownerless tasks. Main and owned children ref
 
 First open resolves missing target fields on the assigned worker. PATH search uses absolute directories only. Bounded `rex --autostart=false --timeout 2s server status --json` discovers a local Unix endpoint plus host/instance UUIDs. Strip ambient remote/focus routing overrides; do not autostart or use TCP. Later opens use the saved target without discovery; supplied overrides must match it.
 
-Endpoints allow valid percent-encoded UTF-8, with 307 encoded characters and 100 decoded socket-path bytes. Compare decoded identities without changing retained spelling or hashes. Tested API revisions are explicitly 8 and 10; do not accept arbitrary newer revisions.
+Endpoints allow valid percent-encoded UTF-8, with 307 encoded characters and 100 decoded socket-path bytes. Compare decoded identities without changing retained spelling or hashes. Tested allocation API revisions are explicitly 8, 10 and 14; do not accept arbitrary newer revisions. Coordinator forwarding requires exactly 14 and does not turn HTTPS into a terminal-allocation target.
 
 The TUI `:rex` panel uses existing public status/inspection contracts with exact hub/chat scope at both bridge endpoints. Reads refresh only on explicit actions. Open/reopen uses the client's current hub port and a new explicit attempt identity. Lost replies require inspection, not automatic resend. Existing input/task/import drafts are unchanged.
 
@@ -706,7 +750,7 @@ Open reuses an observed running client. It creates a new window for an exited/mi
 
 **Inspect-then-create is not atomic.** Rex API 10 ignored invented conditional/idempotency fields in tests. Concurrent or explicit later attempts can leave duplicates. Do not send invented guard fields, adopt by label, automatically retry, or destroy possibly running terminals. Manual cleanup is an accepted local limit, not a weaker file/bash/input guarantee.
 
-Internal reconciliation admits a separate Pi task, reads the original native receipt and exact request hash, then applies matching creation proof. It calls no Rex mutation and preserves the original uncertain/aborted result. Missing or acceptance-only evidence stays unresolved. This is not a public repair command. Public open can start a new explicit attempt after uncertainty without replaying the old accepted operation.
+Internal reconciliation admits a separate Pi task, reads the original native receipt and exact request hash, then applies matching creation proof. It calls no Rex mutation and preserves the original uncertain/aborted result. Missing or acceptance-only evidence stays unresolved. This is not a public repair command. Advanced public open can start a new explicit attempt after uncertainty without replaying the old accepted operation. Normal agent resume uses `confirmedOnly` and refuses this ambiguous case.
 
 ## Providers and credentials
 
@@ -758,9 +802,9 @@ The gate is not code attestation, a workspace snapshot, or protection from editi
 
 Both commands hold the shared writer lock and never open the Pi Harness, resume tasks, or replay effects. A live or surviving writer blocks them. Arrange a secure authenticated restart before stopping a hub whose key exists only in process memory.
 
-Backup format 1 contains `manifest.json` and a `files/` tree. It includes config, a standalone SQLite snapshot, published native receipts, and optional stored credentials. SQLite's backup API incorporates committed WAL without rewriting the source. The synced manifest records path, size, and SHA-256 and is published last by exclusive hard link.
+Backup format 1 contains `manifest.json` and a `files/` tree. It includes config, a standalone SQLite snapshot, published native receipts, optional private `rex-workers.json` automatic registration pins (at most 64 KiB), and optional stored credentials. SQLite's backup API incorporates committed WAL without rewriting the source. The synced manifest records path, size, and SHA-256 and is published last by exclusive hard link.
 
-Exclude locks, WAL/SHM sidecars, unpublished temporaries, and known logs. Refuse unknown state files instead of silently omitting possible authoritative data. Workspace files, runtime packages, client drafts, ambient/1Password credentials and reference mappings, and Rex objects are outside the backup.
+Exclude locks, WAL/SHM sidecars, unpublished temporaries (including native private-store `.32-hex.tmp` files), and known logs. The owned/private `client` directory is excluded without traversal: its drafts, startup records and detached-worker states are independent recovery domains. Refuse unknown state files instead of silently omitting possible authoritative data. Workspace files, runtime packages, client drafts, ambient/1Password credentials and reference mappings, and Rex objects are outside the backup.
 
 Bounds are 10,000 included files, 512 MiB payload, and a 2 MiB manifest. Roots must be private and user-owned. Read paths must be allowed regular files/directories, not symlinks or devices. New files/directories use 0600/0700. Reject source/destination overlap and existing outputs. Trusted parents must already exist. Hard-link support is required.
 

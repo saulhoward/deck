@@ -44,7 +44,7 @@ function config(bytes: Buffer) {
   const value = JSON.parse(bytes.toString("utf8")) as { version?: unknown; machine_id?: unknown };
   check(value && value.version === 1 && typeof value.machine_id === "string" && /^[\da-fA-F]{32}$/.test(value.machine_id));
 }
-function allowed(path: string) { return ["config.json", "session.sqlite", "auth.json"].includes(path) || /^worker\/operations\/(?:\d{1,20}\.json|mcp-[0-9a-f]{64}\.stale)$/.test(path); }
+function allowed(path: string) { return ["config.json", "session.sqlite", "auth.json", "rex-workers.json"].includes(path) || /^worker\/operations\/(?:\d{1,20}\.json|mcp-[0-9a-f]{64}\.stale)$/.test(path); }
 async function absent(path: string) {
   try { await lstat(path); } catch (error) { if (missing(error)) return; throw error; }
   throw new BackupError();
@@ -58,8 +58,12 @@ async function target(source: string, destination: string) {
 async function contents(root: string, state: boolean): Promise<string[]> {
   const paths: string[] = [];
   for (const name of await names(root)) {
-    if (["config.json", "session.sqlite", "auth.json"].includes(name)) paths.push(name);
-    else if (name === "worker") {
+    if (["config.json", "session.sqlite", "auth.json", "rex-workers.json"].includes(name)) paths.push(name);
+    else if (state && name === "client") {
+      // Client drafts/startup metadata and detached worker states are separate
+      // recovery domains. Do not traverse, copy or stop them with the hub.
+      await directory(join(root, name), true);
+    } else if (name === "worker") {
       await directory(join(root, name));
       for (const child of await names(join(root, name))) check(child === "operations");
       const operations = join(root, name, "operations");
@@ -70,17 +74,18 @@ async function contents(root: string, state: boolean): Promise<string[]> {
         check(paths.length <= MAX_FILES);
       }
     } else {
-      check(state && (["writer.lock", "session.sqlite-wal", "session.sqlite-shm", "config.json.tmp", ".DS_Store"].includes(name) || /^serve-[\w-]+\.log$/.test(name) || /^auth\.json\.[\da-f-]+\.tmp$/.test(name)));
+      check(state && (["writer.lock", "session.sqlite-wal", "session.sqlite-shm", "config.json.tmp", ".DS_Store"].includes(name) || /^serve-[\w-]+\.log$/.test(name) || /^auth\.json\.[\da-f-]+\.tmp$/.test(name) || /^\.[0-9a-f]{32}\.tmp$/.test(name)));
       const info = await lstat(join(root, name)); check(info.isFile() && !info.isSymbolicLink()); owner(info);
     }
   }
   check(paths.includes("config.json") && paths.length <= MAX_FILES); return paths.sort();
 }
 async function copy(source: string, destination: string | undefined, path: string, budget: { used: number }, name = path, expected?: FileRecord): Promise<FileRecord> {
-  const { handle, size } = await file(join(source, path), path === "auth.json");
+  const { handle, size } = await file(join(source, path), path === "auth.json" || path === "rex-workers.json");
   let output: Awaited<ReturnType<typeof open>> | undefined;
   try {
     check(size <= MAX_BYTES - budget.used && (!expected || expected.size === size));
+    if (path === "rex-workers.json") check(size <= 64 * 1024);
     if (destination) {
       if (path.startsWith("worker/")) await mkdir(join(destination, "worker", "operations"), { recursive: true, mode: 0o700 });
       output = await open(join(destination, name), "wx", 0o600);

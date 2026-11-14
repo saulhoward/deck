@@ -3,10 +3,10 @@ import { rexSocketPath } from "./rex-endpoint.js";
 import { AgentDoc, defineDoc, defineDocFamily, defineExtension, defineTask, type TaskId, type Tx, type ConversationId } from "@earendil-works/pi-durable";
 import { ChatDoc, type Binding } from "./deck.js";
 import type { HostFiles } from "./host-files.js";
-import { validRexUuid, validRexBlockId, validRexCreation, type RexAllocationPlan } from "./generated/contracts.js";
+import { validRexUuid, validRexBlockId, validRexCreation, validRexBootstrapClaim, type RexAllocationPlan } from "./generated/contracts.js";
 
 export const REX_KIND = "deck.rex-allocation";
-export type RexTarget = Pick<RexAllocationPlan, "executable" | "server" | "hostId" | "instanceId" | "client" | "port" | "workerSocket">;
+export type RexTarget = Pick<RexAllocationPlan, "executable" | "server" | "hostId" | "instanceId" | "client" | "port" | "workerSocket" | "bootstrap" | "clientState">;
 // Domain intent never generates a null UUID; the native wire also accepts legacy null.
 export type RexPlan = Omit<RexAllocationPlan, "allocationId"> & { allocationId?: string };
 export type RexBinding = Binding & { server: string; hostId: string; instanceId: string; sessionId: string; windowId: string; blockId: string; chatId: string; hubId: string; taskId: string; readiness: "not_checked" };
@@ -30,7 +30,9 @@ const absolute = (value: unknown): value is string => typeof value === "string" 
 export function rexTarget(value: RexTarget): RexTarget {
   if (!value || !absolute(value.executable) || !absolute(value.client) || typeof value.server !== "string" || rexSocketPath(value.server) === undefined || !uuid(value.hostId) || !uuid(value.instanceId) || !Number.isInteger(value.port) || value.port < 1 || value.port > 65535) throw new Error("Invalid explicit local Rex target");
   if (value.workerSocket !== undefined && (!absolute(value.workerSocket) || Buffer.byteLength(value.workerSocket) > 100 || /[\r\n]/.test(value.workerSocket))) throw new Error("Invalid worker client socket");
-  return { executable: value.executable, server: value.server, hostId: value.hostId, instanceId: value.instanceId, client: value.client, port: value.port, ...(value.workerSocket === undefined ? {} : { workerSocket: value.workerSocket }) };
+  if (value.clientState !== undefined && (!absolute(value.clientState) || Buffer.byteLength(value.clientState) > 4096)) throw new Error("Invalid client state directory");
+  if (value.bootstrap !== undefined && (!validRexBootstrapClaim(value.bootstrap) || !absolute(value.bootstrap.root))) throw new Error("Invalid bootstrap claim");
+  return { executable: value.executable, server: value.server, hostId: value.hostId, instanceId: value.instanceId, client: value.client, port: value.port, ...(value.workerSocket === undefined ? {} : { workerSocket: value.workerSocket }), ...(value.bootstrap === undefined ? {} : { bootstrap: { ...value.bootstrap } }), ...(value.clientState === undefined ? {} : { clientState: value.clientState }) };
 }
 export async function rexCoherent(tx: Tx, id: ConversationId, expected?: Binding): Promise<boolean> {
   const chat = await tx.doc(ChatDoc, id); const agent = await tx.doc(AgentDoc, id);
@@ -44,6 +46,7 @@ export function rexCreationBinding(output: string, input: Input, taskId: TaskId)
   if (!validRexCreation(value)) return;
   if (input.plan.allocationId !== undefined && value.allocationId !== input.plan.allocationId) return;
   if (input.plan.sessionId !== undefined && value.sessionId !== input.plan.sessionId) return;
+  if (input.plan.bootstrap !== undefined && value.blockId !== input.plan.bootstrap.blockId) return;
   // Structural validation is not authority: still compare every saved launch identity.
   if (value.server !== input.plan.server || value.hostId !== input.plan.hostId || value.instanceId !== input.plan.instanceId || value.chatId !== input.plan.chatId || value.hubId !== input.plan.hubId) return;
   return { ...input.binding, server: input.plan.server, hostId: input.plan.hostId, instanceId: input.plan.instanceId, chatId: input.plan.chatId, hubId: input.plan.hubId,

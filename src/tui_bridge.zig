@@ -25,15 +25,25 @@ hub_chat_id: ?[]const u8 = null,
 client_mode: wire.TuiClientMode = .hub,
 
 pub fn start(native: Native, a: std.mem.Allocator, args: []const []const u8) !Bridge {
+    return startEntry(native, a, "tui-bridge.js", args);
+}
+// Shared bounded child/pipe ownership; each renderer retains its own schema,
+// reply correlation and authority checks. Entry names are native constants.
+pub fn startEntry(native: Native, a: std.mem.Allocator, name: []const u8, args: []const []const u8) !Bridge {
     const node = try paths.node(native, a);
     defer a.free(node);
-    const entry = try paths.entry(native, a, null, "tui-bridge.js");
+    const entry = try paths.entry(native, a, null, name);
     defer a.free(entry);
     var argv: std.ArrayList([]const u8) = .empty;
     defer argv.deinit(a);
     try argv.appendSlice(a, &.{ node, entry });
     try argv.appendSlice(a, args);
-    var child = try std.process.spawn(native.io, .{ .argv = argv.items, .stdin = .pipe, .stdout = .pipe, .stderr = .ignore });
+    // Client bridges need neither model/vault credentials nor Node/loader
+    // injection. Preserve only client paths and native bootstrap provenance.
+    var env = std.process.Environ.Map.init(a);
+    defer env.deinit();
+    for ([_][]const u8{ "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "TERM", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "REX_RUNTIME_DIR", "REX_BLOCK", "DECK_NODE", "DECK_RUNTIME_ROOT", "DECK_CLIENT_STATE_DIRECTORY" }) |key| if (native.environ.getPosix(key)) |value| try env.put(key, value);
+    var child = try std.process.spawn(native.io, .{ .argv = argv.items, .environ_map = &env, .stdin = .pipe, .stdout = .pipe, .stderr = .ignore });
     errdefer {
         child.kill(native.io);
         Native.closeStreams(native.io, &child);

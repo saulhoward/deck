@@ -51,16 +51,31 @@ pub fn markRestore(io: Io, dir: Io.Dir) !void {
 
 pub fn initialize(io: Io, allocator: std.mem.Allocator, path: []const u8) !void {
     try Io.Dir.cwd().createDirPath(io, path);
-    var dir = try Io.Dir.cwd().openDir(io, path, .{});
+    var dir = try Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
     defer dir.close(io);
     const held = try lock(io, dir);
     defer held.close(io);
+    try initializeLocked(io, allocator, dir);
+}
+
+// Caller holds the actual writer lock continuously through initialization and
+// runtime startup. Never invent an identity for an existing store missing its
+// config: that is damage/recovery, not a fresh installation.
+pub fn initializeLocked(io: Io, allocator: std.mem.Allocator, dir: Io.Dir) !void {
     try requireComplete(io, dir);
     if (dir.access(io, "config.json", .{})) |_| {
         const existing = try load(io, allocator, dir);
         existing.deinit();
         return;
     } else |err| if (err != error.FileNotFound) return err;
+    var entries = dir.iterate();
+    while (try entries.next(io)) |entry| {
+        if (std.mem.eql(u8, entry.name, "writer.lock")) continue;
+        // Client-only installs may already hold drafts scoped to other hubs.
+        if (std.mem.eql(u8, entry.name, "client") and entry.kind == .directory) continue;
+        if (std.mem.eql(u8, entry.name, "config.json.tmp") and entry.kind == .file) continue;
+        return error.MissingStateIdentity;
+    }
     // Only set permissions on a directory we are initializing, not on arbitrary ancestors.
     try dir.setPermissions(io, .fromMode(0o700));
     var bytes: [16]u8 = undefined;
@@ -117,6 +132,41 @@ test "incomplete restore rejects both init and config loading without inventing 
     try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "config.json", .{}));
     try tmp.dir.writeFile(io, .{ .sub_path = "config.json", .data = "{\"version\":1,\"machine_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}" });
     try std.testing.expectError(error.RestoreIncomplete, load(io, allocator, tmp.dir));
+}
+
+test "automatic initialization does not release the writer lock or replace a missing store identity" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const held = try lock(io, tmp.dir);
+    defer held.close(io);
+    try tmp.dir.writeFile(io, .{ .sub_path = "session.sqlite", .data = "existing store" });
+    try std.testing.expectError(error.MissingStateIdentity, initializeLocked(io, a, tmp.dir));
+    try std.testing.expectError(error.FileNotFound, tmp.dir.access(io, "config.json", .{}));
+    try tmp.dir.deleteFile(io, "session.sqlite");
+    try initializeLocked(io, a, tmp.dir);
+    const first = try load(io, a, tmp.dir);
+    defer first.deinit();
+    try std.testing.expectError(error.WouldBlock, lock(io, tmp.dir));
+    try initializeLocked(io, a, tmp.dir);
+    const second = try load(io, a, tmp.dir);
+    defer second.deinit();
+    try std.testing.expectEqualStrings(first.value.machine_id, second.value.machine_id);
+}
+
+test "client-only state can initialize without changing saved client data" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const held = try lock(io, tmp.dir);
+    defer held.close(io);
+    try tmp.dir.createDir(io, "client", .fromMode(0o700));
+    try tmp.dir.writeFile(io, .{ .sub_path = "client/draft", .data = "exact original" });
+    try initializeLocked(io, std.testing.allocator, tmp.dir);
+    const bytes = try tmp.dir.readFileAlloc(io, "client/draft", std.testing.allocator, .limited(64));
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings("exact original", bytes);
 }
 
 test "a second writer cannot acquire the lock" {

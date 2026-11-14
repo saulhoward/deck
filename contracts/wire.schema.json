@@ -17,7 +17,7 @@
       "additionalProperties": true
     },
     "TransportId": { "type": "string", "minLength": 1, "maxLength": 200 },
-    "HubCommand": { "enum": ["status", "login_start", "login_status", "login_reply", "login_cancel", "rex_open", "rex_status", "rex_inspect", "rex_startup", "activity", "progress", "list_chats", "list_hosts", "create_task", "create_task_brief", "mcp_catalog", "tool_profiles", "set_tool_profiles", "import_instructions", "instruction_status", "admit", "history", "stop", "model_settings", "set_model_settings"] },
+    "HubCommand": { "enum": ["status", "login_start", "login_status", "login_reply", "login_cancel", "rex_open", "rex_adopt", "rex_status", "rex_inspect", "rex_startup", "activity", "progress", "list_chats", "list_hosts", "create_task", "create_task_brief", "mcp_catalog", "tool_profiles", "set_tool_profiles", "import_instructions", "instruction_status", "admit", "history", "stop", "model_settings", "set_model_settings"] },
     "KnownCommandErrorCode": { "enum": ["conflict", "offline", "not_found", "invalid", "auth_required", "busy", "settings_changed", "invalid_response", "too_large", "runtime_failed"] },
     "FailureSource": { "enum": ["local", "transport", "remote"] },
     "FailurePolicy": {
@@ -44,13 +44,15 @@
     "LauncherRequest": { "oneOf": [
       { "type": "object", "additionalProperties": false, "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/RexUuid" }, "command": { "const": "launch_list" }, "args": { "type": "object", "additionalProperties": false, "properties": { "after": { "$ref": "#/$defs/PiId" } }, "required": [] } }, "required": ["version", "id", "command", "args"] },
       { "type": "object", "additionalProperties": false, "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/RexUuid" }, "command": { "const": "launch_create" }, "args": { "$ref": "#/$defs/LauncherCreateArgs" } }, "required": ["version", "id", "command", "args"] },
-      { "type": "object", "additionalProperties": false, "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/RexUuid" }, "command": { "const": "launch_open" }, "args": { "type": "object", "additionalProperties": false, "properties": { "requestId": { "$ref": "#/$defs/RexUuid" }, "chatId": { "$ref": "#/$defs/PiId" } }, "required": ["requestId", "chatId"] } }, "required": ["version", "id", "command", "args"] },
+      { "type": "object", "additionalProperties": false, "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/RexUuid" }, "command": { "const": "launch_open" }, "args": { "type": "object", "additionalProperties": false, "properties": { "requestId": { "$ref": "#/$defs/RexUuid" }, "chatId": { "$ref": "#/$defs/PiId" }, "confirmedOnly": { "type": "boolean" } }, "required": ["requestId", "chatId"] } }, "required": ["version", "id", "command", "args"] },
+      { "type": "object", "additionalProperties": false, "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/RexUuid" }, "command": { "const": "launch_adopt" }, "args": { "$ref": "#/$defs/RexAdoptArgs" } }, "required": ["version", "id", "command", "args"] },
       { "type": "object", "additionalProperties": false, "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/RexUuid" }, "command": { "const": "launch_inspect" }, "args": { "type": "object", "additionalProperties": false, "properties": { "chatId": { "$ref": "#/$defs/PiId" } }, "required": ["chatId"] } }, "required": ["version", "id", "command", "args"] }
     ] },
     "LauncherTask": { "type": "object", "additionalProperties": false, "properties": { "agentRune": { "$ref": "#/$defs/AgentRune" }, "agentName": { "$ref": "#/$defs/AgentName" }, "agentNameAlgorithm": { "$ref": "#/$defs/AgentName" }, "chatId": { "$ref": "#/$defs/PiId" }, "title": { "type": "string", "maxLength": 200 }, "cwd": { "$ref": "#/$defs/NativePath" } }, "required": ["chatId", "title", "cwd"] },
     "LauncherList": { "type": "object", "additionalProperties": false, "properties": { "hubId": { "$ref": "#/$defs/RexUuid" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "items": { "type": "array", "maxItems": 25, "items": { "$ref": "#/$defs/LauncherTask" } }, "next": { "$ref": "#/$defs/PiId" } }, "required": ["hubId", "machineId", "items"] },
     "LauncherCreated": { "type": "object", "additionalProperties": false, "properties": { "agentRune": { "$ref": "#/$defs/AgentRune" }, "agentName": { "$ref": "#/$defs/AgentName" }, "agentNameAlgorithm": { "$ref": "#/$defs/AgentName" }, "hubId": { "$ref": "#/$defs/RexUuid" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "requestId": { "$ref": "#/$defs/RexUuid" }, "chatId": { "$ref": "#/$defs/PiId" }, "title": { "type": "string", "minLength": 1, "maxLength": 200 }, "cwd": { "$ref": "#/$defs/NativePath" }, "brief": { "$ref": "#/$defs/TaskBrief" } }, "required": ["hubId", "machineId", "requestId", "chatId", "title", "cwd", "brief"] },
     "LauncherOpened": { "type": "object", "additionalProperties": false, "properties": { "hubId": { "$ref": "#/$defs/RexUuid" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "ack": { "$ref": "#/$defs/RexOpenAck" } }, "required": ["hubId", "machineId", "ack"] },
+    "LauncherAdopted": { "type": "object", "additionalProperties": false, "properties": { "hubId": { "$ref": "#/$defs/RexUuid" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "ack": { "$ref": "#/$defs/RexAdoptAck" } }, "required": ["hubId", "machineId", "ack"] },
     "LauncherInspection": { "type": "object", "additionalProperties": false, "properties": { "hubId": { "$ref": "#/$defs/RexUuid" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "status": { "$ref": "#/$defs/RexStatusSnapshot" }, "inspection": { "$ref": "#/$defs/RexInspectionSnapshot" } }, "required": ["hubId", "machineId", "status", "inspection"] },
     "RemoteHost": {
       "description": "Local operator registration, not a peer claim. Worker implementation and capabilities must occur together; client-only registrations omit both.",
@@ -79,6 +81,40 @@
     "RemoteRuntimeRoutes": {
       "type": "object", "additionalProperties": false,
       "properties": { "hubId": { "$ref": "#/$defs/TransportId" }, "hosts": { "type": "array", "maxItems": 8, "items": { "type": "object", "additionalProperties": false, "properties": { "machineId": { "$ref": "#/$defs/MachineIdentity" }, "mcp": { "type": "boolean" }, "launcher": { "type": "boolean" }, "readFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "writeFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "controlFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "clientReadFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "clientWriteFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "rexClient": { "$ref": "#/$defs/WorkerRexClient" } }, "required": ["machineId", "readFd", "writeFd", "controlFd"] } } }, "required": ["hubId", "hosts"]
+    },
+    "RexWorkerRegistration": {
+      "description": "Automatic registration over a Rex-authenticated loopback tunnel. Identity is internal; no caller-supplied Tailscale attestation. Capabilities/client configuration are pinned exactly.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "version": { "const": 1 }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "implementation": { "$ref": "#/$defs/Sha256" }, "capabilities": { "$ref": "#/$defs/WorkerCapabilities" }, "rexClient": { "$ref": "#/$defs/WorkerRexClient" }, "hubId": { "$ref": "#/$defs/RexUuid" } },
+      "required": ["version", "machineId", "implementation", "capabilities", "rexClient"]
+    },
+    "RexWorkerRegistry": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "version": { "const": 1 }, "hubId": { "$ref": "#/$defs/RexUuid" }, "hosts": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/RexWorkerRegistration" } } }, "required": ["version", "hosts"]
+    },
+    "RexWorkerConnection": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "version": { "const": 1 }, "server": { "type": "string", "minLength": 1, "maxLength": 4096 }, "hostId": { "$ref": "#/$defs/RexUuid" }, "account": { "type": "string", "minLength": 1, "maxLength": 200 }, "executable": { "type": "string", "minLength": 1, "maxLength": 4096 }, "hubId": { "$ref": "#/$defs/RexUuid" }, "hubPort": { "type": "integer", "minimum": 1, "maximum": 65535 }, "sessionId": { "$ref": "#/$defs/RexSessionId" }, "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 }, "pendingSession": { "type": "boolean" }, "rexClient": { "$ref": "#/$defs/WorkerRexClient" }, "implementation": { "$ref": "#/$defs/Sha256" } }, "required": ["version", "server", "hostId", "account", "executable", "hubPort", "pendingSession", "rexClient", "implementation", "pid"]
+    },
+    "RexEnrollmentAck": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "version": { "const": 1 }, "hubId": { "$ref": "#/$defs/RexUuid" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "port": { "type": "integer", "minimum": 1, "maximum": 65535 } }, "required": ["version", "hubId", "machineId", "port"]
+    },
+    "RexRegistrationFrame": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "kind": { "const": "register" }, "registration": { "$ref": "#/$defs/RexWorkerRegistration" } }, "required": ["kind", "registration"]
+    },
+    "RexRegistrationAck": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "kind": { "const": "registered" }, "hubId": { "$ref": "#/$defs/RexUuid" } }, "required": ["kind", "hubId"]
+    },
+    "RexRuntimeSlot": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "registration": { "$ref": "#/$defs/RexWorkerRegistration" }, "readFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "writeFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "controlFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "clientReadFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "clientWriteFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 } }, "required": ["readFd", "writeFd", "controlFd", "clientReadFd", "clientWriteFd"]
+    },
+    "RexRuntimeRoutes": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "hubId": { "$ref": "#/$defs/RexUuid" }, "slots": { "type": "array", "minItems": 8, "maxItems": 8, "items": { "$ref": "#/$defs/RexRuntimeSlot" } } }, "required": ["slots"]
     },
     "RemoteLinkHeader": {
       "type": "object", "additionalProperties": false,
@@ -198,7 +234,7 @@
       "properties": {
         "authentication": { "enum": ["mock", "api_key", "chatgpt_oauth"] }, "machineId": { "$ref": "#/$defs/ChatListLabel" },
         "implementation": { "$ref": "#/$defs/Sha256" }, "hubId": { "$ref": "#/$defs/TransportId" },
-        "taskBrief": { "type": "integer", "minimum": 0, "maximum": 1 }, "hostInventory": { "type": "integer", "minimum": 0, "maximum": 1 }, "modelSettings": { "type": "integer", "minimum": 0, "maximum": 1 }, "hubGuard": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexStartup": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexOpen": { "type": "integer", "minimum": 0, "maximum": 1 },
+        "taskBrief": { "type": "integer", "minimum": 0, "maximum": 1 }, "hostInventory": { "type": "integer", "minimum": 0, "maximum": 1 }, "modelSettings": { "type": "integer", "minimum": 0, "maximum": 1 }, "hubGuard": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexStartup": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexAdopt": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexOpen": { "type": "integer", "minimum": 0, "maximum": 1 },
         "mainChatId": { "$ref": "#/$defs/PiId" }, "chatId": { "$ref": "#/$defs/PiId" }, "binding": { "$ref": "#/$defs/StatusBinding" },
         "activity": { "$ref": "#/$defs/StatusInspection" }, "provider": { "$ref": "#/$defs/ChatListLabel" }, "model": { "$ref": "#/$defs/StatusModel" }, "tools": { "type": "string", "minLength": 1, "maxLength": 32 }
       }, "required": ["hubId", "mainChatId", "chatId", "tools"]
@@ -444,7 +480,7 @@
     },
     "RexOpenArgs": {
       "type": "object", "additionalProperties": false,
-      "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "requestId": { "$ref": "#/$defs/RexUuid" }, "port": { "type": "integer", "minimum": 1, "maximum": 65535 }, "target": { "$ref": "#/$defs/RexTargetOptions" } },
+      "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "requestId": { "$ref": "#/$defs/RexUuid" }, "port": { "type": "integer", "minimum": 1, "maximum": 65535 }, "target": { "$ref": "#/$defs/RexTargetOptions" }, "confirmedOnly": { "type": "boolean" } },
       "required": ["chatId", "requestId", "port"]
     },
     "RexReadArgs": {
@@ -473,6 +509,15 @@
       "properties": { "version": { "const": 1 }, "hubId": { "$ref": "#/$defs/RexUuid" }, "chatId": { "$ref": "#/$defs/PiId" }, "taskId": { "anyOf": [{ "$ref": "#/$defs/PiId" }, { "type": "null" }] }, "status": { "$ref": "#/$defs/RexAttemptState" }, "binding": { "anyOf": [{ "$ref": "#/$defs/RexPublicBinding" }, { "type": "null" }] }, "previousBinding": { "anyOf": [{ "$ref": "#/$defs/RexPublicBinding" }, { "type": "null" }] }, "bestEffort": { "const": true } },
       "required": ["version", "hubId", "chatId", "taskId", "status", "binding", "previousBinding", "bestEffort"]
     },
+    "RexBootstrapClaim": { "type": "object", "additionalProperties": false, "properties": { "id": { "$ref": "#/$defs/RexUuid" }, "root": { "$ref": "#/$defs/NativePath" }, "blockId": { "$ref": "#/$defs/RexBlockId" } }, "required": ["id", "root", "blockId"] },
+    "RexAdoptArgs": { "type": "object", "additionalProperties": false, "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "requestId": { "$ref": "#/$defs/RexUuid" }, "port": { "type": "integer", "minimum": 1, "maximum": 65535 }, "target": { "$ref": "#/$defs/RexOpenTarget" }, "bootstrap": { "$ref": "#/$defs/RexBootstrapClaim" } }, "required": ["chatId", "requestId", "port", "target", "bootstrap"] },
+    "RexAdoptAck": { "type": "object", "additionalProperties": false, "properties": { "version": { "const": 1 }, "hubId": { "$ref": "#/$defs/RexUuid" }, "chatId": { "$ref": "#/$defs/PiId" }, "requestId": { "$ref": "#/$defs/RexUuid" }, "allocationId": { "$ref": "#/$defs/RexUuid" }, "taskId": { "$ref": "#/$defs/PiId" } }, "required": ["version", "hubId", "chatId", "requestId", "allocationId", "taskId"] },
+    "RexBootstrapBinding": { "type": "object", "additionalProperties": false, "properties": { "sessionId": { "$ref": "#/$defs/RexSessionId" }, "windowId": { "$ref": "#/$defs/RexWindowId" }, "blockId": { "$ref": "#/$defs/RexBlockId" }, "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 } }, "required": ["sessionId", "windowId", "blockId", "pid"] },
+    "RexBootstrapIndex": { "type": "object", "additionalProperties": false, "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/RexUuid" }, "hubId": { "$ref": "#/$defs/RexUuid" }, "machineId": { "$ref": "#/$defs/MachineIdentity" } }, "required": ["version", "id", "hubId", "machineId"] },
+    "RexBootstrapRecord": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/RexUuid" }, "hubId": { "$ref": "#/$defs/RexUuid" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "cwd": { "$ref": "#/$defs/NativePath" }, "client": { "$ref": "#/$defs/NativePath" }, "draftRoot": { "$ref": "#/$defs/NativePath" }, "port": { "type": "integer", "minimum": 1, "maximum": 65535 }, "workerSocket": { "type": "string", "minLength": 1, "maxLength": 100 }, "target": { "$ref": "#/$defs/RexOpenTarget" }, "binding": { "$ref": "#/$defs/RexBootstrapBinding" }, "claim": { "type": "object", "additionalProperties": false, "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "allocationId": { "$ref": "#/$defs/RexUuid" } }, "required": ["chatId", "allocationId"] } }, "required": ["version", "id", "hubId", "machineId", "cwd", "client", "draftRoot", "port", "target"]
+    },
     "RexAllocationPlan": {
       "description": "Native allocation input. Absolute paths, UTF-8 byte limits, socket syntax, assigned-worker authority and executable identity are additional semantic checks.",
       "type": "object",
@@ -483,6 +528,8 @@
         "instanceId": { "$ref": "#/$defs/RexUuid" },
         "client": { "type": "string", "minLength": 1, "maxLength": 4096 },
         "workerSocket": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "bootstrap": { "$ref": "#/$defs/RexBootstrapClaim" },
+        "clientState": { "$ref": "#/$defs/NativePath" },
         "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
         "hubId": { "$ref": "#/$defs/RexUuid" },
         "chatId": { "$ref": "#/$defs/ChatId" },
@@ -596,6 +643,10 @@
     "TaskCreationTarget": { "type": "object", "additionalProperties": false, "properties": { "machineId": { "$ref": "#/$defs/MachineIdentity" }, "cwd": { "$ref": "#/$defs/NativePath" }, "title": { "type": "string", "minLength": 1, "maxLength": 200 }, "problem": { "type": "string", "maxLength": 2048 }, "description": { "type": "string", "maxLength": 8192 } }, "required": ["machineId", "cwd", "title"] },
     "HostItem": { "type": "object", "additionalProperties": false, "properties": { "machineId": { "$ref": "#/$defs/MachineIdentity" }, "kind": { "enum": ["local", "worker"] }, "rex": { "type": "boolean" }, "connection": { "enum": ["local", "connected", "offline", "unknown"] } }, "required": ["machineId", "kind", "rex", "connection"] },
     "HostInventory": { "type": "object", "additionalProperties": false, "properties": { "sampledAtMs": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }, "items": { "type": "array", "items": { "$ref": "#/$defs/HostItem" }, "maxItems": 9 } }, "required": ["sampledAtMs", "items"] },
+    "AgentStartupDraft": { "type": "object", "additionalProperties": false, "properties": { "version": { "const": 1 }, "bootstrapId": { "$ref": "#/$defs/RexUuid" }, "hubId": { "$ref": "#/$defs/RexUuid" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "cwd": { "$ref": "#/$defs/NativePath" }, "creationId": { "$ref": "#/$defs/RexUuid" }, "adoptionId": { "$ref": "#/$defs/RexUuid" }, "inputId": { "$ref": "#/$defs/RexUuid" }, "title": { "type": "string", "minLength": 1, "maxLength": 200 }, "problem": { "type": "string", "minLength": 1, "maxLength": 2048 }, "description": { "type": "string", "maxLength": 8192 } }, "required": ["version", "bootstrapId", "hubId", "machineId", "cwd", "creationId", "adoptionId", "inputId", "title", "problem"] },
+    "AgentWizardRequest": { "type": "object", "additionalProperties": false, "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "action": { "enum": ["poll", "create", "retry", "discard"] }, "problem": { "type": "string", "maxLength": 2048 }, "description": { "type": "string", "maxLength": 8192 } }, "required": ["version", "id", "action"] },
+    "AgentWizardReady": { "type": "object", "additionalProperties": false, "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "allocationId": { "$ref": "#/$defs/RexUuid" }, "inputId": { "$ref": "#/$defs/RexUuid" } }, "required": ["chatId", "allocationId", "inputId"] },
+    "AgentWizardResponse": { "type": "object", "additionalProperties": false, "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "phase": { "enum": ["form", "waiting", "ready", "blocked"] }, "notice": { "type": "string", "maxLength": 1024 }, "saved": { "type": "boolean" }, "ready": { "$ref": "#/$defs/AgentWizardReady" } }, "required": ["version", "id", "phase", "notice", "saved"] },
     "TuiRequest": {
       "description": "Client-only renderer bridge, never a Pi execution channel. One outstanding request; no replay on loss.",
       "type": "object", "additionalProperties": false,

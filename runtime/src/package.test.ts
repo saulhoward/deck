@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:net";
+import { freeHubPort } from "./hub-port.test.support.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -68,9 +68,7 @@ test("installed package runs hub, client, lazy provider imports and native tools
     const restored = join(scratch, "restored");
     const recovery = invoke(["restore", "--from", snapshot, "--directory", restored]); assert.equal(recovery.status, 0, recovery.stderr);
     assert.match(recovery.stdout, /no work resumed/); state = restored; // Serve the restored canonical transcript/receipts below.
-    const probe = createServer(); probe.listen(0, "127.0.0.1"); await once(probe, "listening");
-    const address = probe.address(); assert.ok(address && typeof address !== "string"); const port = address.port;
-    await new Promise<void>((resolve) => probe.close(() => resolve()));
+    const port = await freeHubPort();
     hub = spawn(binary!, ["serve", "--mock", "--directory", state, "--workspace", scratch, "--port", String(port)], { cwd: scratch, env, stdio: ["pipe", "pipe", "pipe"] });
     let errors = ""; hub.stderr!.on("data", (chunk) => { errors += String(chunk); });
     const command = async (name: string, args = {}) => {

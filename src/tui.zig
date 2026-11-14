@@ -68,7 +68,7 @@ const dim = Theme.dim;
 const accent = Theme.green;
 const bar = Theme.dim;
 const hub_bar = bar;
-const Row = struct { text: []const u8 = "", style: vaxis.Style = base, offset: usize = 0, cells: ?Markdown.Line = null, speaker: ?[]const u8 = null, speaker_style: vaxis.Style = dim };
+pub const Row = struct { text: []const u8 = "", style: vaxis.Style = base, offset: usize = 0, cells: ?Markdown.Line = null, speaker: ?[]const u8 = null, speaker_style: vaxis.Style = dim };
 
 const TransportStatus = enum {
     quiet,
@@ -113,13 +113,13 @@ fn glyph(ctx: fw.DrawContext, text: []const u8) struct { text: []const u8, width
     if (width == 0 or width > 16) return .{ .text = "�", .width = 1 };
     return .{ .text = safe, .width = @intCast(width) };
 }
-fn displayWidth(ctx: fw.DrawContext, text: []const u8) usize {
+pub fn displayWidth(ctx: fw.DrawContext, text: []const u8) usize {
     var it = vaxis.unicode.graphemeIterator(text);
     var width: usize = 0;
     while (it.next()) |g| width += glyph(ctx, g.bytes(text)).width;
     return width;
 }
-fn rows(ctx: fw.DrawContext, list: *std.ArrayList(Row), text: []const u8, width: u16, style: vaxis.Style) !void {
+pub fn rows(ctx: fw.DrawContext, list: *std.ArrayList(Row), text: []const u8, width: u16, style: vaxis.Style) !void {
     var it = vaxis.unicode.graphemeIterator(text);
     var start: usize = 0;
     var col: usize = 0;
@@ -141,7 +141,7 @@ fn rows(ctx: fw.DrawContext, list: *std.ArrayList(Row), text: []const u8, width:
     }
     try list.append(ctx.arena, .{ .text = text[start..], .style = style, .offset = start });
 }
-fn line(ctx: fw.DrawContext, surface: fw.Surface, x: u16, y: u16, text: []const u8, style: vaxis.Style, selection_range: ?[2]usize, offset: usize) void {
+pub fn line(ctx: fw.DrawContext, surface: fw.Surface, x: u16, y: u16, text: []const u8, style: vaxis.Style, selection_range: ?[2]usize, offset: usize) void {
     lineLimit(ctx, surface, x, y, text, style, selection_range, offset, surface.size.width);
 }
 fn lineLimit(ctx: fw.DrawContext, surface: fw.Surface, x: u16, y: u16, text: []const u8, style: vaxis.Style, selection_range: ?[2]usize, offset: usize, right: u16) void {
@@ -1076,11 +1076,13 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var chat_id: ?[]const u8 = null;
     var allocation_id: ?[]const u8 = null;
     var worker_socket: ?[]const u8 = null;
+    var bootstrap_id: ?[]const u8 = null;
+    var client_state: ?[]const u8 = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--tui")) continue;
         const key = args[i];
-        if (!std.mem.eql(u8, key, "--port") and !std.mem.eql(u8, key, "--task") and !std.mem.eql(u8, key, "--hub-id") and !std.mem.eql(u8, key, "--rex-allocation") and !std.mem.eql(u8, key, "--worker-socket")) return error.UnsupportedTuiOption;
+        if (!std.mem.eql(u8, key, "--port") and !std.mem.eql(u8, key, "--task") and !std.mem.eql(u8, key, "--hub-id") and !std.mem.eql(u8, key, "--rex-allocation") and !std.mem.eql(u8, key, "--worker-socket") and !std.mem.eql(u8, key, "--agent-bootstrap") and !std.mem.eql(u8, key, "--client-state")) return error.UnsupportedTuiOption;
         i += 1;
         if (i == args.len) return error.MissingOptionValue;
         if (std.mem.eql(u8, key, "--port")) {
@@ -1100,13 +1102,22 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
             if (!wire.validRexUuid(.{ .string = args[i] })) return error.InvalidAllocation;
             allocation_id = args[i];
         }
+        if (std.mem.eql(u8, key, "--client-state")) {
+            if (!@import("mcp_profiles.zig").absolute(args[i])) return error.InvalidArguments;
+            client_state = args[i];
+        }
+        if (std.mem.eql(u8, key, "--agent-bootstrap")) {
+            if (!wire.validRexUuid(.{ .string = args[i] })) return error.InvalidAllocation;
+            bootstrap_id = args[i];
+        }
         if (std.mem.eql(u8, key, "--worker-socket")) {
             if (!std.fs.path.isAbsolute(args[i]) or args[i].len > 100 or std.mem.indexOfAny(u8, args[i], "\x00\r\n") != null) return error.InvalidWorkerSocket;
             worker_socket = args[i];
         }
         try forwarded.appendSlice(init.gpa, &.{ key, args[i] });
     }
-    if (worker_socket != null and allocation_id == null) return error.InvalidAllocation;
+    if ((worker_socket != null or bootstrap_id != null) and allocation_id == null) return error.InvalidAllocation;
+    if (bootstrap_id != null and client_state == null) return error.InvalidAllocation;
     if (allocation_id != null and (hub_id == null or chat_id == null)) return error.InvalidAllocation;
     var bridge = try Bridge.start(.{ .io = init.io, .environ = init.minimal.environ }, init.gpa, forwarded.items);
     defer bridge.deinit();

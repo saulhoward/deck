@@ -1,6 +1,13 @@
 // Operator registration and handshake claims, not peer authentication. Only the
 // native transport can supply observed socket identity to the connection gate.
 import { isAbsolute } from "node:path";
+import { validRexWorkerRegistration, type RexWorkerRegistration } from "./generated/contracts.js";
+export function validRexRegistration(value: unknown): value is RexWorkerRegistration {
+  return validRexWorkerRegistration(value) && validRexClient(value.rexClient) && /^files,bash,rex(,mcp)?,launcher$/.test(value.capabilities.join(","));
+}
+export function sameRexRegistration(left: RexWorkerRegistration, right: RexWorkerRegistration): boolean {
+  return left.machineId === right.machineId && left.implementation === right.implementation && left.capabilities.join(",") === right.capabilities.join(",") && left.rexClient.executable === right.rexClient.executable && left.rexClient.socket === right.rexClient.socket;
+}
 import { validTaskRelayFrame, type TaskRelayFrame, validWorkerRexClient, type WorkerRexClient, validRemoteRegistry, validRemoteWorkerHello, validTailPeer, type RemoteRegistry, type RemoteWorkerHello, type TailPeer } from "./generated/contracts.js";
 export function validPeer(value: unknown): value is TailPeer {
   return validTailPeer(value) && /^(0|[1-9][0-9]*)$/.test(value.userId) && BigInt(value.userId) <= 18446744073709551615n;

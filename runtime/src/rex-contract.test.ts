@@ -78,13 +78,21 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
   const inspectProcess = (sid: string, bid: string) => json<ProcessState>("block", "call", "process", "--session", sid, "--block", bid);
   const childPid = async (sid: string, bid: string) => { const { child } = await inspectProcess(sid, bid); assert.ok(child); return child.pid; };
   const exit = async (sid: string, bid: string) => { const value = await until(() => inspectProcess(sid, bid), (value) => !!value.last_exit); assert.ok(value.last_exit); return value.last_exit; };
+  const quitClient = async (sid: string, bid: string) => {
+    // Escape and colon must be separate terminal events, not an Alt-: sequence.
+    await rex("send-key", "--session", sid, "--block", bid, "Escape");
+    await new Promise(resolve => setTimeout(resolve, 100));
+    await rex("send", "--session", sid, "--block", bid, ":q");
+    await until(() => rex("capture", "--session", sid, "--block", bid, "--trim", "--unwrap"), text => text.includes(":q"));
+    await rex("send", "--session", sid, "--block", bid, "\r");
+  };
   try {
     await until(async () => { try { await access(socket); return true; } catch { return false; } }, Boolean);
     await t.test("explicit Unix endpoint has no sessions/tailnet and caller schemas advertise no idempotency key", async () => {
       const status = await json<{ endpoint: string; session_count: number; tailscale: { state: string }; you: { transport: string }; api_revision: number; rex_version: string }>("server", "status", "--json");
       assert.equal(status.endpoint, endpoint); assert.equal(status.session_count, 0); assert.equal(status.tailscale.state, "disabled"); assert.equal(status.you.transport, "unix");
       assert.equal((await stat(socket)).mode & 0o077, 0);
-      assert.ok([8, 10].includes(status.api_revision), `Unvalidated Rex API ${status.api_revision}`);
+      assert.ok([8, 10, 14].includes(status.api_revision), `Unvalidated Rex API ${status.api_revision}`);
       await assert.rejects(rex("api", "call", "session.view", JSON.stringify({ session_id: "session:00000000-0000-4000-8000-000000000001" })), /status=404 code=session_not_found/);
       t.diagnostic(`Rex ${status.rex_version}; API revision ${status.api_revision}; isolated Unix server`);
       const schema = await json<{ input_schema: { properties: Record<string, unknown>; additionalProperties: boolean } }>("api", "describe", "session.create", "--json");
@@ -191,7 +199,7 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
       await until(capture, (text) => text.includes("Rex startup registered"));
       clientPid = await childPid(clientAllocation.session_id, clientBlock);
       // Test-only simulation of a human typing, not model orchestration via rex send.
-      await rex("send", "--session", clientAllocation.session_id, "--block", clientBlock, "iTERMINAL_TYPED_INPUT\x13");
+      await rex("send", "--session", clientAllocation.session_id, "--block", clientBlock, "TERMINAL_TYPED_INPUT\x13");
       await until(() => command("history", { chatId: task.chatId }), (value) => JSON.stringify(value).includes("no inference performed"));
       assert.match(JSON.stringify(await command("history", { chatId: task.chatId })), /TERMINAL_TYPED_INPUT/);
       assert.doesNotMatch(JSON.stringify(await command("history", { chatId: status.mainChatId })), /TERMINAL_TYPED_INPUT/);
@@ -210,14 +218,14 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
       assert.equal((await exit(clientAllocation.session_id, coldBlock)).exit_code, 1);
       const replacement = (await startHub())!;
       assert.equal(replacement.hubId, status.hubId); assert.equal(replacement.mainChatId, status.mainChatId);
-      await until(capture, (text) => !text.includes("STALE") && text.includes("task / Rex locked"));
+      await until(capture, (text) => !text.includes("STALE") && text.includes("TERMINAL_TYPED_INPUT"));
       assert.equal((await exit(clientAllocation.session_id, coldBlock)).exit_code, 1);
       assert.equal(await childPid(clientAllocation.session_id, clientBlock), clientPid);
       await rex("block", "close", coldBlock, "--session", clientAllocation.session_id);
       assert.equal((await command("list_chats")).items.length, 2);
     });
     await t.test("exiting/replacing a client preserves identity; destroying Rex does not stop in-flight hub work", async () => {
-      await rex("send", "--session", clientAllocation.session_id, "--block", clientBlock, ":q\r");
+      await quitClient(clientAllocation.session_id, clientBlock);
       assert.equal((await exit(clientAllocation.session_id, clientBlock)).exit_code, 0);
       const before = await command("history", { chatId: task.chatId });
       const replacement = await openManaged();
@@ -277,7 +285,7 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
       };
       const receipts = await readdir(join(state, "worker/operations"));
       assert.equal((await sample()).observation?.state, "running");
-      await rex("send", "--session", saved.sessionId, "--block", saved.blockId, ":q\r");
+      await quitClient(saved.sessionId, saved.blockId);
       assert.equal((await exit(saved.sessionId, saved.blockId)).exit_code, 0);
       await writeFile(`${request}.inspect`, "");
       const afterExit = await until(async () => { try { return JSON.parse(await readFile(`${request}.inspect.result`, "utf8")) as RexStartup; } catch { return undefined; } }, (value) => !!value);
@@ -314,7 +322,7 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
       const cli = spawnSync(deckBinary!, ["rex", "open", "--task", task.chatId, "--port", String(port)], { env, encoding: "utf8", timeout: 5000 });
       assert.equal(cli.status, 0, cli.stderr); assert.match(cli.stdout, /reused/);
       assert.deepEqual((await publicStatus()).binding, first);
-      await rex("send", "--session", first.sessionId, "--block", first.blockId, ":q\r"); await exit(first.sessionId, first.blockId);
+      await quitClient(first.sessionId, first.blockId); await exit(first.sessionId, first.blockId);
       await command("rex_open", { chatId: task.chatId, requestId: randomUUID(), port });
       const second = await allocated(); assert.equal(second.sessionId, first.sessionId); assert.notEqual(second.blockId, first.blockId);
       assert.deepEqual((await publicStatus()).previousBinding, first);
@@ -327,6 +335,35 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
       const fourth = await allocated(); sessionIds.push(fourth.sessionId); assert.notEqual(fourth.sessionId, first.sessionId);
       assert.deepEqual(await command("history", { chatId: task.chatId }), before);
       assert.equal((await command("list_chats")).items.length, 3);
+    });
+    await t.test("bare hub creates/reuses a managed hub TUI, restarts exited clients and refuses uncertain creation", async () => {
+      const launch = async () => new Promise<string>((accept, reject) => {
+        execFile(deckBinary!, ["hub", "--port", String(port)], { env, cwd: work, timeout: 15_000, maxBuffer: 16384 }, (error, stdout, stderr) => error ? reject(new Error(stderr)) : accept(stdout));
+      });
+      const recordPath = join(env.DECK_CLIENT_STATE_DIRECTORY, "hubs", status.hubId, "session.json");
+      const firstOutput = await launch();
+      let record = JSON.parse(await readFile(recordPath, "utf8")) as { pending: boolean; binding: RexBinding };
+      const first = record.binding; sessionIds.push(first.sessionId);
+      assert.match(firstOutput, /Hub TUI launched/); assert.ok(firstOutput.includes(first.sessionId));
+      assert.equal(first.chatId, status.mainChatId); assert.equal(record.pending, false);
+      assert.equal((await stat(recordPath)).mode & 0o777, 0o600);
+      const pid = await childPid(first.sessionId, first.blockId);
+      const reused = await launch(); assert.match(reused, /Existing TUI process observed/);
+      assert.equal(await childPid(first.sessionId, first.blockId), pid);
+      assert.equal((await command("list_chats")).items.length, 3);
+      await quitClient(first.sessionId, first.blockId); await exit(first.sessionId, first.blockId);
+      assert.match(await launch(), /Hub TUI launched/);
+      record = JSON.parse(await readFile(recordPath, "utf8"));
+      assert.equal(record.binding.sessionId, first.sessionId); assert.notEqual(record.binding.blockId, first.blockId);
+      await rex("session", "kill", record.binding.sessionId);
+      assert.match(await launch(), /Hub TUI launched/);
+      record = JSON.parse(await readFile(recordPath, "utf8")); sessionIds.push(record.binding.sessionId);
+      assert.notEqual(record.binding.sessionId, first.sessionId);
+      const before = await json<Sessions>("session", "ls", "--json", "--short=false");
+      await writeFile(recordPath, JSON.stringify({ ...record, pending: true }));
+      await assert.rejects(launch(), /unconfirmed/);
+      assert.deepEqual(await json<Sessions>("session", "ls", "--json", "--short=false"), before);
+      await writeFile(recordPath, JSON.stringify(record));
     });
   } finally {
     // Release any test-only model gate even when an assertion failed.

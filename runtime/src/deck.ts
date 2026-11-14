@@ -12,8 +12,8 @@ import { projectProgress } from "./progress.js";
 import { configurationIdle, importingInstructions, instructionHash, instructionImport, IMPORT_KIND, InstructionRequest, InstructionSourceDoc, type InstructionImportResult } from "./instruction-import.js";
 import { RexInspector } from "./rex-inspection.js";
 import { rexReconciliation, RexReconcileRequest, allocationRequest, type ReconcileResult } from "./rex-reconciliation.js";
-import { validOpenArgs, validResolvedTarget } from "./rex-open-contracts.js";
-import { validRexAllocationPlan, validRexAllocationReceiptQuery, type RexOpenArgs, type RexOpenAck, type RexStatusSnapshot, type ChatListPage, type ActivitySnapshot, type KnownCommandErrorCode } from "./generated/contracts.js";
+import { validOpenArgs, validAdoptArgs, validResolvedTarget } from "./rex-open-contracts.js";
+import { validRexAllocationPlan, validRexAllocationReceiptQuery, type RexOpenArgs, type RexOpenAck, type RexAdoptArgs, type RexAdoptAck, type RexStatusSnapshot, type ChatListPage, type ActivitySnapshot, type KnownCommandErrorCode } from "./generated/contracts.js";
 import { prefixUnits } from "./view-text.js";
 import { REX_KIND, rexAllocation, RexDoc, RexRequest, rexCoherent, rexTarget, rexUuid, rexBlock, rexStartup, type RexInput, type RexTarget, type RexResult } from "./rex-allocation.js";
 import { bindImplementation, checkCompatibility, defaultImplementation, stampImplementation } from "./compatibility.js";
@@ -441,6 +441,24 @@ export class DeckRuntime {
     });
   }
 
+  // First claim of an already-running, native-provenanced wizard block. The
+  // native worker checks its private record, exact process and saved task host.
+  // Exact retries retrieve the same Pi allocation task; they do not re-adopt.
+  async adoptTerminal(args: RexAdoptArgs): Promise<RexAdoptAck> {
+    if (!validAdoptArgs(args) || !this.rexClient || !this.localFiles) throw new DeckError("invalid", "Invalid bootstrap adoption");
+    const chat = await this.chat(args.chatId);
+    const binding = await this.harness.snapshot(ChatDoc, chat.id, context);
+    if (!binding || binding.kind !== "task") throw new DeckError("invalid", "Bootstrap adoption requires a saved task");
+    const remote = binding.machineId === this.localMachineId ? undefined : this.host?.rexClientFor?.(binding.machineId);
+    if (binding.machineId !== this.localMachineId && !remote) throw new DeckError("offline", "Assigned worker lacks a registered client; no fallback");
+    const target = rexTarget({ ...args.target, client: remote?.executable ?? this.rexClient, port: args.port, bootstrap: args.bootstrap, clientState: args.bootstrap.root, ...(remote ? { workerSocket: remote.socket } : {}) });
+    const taskId = await this.allocateTerminal(args.chatId, args.requestId, target, undefined, { machineId: binding.machineId, cwd: binding.cwd });
+    const task = await this.harness.getTask(taskId, context);
+    const input = task?.input as RexInput | undefined;
+    if (!input?.plan.allocationId || input.plan.bootstrap?.id !== args.bootstrap.id || input.plan.bootstrap.blockId !== args.bootstrap.blockId) throw new DeckError("conflict", "Bootstrap admission unconfirmed");
+    return { version: 1, hubId: this.hubId, chatId: args.chatId, requestId: args.requestId, taskId: String(taskId), allocationId: input.plan.allocationId };
+  }
+
   // Best-effort explicit terminal management, not a model tool or replay loop.
   async openTerminal(args: RexOpenArgs): Promise<RexOpenAck> {
     if (!validOpenArgs(args)) throw new DeckError("invalid", "Invalid Rex open arguments");
@@ -458,11 +476,15 @@ export class DeckRuntime {
     const remote = machine === this.localMachineId ? undefined : this.host?.rexClientFor?.(machine);
     if (machine !== this.localMachineId && !remote) throw new DeckError("offline", "Assigned worker lacks a registered task client; no local fallback");
     const saved = rexTarget({ ...target, client: remote?.executable ?? this.rexClient, port: args.port, ...(remote ? { workerSocket: remote.socket } : {}) });
+    // An ordinary explicit reopen creates a new terminal, never another claim
+    // on the original creation wizard (which may have exited long ago).
+    delete saved.bootstrap;
     const ack = (taskId: number, status: RexOpenAck["status"]): RexOpenAck => ({ version: 1, chatId: args.chatId, requestId: args.requestId, taskId: String(taskId), status, completion: "not_waited", bestEffort: true });
     // Retrieving an admitted request does not inspect/create or rewrite its plan.
     const receipt = await this.harness.snapshot(RexRequest, chat.id, args.requestId, context);
     if (receipt?.taskId) return ack(await this.allocateTerminal(args.chatId, args.requestId, saved), "admitted");
     if (prior && prior.state.status !== "terminal") throw new DeckError("busy", "Rex creation is still pending; inspect status before another attempt");
+    if (args.confirmedOnly && prior && !doc?.binding && (prior.state.status !== "terminal" || prior.state.outcome.status !== "completed" || (prior.state.outcome.result as RexResult)?.status !== "not_allocated")) throw new DeckError("conflict", "Previous Rex allocation is unconfirmed; inspect/reconcile it before an explicit new attempt. Resume did not create a terminal");
     let sessionId: string | undefined;
     if (doc?.binding) {
       const sample = await this.inspectTerminal(args.chatId);

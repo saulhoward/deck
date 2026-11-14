@@ -15,6 +15,8 @@ async function until<T>(read: () => Promise<T>, accept: (value: T) => boolean): 
 
 test("public Rex CLI/HTTP uses packaged native effects for new, reuse, replacement and explicit unknown retry", { skip: !binary, timeout: 25_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "deck-open-native-")), server = "unix:///tmp/deck%20rex-fake.sock";
+  // Initialize the empty state before adding unrelated fake-CLI fixtures.
+  assert.equal(spawnSync(binary!, ["init", "--directory", root]).status, 0);
   const rex = await fakeRex(root, "", server, true); await writeFile(join(root, "views"), "0");
   const bin = join(root, "bin"); await mkdir(bin); await symlink(process.execPath, join(bin, "node"));
   const probe = createServer(); probe.listen(0, "127.0.0.1"); await once(probe, "listening"); const address = probe.address(); assert.ok(address && typeof address !== "string"); const port = address.port;
@@ -22,7 +24,6 @@ test("public Rex CLI/HTTP uses packaged native effects for new, reuse, replaceme
   // An isolated PATH cannot fall through to the user's installed Rex. Routing
   // and focus env must not escape into the native discovery/allocation CLI.
   const env = { ...process.env, PATH: bin, REX_SERVER: "https://wrong.example", REX_HOME: "https://wrong.example", REX_SESSION: "PRIVATE", REX_BLOCK: "PRIVATE", OPENAI_API_KEY: "PRIVATE", DECK_CLIENT_STATE_DIRECTORY: join(root, "drafts") };
-  assert.equal(spawnSync(binary!, ["init", "--directory", root], { env }).status, 0);
   const hub = spawn(binary!, ["serve", "--mock", "--directory", root, "--workspace", root, "--port", String(port)], { env });
   const closed = once(hub, "close"); let errors = ""; hub.stderr.on("data", (chunk) => { errors += String(chunk); }); hub.stdout.resume();
   let hubId: string | undefined;

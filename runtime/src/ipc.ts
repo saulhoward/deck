@@ -8,7 +8,7 @@ import { validHostArgs } from "./host-inventory.js";
 import { validModelSettingsArgs } from "./model-settings-contracts.js";
 import type { SetModelSettingsArgs } from "./generated/contracts.js";
 import { validStatusLoginArgs } from "./status-login-contracts.js";
-import { validOpenArgs, validRexReadArgs } from "./rex-open-contracts.js";
+import { validOpenArgs, validAdoptArgs, validRexReadArgs } from "./rex-open-contracts.js";
 import type { Login } from "./login.js";
 import { encodeFrame, FrameDecoder, FrameSizeError, PROTOCOL_VERSION } from "./protocol.js";
 import { responseFrame } from "./responses.js";
@@ -52,12 +52,16 @@ export async function dispatch(runtime: DeckRuntime, request: Record<string, unk
       // Project Deck metadata without rewriting retained documents. Pi model
       // parameters and global inspection records remain compatible opaque data.
       const binding = saved && { ...agentNameFields(saved), machineId: saved.machineId, cwd: saved.cwd, kind: saved.kind, title: saved.title, ...(saved.parentChatId === undefined ? {} : { parentChatId: saved.parentChatId }), ...(saved.ownerTaskId === undefined ? {} : { ownerTaskId: saved.ownerTaskId }), ...(saved.brief ? { brief: saved.brief } : {}) };
-      return { ...(runtime.authentication ? { authentication: runtime.authentication } : {}), ...(!taskClient && runtime.localMachineId ? { machineId: runtime.localMachineId } : {}), implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, modelSettings: 1, taskBrief: 1, ...(taskClient ? {} : { hostInventory: 1 }), rexStartup: 1, rexOpen: runtime.rexClient && runtime.localFiles ? 1 : 0, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding, ...(taskClient ? {} : { activity: await runtime.harness.inspect(context) }), provider: model?.provider, model: taskClient && model ? { provider: model.provider, modelId: model.modelId } : model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
+      return { ...(runtime.authentication ? { authentication: runtime.authentication } : {}), ...(!taskClient && runtime.localMachineId ? { machineId: runtime.localMachineId } : {}), implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, modelSettings: 1, taskBrief: 1, ...(taskClient ? {} : { hostInventory: 1, rexAdopt: 1 }), rexStartup: 1, rexOpen: runtime.rexClient && runtime.localFiles ? 1 : 0, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding, ...(taskClient ? {} : { activity: await runtime.harness.inspect(context) }), provider: model?.provider, model: taskClient && model ? { provider: model.provider, modelId: model.modelId } : model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
     }
     case "model_settings":
     case "set_model_settings": {
       if (request.hubId !== runtime.hubId || !validModelSettingsArgs(String(request.command), args)) throw new DeckError("invalid", "Model settings require a selected chat and explicit hub identity");
       return request.command === "model_settings" ? runtime.modelSettings(text(args.chatId, "chatId")) : runtime.setModelSettings(args as SetModelSettingsArgs);
+    }
+    case "rex_adopt": {
+      if (request.hubId !== runtime.hubId || !validAdoptArgs(args)) throw new DeckError("invalid", "Bootstrap adoption requires valid arguments and explicit hub identity");
+      return runtime.adoptTerminal(args);
     }
     case "rex_open": {
       if (request.hubId !== runtime.hubId || !validOpenArgs(args)) throw new DeckError("invalid", "Rex open requires valid arguments and explicit hub identity");

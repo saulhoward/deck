@@ -9,7 +9,7 @@ import { privateJson,privateOwner,type LauncherTarget } from "./launcher-client.
 export type LaunchMutation=Extract<LauncherRequest,{command:"launch_create"|"launch_open"}>;
 export class LauncherDrafts {
   readonly directory:string;private readonly root:string;
-  constructor(readonly target:LauncherTarget,root?:string){
+  constructor(readonly target:Pick<LauncherTarget,"hubId"|"machineId">,root?:string){
     this.root=root??process.env.DECK_CLIENT_STATE_DIRECTORY??(process.platform==="darwin"?join(homedir(),"Library/Application Support/deck/client"):join(process.env.XDG_STATE_HOME||join(homedir(),".local/state"),"deck/client"));
     if(!isAbsolute(this.root))throw new Error("Client draft root must be absolute");
     this.directory=join(this.root,"launcher-drafts",createHash("sha256").update(JSON.stringify([target.hubId,target.machineId])).digest("hex"));

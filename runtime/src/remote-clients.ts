@@ -7,7 +7,8 @@ import { ChatDoc, DeckError, type DeckRuntime } from "./deck.js";
 import { RexDoc, REX_KIND, type RexInput } from "./rex-allocation.js";
 import { dispatch } from "./ipc.js";
 import { launcherResponse } from "./launcher-hub.js";
-import { validWorkerFrame } from "./remote-contracts.js";
+import { validWorkerFrame, validRexRegistration } from "./remote-contracts.js";
+import { validRexRegistrationFrame, type RexWorkerRegistration } from "./generated/contracts.js";
 import { validClientRequest } from "./command-contracts.js";
 import { validSafePiId } from "./mutation-contracts.js";
 import { validRexAllocationPlan, type TaskRelayFrame, type WorkerRexClient, type ResponseEnvelope } from "./generated/contracts.js";
@@ -45,7 +46,14 @@ export async function taskClientResponse(runtime: DeckRuntime, machineId: string
   catch (error) { response = { version: 1, id: request.id, ok: false, error: { code: error instanceof DeckError ? error.code : "runtime_failed", message: error instanceof DeckError ? error.message : "Task command failed; outcome unconfirmed" } }; }
   return responseFrame(response, request).subarray(4).toString("utf8");
 }
+type ClientTarget = { machineId: string; client: WorkerRexClient; launcher: boolean };
 export function serveWorkerClients(runtime: DeckRuntime, machineId: string, client: WorkerRexClient, readFd: number, writeFd: number, launcher = false) {
+  return serveClients(runtime, readFd, writeFd, { machineId, client, launcher });
+}
+export function serveAutomaticWorkerClients(runtime: DeckRuntime, readFd: number, writeFd: number, register: (registration: RexWorkerRegistration) => void) {
+  return serveClients(runtime, readFd, writeFd, undefined, register);
+}
+function serveClients(runtime: DeckRuntime, readFd: number, writeFd: number, target?: ClientTarget, register?: (registration: RexWorkerRegistration) => void) {
   const reader = new Socket({ fd: readFd, readable: true, writable: false });
   let writer: Socket;
   try { writer = new Socket({ fd: writeFd, readable: false, writable: true }); }
@@ -57,6 +65,14 @@ export function serveWorkerClients(runtime: DeckRuntime, machineId: string, clie
   void (async () => {
     try {
       for await (const raw of decoder) {
+        if (!target) {
+          if (!register || !validRexRegistrationFrame(raw) || !validRexRegistration(raw.registration) || raw.registration.hubId !== undefined && raw.registration.hubId !== runtime.hubId) throw new Error("Invalid native registration");
+          register({ ...raw.registration, hubId: runtime.hubId });
+          target = { machineId: raw.registration.machineId, client: raw.registration.rexClient, launcher: true };
+          await new Promise<void>((resolve, reject) => writer.write(encodeFrame({ kind: "registered", hubId: runtime.hubId }), error => error ? reject(error) : resolve()));
+          continue;
+        }
+        const { machineId, client, launcher } = target;
         if (!validWorkerFrame(raw) || pending.size >= 8) throw new Error();
         const key = `${raw.connectionId}:${raw.id}`; if (pending.has(key)) throw new Error(); pending.add(key);
         void (async () => {

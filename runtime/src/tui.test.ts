@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { chmod, readFile, readdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { freeHubPort } from "./hub-port.test.support.js";
 import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -257,9 +258,7 @@ test("real PTY: detach remains responsive while HTTP history is stalled", { skip
 });
 test("real PTY: real isolated mock hub retains input and answer after TUI detach", { skip: !testBinary, timeout: 20_000 }, async () => {
   assert.ok(testBinary); const local = await clientEnv();
-  const reservation = createServer(); reservation.listen(0, "127.0.0.1"); await once(reservation, "listening");
-  const address = reservation.address(); assert.ok(address && typeof address !== "string"); const port = address.port;
-  await new Promise<void>((resolve) => reservation.close(() => resolve()));
+  const port = await freeHubPort();
   const directory = join(local.env.DECK_CLIENT_STATE_DIRECTORY, "hub");
   const initialize = spawn(resolve(testBinary), ["init", "--directory", directory], { env: local.env }); initialize.stdout.resume(); initialize.stderr.resume();
   const initialized = (await once(initialize, "close"))[0];
@@ -307,12 +306,12 @@ test("real PTY: Vesper sidebar, centered Markdown/table, expanding prompt and En
   try {
     const output = await pty(f.port, f.local.env, [
       { wait: "Report" }, { wait_row: { row: 38, text: "Δ hub" } }, { capture: "collapsed" },
-      { resize: [40, 140] }, { sleep: .2 }, { capture: "wide" },
-      { keys: "hello" }, { keys: "\x1b[13;2u" }, { keys: "second" }, { keys: "\x1b[13;2u" }, { keys: "third" }, { capture: "expanded" },
+      { resize: [40, 140] }, { wait_row: { row: 2, text: "Δ hub" } }, { capture: "wide" },
+      { keys: "hello" }, { keys: "\x1b[13;2u" }, { keys: "second" }, { keys: "\x1b[13;2u" }, { keys: "third" }, { wait: "third" }, { capture: "expanded" },
       { keys: "\r" }, { wait: "Input admitted" }, { keys: "\x1b" },
-      { resize: [40, 80] }, { capture: "narrow" },
-      { keys: ":sidebar-toggle\r" }, { capture: "forced" },
-      { resize: [40, 140] }, { keys: ":sidebar-toggle\r" }, { capture: "hidden" }, { keys: ":q\r" },
+      { resize: [40, 80] }, { wait_row: { row: 38, text: "Δ hub" } }, { capture: "narrow" },
+      { keys: ":sidebar-toggle\r" }, { wait_row: { row: 2, text: "Δ hub" } }, { capture: "forced" },
+      { resize: [40, 140] }, { keys: ":sidebar-toggle\r" }, { wait_row: { row: 38, text: "Δ hub" } }, { capture: "hidden" }, { keys: ":q\r" },
     ], screens);
     if (process.env.DECK_TUI_CAPTURE) console.log(JSON.stringify(screens));
     // pyte display strings omit the continuation cell of wide glyphs.

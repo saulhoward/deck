@@ -120,11 +120,32 @@ pub fn session(native: Native, config: wire.RemoteWorkerConfig, implementation: 
     return sessionConfigured(native, config, implementation, executable, journal, address, verify, stop_flag, if (mcp) |*p| p else null);
 }
 fn sessionConfigured(native: Native, config: wire.RemoteWorkerConfig, implementation: []const u8, executable: []const u8, journal: []const u8, address: std.Io.net.IpAddress, verify: @import("remote_link.zig").Verify, stop_flag: *std.atomic.Value(bool), mcp: ?*const @import("mcp_profiles.zig").Profiles) !void {
+    return sessionWithTrust(native, .{ .hubId = config.hubId, .machineId = config.machineId, .rexClient = config.rexClient, .launcher = config.launcher }, implementation, journal, address, .{ .tailscale = .{ .executable = executable, .expected = config.hubPeer, .verify = verify } }, stop_flag, mcp);
+}
+pub const SessionConfig = struct { hubId: []const u8, machineId: []const u8, rexClient: ?wire.WorkerRexClient = null, launcher: ?bool = null };
+const TransportTrust = union(enum) {
+    tailscale: struct { executable: []const u8, expected: wire.TailPeer, verify: @import("remote_link.zig").Verify },
+    rex,
+    fn check(self: @This(), native: Native, fd: tcp.fd_t, stop_flag: *std.atomic.Value(bool)) !void {
+        switch (self) {
+            .tailscale => |t| try verified(native, t.executable, fd, t.expected, t.verify, stop_flag),
+            .rex => try tcp.requireLoopback(fd),
+        }
+    }
+};
+// Only the native Rex owner calls this after authenticated enrollment and an
+// identity-pinned owned tunnel. A raw address/CLI flag cannot opt out of legacy
+// peer verification. Broken streams retain the same uncertainty/receipt rules.
+pub fn sessionRex(native: Native, config: SessionConfig, implementation: []const u8, journal: []const u8, tunnel: *@import("rex_forward.zig").Tunnel, stop_flag: *std.atomic.Value(bool), mcp: ?*const @import("mcp_profiles.zig").Profiles) !void {
+    if (!try tunnel.alive()) return error.RexForwardUnavailable;
+    return sessionWithTrust(native, config, implementation, journal, try std.Io.net.IpAddress.parse("127.0.0.1", tunnel.port), .rex, stop_flag, mcp);
+}
+fn sessionWithTrust(native: Native, config: SessionConfig, implementation: []const u8, journal: []const u8, address: std.Io.net.IpAddress, transport_trust: TransportTrust, stop_flag: *std.atomic.Value(bool), mcp: ?*const @import("mcp_profiles.zig").Profiles) !void {
     if (config.launcher) |enabled| if (!enabled or config.rexClient == null) return error.InvalidWorkerConfig;
     if (mcp) |p| if (!std.mem.eql(u8, p.config.machineId, config.machineId)) return error.McpHostMismatch;
     const data = try tcp.connect(address);
     defer Native.close(data);
-    try verified(native, executable, data, config.hubPeer, verify, stop_flag);
+    try transport_trust.check(native, data, stop_flag);
     try tcp.send(native.io, data, wire.RemoteLinkHeader{ .version = 1, .channel = .data, .hubId = config.hubId, .machineId = config.machineId });
     const bytes = try tcp.receive(native.io, data);
     defer a.free(bytes);
@@ -137,14 +158,14 @@ fn sessionConfigured(native: Native, config: wire.RemoteWorkerConfig, implementa
     try ack(native.io, data, header);
     const control = try tcp.connect(address);
     defer Native.close(control);
-    try verified(native, executable, control, config.hubPeer, verify, stop_flag);
+    try transport_trust.check(native, control, stop_flag);
     header.channel = .control;
     try tcp.send(native.io, control, header);
     try ack(native.io, control, header);
     const clients = if (config.rexClient != null) try tcp.connect(address) else null;
     defer if (clients) |fd| Native.close(fd);
     if (clients) |fd| {
-        try verified(native, executable, fd, config.hubPeer, verify, stop_flag);
+        try transport_trust.check(native, fd, stop_flag);
         header.channel = .clients;
         try tcp.send(native.io, fd, header);
         try ack(native.io, fd, header);
@@ -218,14 +239,17 @@ fn clientListener(native: Native, path: []const u8) !LocalListener {
     return .{ .server = server, .inode = inode.? };
 }
 pub fn run(native: Native, args: []const []const u8) !void {
+    if (args.len > 0 and std.mem.eql(u8, args[0], "rex")) return @import("rex_worker.zig").run(native, args[1..]);
     if (args.len == 1 and std.mem.eql(u8, args[0], "--help")) {
         try std.Io.File.stdout().writeStreamingAll(native.io,
             \\deck-worker (also available as deck worker):
+            \\  rex --directory ABSOLUTE_DIRECTORY --hub REX_HOST --client ABSOLUTE_DECK [--rex ABSOLUTE_REX] [--port 52800]
+            \\    Rex API 14 transport and automatic registration; foreground native worker.
             \\  peer --tailscale ABSOLUTE_EXECUTABLE
             \\  init --directory NEW_ABSOLUTE_DIRECTORY --hub-id HUB_ID --hub-address TAILSCALE_IP:PORT --hub-node STABLE_NODE_ID --hub-user DECIMAL_USER_ID [--client /absolute/deck] [--mcp /private/profiles.json] [--launcher]
             \\  identity|run --directory ABSOLUTE_DIRECTORY --tailscale ABSOLUTE_EXECUTABLE
             \\Explicit peer/implementation approval is required. Default: files/bash only.
-            \\--client opts into Rex (local Unix, API 8/10) and a private task relay socket.
+            \\--client opts into Rex (local Unix, API 8/10/14) and a private task relay socket.
             \\Approve its exact client path/socket and files,bash,rex capabilities on the hub.
             \\--mcp opts into native stdio MCP; approve files,bash,mcp (or files,bash,rex,mcp).
             \\--launcher requires --client; explicitly approve launcher as the final capability.

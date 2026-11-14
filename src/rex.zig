@@ -8,11 +8,11 @@ pub const Plan = contracts.RexAllocationPlan;
 // Only revisions exercised by isolated installed-CLI contract tests. This is
 // not a minimum-version check; future/intermediate revisions remain refused.
 pub fn supportedApi(revision: i64) bool {
-    return revision == 8 or revision == 10;
+    return revision == 8 or revision == 10 or revision == 14;
 }
 test "Rex API support is an explicit tested set, not a version range" {
-    try std.testing.expect(supportedApi(8) and supportedApi(10));
-    for ([_]i64{ -1, 0, 7, 9, 11, 9007199254740991 }) |revision| try std.testing.expect(!supportedApi(revision));
+    try std.testing.expect(supportedApi(8) and supportedApi(10) and supportedApi(14));
+    for ([_]i64{ -1, 0, 7, 9, 11, 12, 13, 15, 9007199254740991 }) |revision| try std.testing.expect(!supportedApi(revision));
 }
 fn refuse(code: []const u8) Result {
     // Never expose CLI stderr, session contents or authentication diagnostics.
@@ -22,7 +22,7 @@ fn absolute(value: []const u8) bool {
     return value.len > 0 and value.len <= 4096 and value[0] == '/' and std.mem.indexOfScalar(u8, value, 0) == null;
 }
 fn valid(plan: Plan) bool {
-    return absolute(plan.executable) and absolute(plan.client) and endpoint.valid(plan.server);
+    return absolute(plan.executable) and absolute(plan.client) and endpoint.valid(plan.server) and (plan.clientState == null or absolute(plan.clientState.?)) and (plan.bootstrap == null or absolute(plan.bootstrap.?.root));
 }
 fn cli(native: Native, allocator: std.mem.Allocator, cwd: []const u8, plan: Plan, suffix: []const []const u8, cancelled: *std.atomic.Value(bool)) !Result {
     var argv: std.array_list.Managed([]const u8) = .init(allocator);
@@ -38,15 +38,31 @@ fn sameServer(native: Native, allocator: std.mem.Allocator, cwd: []const u8, pla
     return supportedApi(parsed.value.api_revision) and endpoint.same(parsed.value.endpoint, plan.server) and std.mem.eql(u8, parsed.value.host_id, plan.hostId) and std.mem.eql(u8, parsed.value.instance_id, plan.instanceId);
 }
 
+pub fn clientPath(native: Native, allocator: std.mem.Allocator) ![]const u8 {
+    const executable = try std.process.executablePathAlloc(native.io, allocator);
+    if (std.mem.eql(u8, std.fs.path.basename(executable), ".deck-wrapped")) return std.fs.path.join(allocator, &.{ std.fs.path.dirname(executable).?, "deck" });
+    return executable;
+}
 pub fn allocate(native: Native, allocator: std.mem.Allocator, cwd: []const u8, encoded: []const u8, cancelled: *std.atomic.Value(bool)) !Result {
     return allocateUsing(native, allocator, cwd, encoded, cancelled, null);
 }
 pub fn allocateUsing(native: Native, allocator: std.mem.Allocator, cwd: []const u8, encoded: []const u8, cancelled: *std.atomic.Value(bool), approved: ?contracts.WorkerRexClient) !Result {
+    return allocateClient(native, allocator, cwd, encoded, cancelled, approved, false, null);
+}
+pub fn allocateBound(native: Native, allocator: std.mem.Allocator, cwd: []const u8, machine: []const u8, encoded: []const u8, cancelled: *std.atomic.Value(bool), approved: ?contracts.WorkerRexClient) !Result {
+    return allocateClient(native, allocator, cwd, encoded, cancelled, approved, false, machine);
+}
+// Dedicated local hub launcher; never exposed as a native tool operation or a
+// worker capability. Canonical hub terminals are not task allocations.
+pub fn allocateHub(native: Native, allocator: std.mem.Allocator, cwd: []const u8, encoded: []const u8, cancelled: *std.atomic.Value(bool)) !Result {
+    return allocateClient(native, allocator, cwd, encoded, cancelled, null, true, null);
+}
+fn allocateClient(native: Native, allocator: std.mem.Allocator, cwd: []const u8, encoded: []const u8, cancelled: *std.atomic.Value(bool), approved: ?contracts.WorkerRexClient, hub_client: bool, machine: ?[]const u8) !Result {
     if (encoded.len > 16 * 1024) return refuse("invalid");
     const parsed = contracts.parseRexAllocationPlan(allocator, encoded) catch return refuse("invalid");
     defer parsed.deinit();
     const plan = parsed.value;
-    if (!valid(plan)) return refuse("invalid");
+    if (!valid(plan) or (hub_client and (plan.workerSocket != null or plan.allocationId != null or plan.bootstrap != null))) return refuse("invalid");
     // Only our own Deck client (the packaged wrapper when present), never an
     // arbitrary process/runner chosen by a model or a public caller.
     const executable = try std.process.executablePathAlloc(native.io, allocator);
@@ -60,6 +76,13 @@ pub fn allocateUsing(native: Native, allocator: std.mem.Allocator, cwd: []const 
     if (cancelled.load(.acquire)) return refuse("cancelled");
     if (!(sameServer(native, allocator, cwd, plan, cancelled) catch false)) return refuse(if (cancelled.load(.acquire)) "cancelled" else "server_unavailable");
     if (cancelled.load(.acquire)) return refuse("cancelled");
+    if (plan.bootstrap != null) {
+        return @import("rex_bootstrap.zig").adopt(native, allocator, cwd, machine orelse return refuse("invalid"), plan, cancelled) catch |err| switch (err) {
+            error.InvalidBootstrap, error.BootstrapAlreadyClaimed => refuse("invalid"),
+            error.BootstrapNotRunning => refuse("server_unavailable"),
+            else => refuse("effect_uncertain"),
+        };
+    }
     const port = try std.fmt.allocPrint(allocator, "{d}", .{plan.port});
     // From this point any failure is uncertain. Killing this CLI cannot undo
     // an allocation that Rex already accepted on its independent connection.
@@ -69,9 +92,13 @@ pub fn allocateUsing(native: Native, allocator: std.mem.Allocator, cwd: []const 
     } else {
         try launch.appendSlice(&.{ "new", plan.label });
     }
-    try launch.appendSlice(&.{ "--json", "--cwd", cwd, "--shell=none", "--keep-open", "--", client, "agent", "--tui", "--port", port, "--task", plan.chatId, "--hub-id", plan.hubId });
+    try launch.appendSlice(&.{ "--json", "--cwd", cwd, "--shell=none", "--keep-open", "--", client });
+    if (hub_client) {
+        try launch.appendSlice(&.{ "hub", "--here", "--tui", "--port", port, "--hub-id", plan.hubId });
+    } else try launch.appendSlice(&.{ "agent", "--tui", "--port", port, "--task", plan.chatId, "--hub-id", plan.hubId });
     if (plan.allocationId) |allocation| try launch.appendSlice(&.{ "--rex-allocation", allocation });
     if (plan.workerSocket) |socket| try launch.appendSlice(&.{ "--worker-socket", socket });
+    if (plan.clientState) |root| try launch.appendSlice(&.{ "--client-state", root });
     const created = cli(native, allocator, cwd, plan, launch.items, cancelled) catch return refuse("effect_uncertain");
     if (!created.ok or cancelled.load(.acquire)) return refuse("effect_uncertain");
     const Window = struct { window_id: []const u8, block_ids: [][]const u8 };

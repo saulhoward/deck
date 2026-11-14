@@ -28,6 +28,11 @@ test("offline backup incorporates WAL via SQLite, preserves receipts/config, exc
     await writeFile(join(source, "worker", "operations", "43.json.tmp"), "unpublished receipt", { mode: 0o600 });
     await writeFile(join(source, "auth.json"), "PRIVATE_FAKE_CREDENTIAL", { mode: 0o600 });
     await writeFile(join(source, "serve-test.log"), "PRIVATE_LOG", { mode: 0o600 });
+    const registration = JSON.stringify({ version: 1, hubId: "00000000-0000-4000-8000-000000000001", hosts: [] });
+    await writeFile(join(source, "rex-workers.json"), registration, { mode: 0o600 });
+    await writeFile(join(source, `.${"a".repeat(32)}.tmp`), "unpublished registration", { mode: 0o600 });
+    await mkdir(join(source, "client"), { mode: 0o700 });
+    await writeFile(join(source, "client", "draft"), "PRIVATE_CLIENT_STATE", { mode: 0o600 });
     const before = await readFile(join(source, "session.sqlite")); const wal = await readFile(join(source, "session.sqlite-wal"));
     const backup = join(root, "backup"); assert.equal((await makeBackup(source, backup)).credentials, false);
     assert.deepEqual(await readFile(join(source, "session.sqlite")), before); assert.deepEqual(await readFile(join(source, "session.sqlite-wal")), wal);
@@ -36,11 +41,15 @@ test("offline backup incorporates WAL via SQLite, preserves receipts/config, exc
     const restored = join(root, "restored"); await staged(restored); await restoreBackup(backup, restored);
     await assert.rejects(lstat(join(restored, RESTORE_MARKER)), { code: "ENOENT" });
     assert.equal(await readFile(join(restored, "config.json"), "utf8"), CONFIG);
+    assert.equal(await readFile(join(restored, "rex-workers.json"), "utf8"), registration);
+    await assert.rejects(lstat(join(restored, "client")), { code: "ENOENT" });
+    assert.ok(!files.some(name => name.endsWith(".tmp")));
+    assert.equal(await readFile(join(source, "client", "draft"), "utf8"), "PRIVATE_CLIENT_STATE");
     assert.equal(await readFile(join(restored, "worker", "operations", "42.json"), "utf8"), receipt);
     assert.deepEqual(await readdir(join(restored, "worker", "operations")), ["42.json"]);
     const recovered = new DatabaseSync(join(restored, "session.sqlite"), { readOnly: true });
     try { assert.equal(recovered.prepare("SELECT value FROM fixture").get()!.value, value); } finally { recovered.close(); }
-    for (const name of ["config.json", "session.sqlite", "worker/operations/42.json"]) assert.equal((await lstat(join(restored, name))).mode & 0o777, 0o600);
+    for (const name of ["config.json", "session.sqlite", "worker/operations/42.json", "rex-workers.json"]) assert.equal((await lstat(join(restored, name))).mode & 0o777, 0o600);
     const withAuth = join(root, "with-auth"); await makeBackup(source, withAuth, true);
     const authRestore = join(root, "auth-restored"); await staged(authRestore); await restoreBackup(withAuth, authRestore);
     assert.equal(await readFile(join(authRestore, "auth.json"), "utf8"), "PRIVATE_FAKE_CREDENTIAL"); assert.equal((await lstat(join(authRestore, "auth.json"))).mode & 0o777, 0o600);
@@ -57,6 +66,8 @@ test("backups refuse existing/overlapping outputs, unknown state data and incomp
     await writeFile(join(source, RESTORE_MARKER), "incomplete", { mode: 0o600 }); await assert.rejects(makeBackup(source, join(root, "incomplete")), BackupError); await rm(join(source, RESTORE_MARKER));
     await chmod(source, 0o755); await assert.rejects(makeBackup(source, join(root, "unsafe")), BackupError); await chmod(source, 0o700);
     await symlink(source, join(root, "alias")); await assert.rejects(makeBackup(join(root, "alias"), join(root, "aliased")), BackupError);
+    await symlink(root, join(source, "client")); await assert.rejects(makeBackup(source, join(root, "client-symlink")), BackupError); await rm(join(source, "client"));
+    await writeFile(join(source, "rex-workers.json"), "{}", { mode: 0o644 }); await assert.rejects(makeBackup(source, join(root, "public-registry")), BackupError); await rm(join(source, "rex-workers.json"));
     const existing = join(root, "existing"); await state(existing); await assert.rejects(restoreBackup(out, existing), BackupError);
     assert.equal(await readFile(join(existing, "config.json"), "utf8"), CONFIG);
   } finally { await rm(root, { recursive: true, force: true }); }

@@ -6,12 +6,13 @@ import { startupProviders } from "./providers.js";
 import { DeckError, DeckRuntime } from "./deck.js";
 import { PipeFiles } from "./host-files.js";
 import { parseRoutes, RoutedFiles } from "./remote-files.js";
-import { serveWorkerClients } from "./remote-clients.js";
+import { serveWorkerClients, serveAutomaticWorkerClients } from "./remote-clients.js";
+import { parseRexRoutes, RexRoutedFiles } from "./rex-routes.js";
 import { loadCatalog } from "./mcp-tools.js";
 import { serveIpc } from "./ipc.js";
 
 async function main() {
-  const [path, machineId, cwd, descriptor, mode, modelId, readFd, writeFd, controlFd, nativeExecutable, routesJson, mcpCatalogPath] = process.argv.slice(2);
+  const [path, machineId, cwd, descriptor, mode, modelId, readFd, writeFd, controlFd, nativeExecutable, routesJson, mcpCatalogPath, automaticJson] = process.argv.slice(2);
   const lockFd = Number(descriptor);
   if (!nativeExecutable || !path || !machineId || !cwd || !Number.isSafeInteger(lockFd) || lockFd < 3 || (mode !== "--mock" && mode !== "--chatgpt" && mode !== "--api-key" && mode !== "--auto")) throw new Error("Runtime must be launched by deck serve");
   if (!fstatSync(lockFd).isFile()) throw new Error("Missing inherited writer lock");
@@ -20,10 +21,16 @@ async function main() {
   const provider = await startupProviders(mode, join(dirname(path), "auth.json"), machineId, modelId || undefined);
   process.stderr.write(`deck: authentication ${provider.mode === "--mock" ? "mock" : provider.mode === "--api-key" ? "API key (billable)" : "ChatGPT OAuth"}\n`);
   const routes = routesJson ? parseRoutes(routesJson, machineId, [lockFd, Number(readFd), Number(writeFd), Number(controlFd)]) : undefined;
+  if (routes && automaticJson) throw new Error("Legacy and automatic worker transports are separate startup modes");
+  const automatic = automaticJson ? parseRexRoutes(automaticJson, machineId, [lockFd, Number(readFd), Number(writeFd), Number(controlFd)]) : undefined;
   const local = readFd && writeFd ? new PipeFiles(Number(readFd), Number(writeFd), controlFd ? Number(controlFd) : undefined) : undefined;
-  if (routes && !local) throw new Error("Remote routing requires the native launcher");
+  if ((routes || automatic) && !local) throw new Error("Remote routing requires the native launcher");
   let files: PipeFiles | RoutedFiles | undefined = local;
-  try { if (routes) files = new RoutedFiles(machineId, local!, routes); }
+  let automaticFiles: RexRoutedFiles | undefined;
+  try {
+    if (routes) files = new RoutedFiles(machineId, local!, routes);
+    if (automatic) files = automaticFiles = new RexRoutedFiles(machineId, local!, automatic);
+  }
   catch (error) { await local?.close(); throw error; }
   let runtime: DeckRuntime | undefined;
   const clients: ReturnType<typeof serveWorkerClients>[] = [];
@@ -42,7 +49,7 @@ async function main() {
   process.once("SIGINT", () => { void shutdown().then(() => process.exit(0)); });
   try {
     runtime = await DeckRuntime.open(path, {
-      ...(routes ? { expectedHubId: routes.hubId } : {}),
+      ...(routes?.hubId || automatic?.hubId ? { expectedHubId: routes?.hubId ?? automatic!.hubId! } : {}),
       ...(mcpCatalogPath ? {mcpCatalog:await loadCatalog(mcpCatalogPath,machineId,routes)} : {}),
       models: provider.models, model: provider.model, admissionGuard: provider.guard, validateSavedModels: true,
       authentication: provider.mode === "--mock" ? "mock" : provider.mode === "--api-key" ? "api_key" : "chatgpt_oauth",
@@ -64,6 +71,7 @@ async function main() {
       }
     });
     for (const host of routes?.hosts ?? []) if (host.rexClient) clients.push(serveWorkerClients(runtime, host.machineId, host.rexClient, host.clientReadFd!, host.clientWriteFd!, host.launcher === true));
+    for (const [index, slot] of (automatic?.slots ?? []).entries()) clients.push(serveAutomaticWorkerClients(runtime, slot.clientReadFd, slot.clientWriteFd, registration => automaticFiles!.register(index, registration)));
     await serveIpc(runtime, process.stdin, process.stdout, provider.login);
   } finally { await shutdown(); }
 }

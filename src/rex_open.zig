@@ -17,6 +17,11 @@ fn number(value: V) f64 {
     return if (value == .integer) @floatFromInt(value.integer) else value.float;
 }
 pub fn validArgs(command: []const u8, args: V) bool {
+    if (std.mem.eql(u8, command, "rex_adopt")) {
+        if (!contracts.validRexAdoptArgs(args) or !safeId(field(args, "chatId"))) return false;
+        const target = field(args, "target");
+        return @import("mcp_profiles.zig").absolute(field(target, "executable").string) and @import("rex_endpoint.zig").valid(field(target, "server").string) and @import("mcp_profiles.zig").absolute(field(field(args, "bootstrap"), "root").string);
+    }
     if (std.mem.eql(u8, command, "rex_open")) {
         if (!contracts.validRexOpenArgs(args) or !safeId(field(args, "chatId"))) return false;
         if (args.object.get("target")) |target| {
@@ -33,8 +38,9 @@ pub fn validArgs(command: []const u8, args: V) bool {
     return true;
 }
 pub fn validReply(command: []const u8, args: V, hub_id: V, result: V) bool {
-    if (!std.mem.eql(u8, command, "rex_open") and !std.mem.eql(u8, command, "rex_status") and !std.mem.eql(u8, command, "rex_inspect")) return true;
+    if (!std.mem.eql(u8, command, "rex_open") and !std.mem.eql(u8, command, "rex_adopt") and !std.mem.eql(u8, command, "rex_status") and !std.mem.eql(u8, command, "rex_inspect")) return true;
     if (!contracts.validRexUuid(hub_id) or !validArgs(command, args) or !equal(field(args, "chatId"), field(result, "chatId"))) return false;
+    if (std.mem.eql(u8, command, "rex_adopt")) return contracts.validRexAdoptAck(result) and equal(field(result, "hubId"), hub_id) and equal(field(args, "requestId"), field(result, "requestId")) and safeId(field(result, "taskId"));
     if (std.mem.eql(u8, command, "rex_open")) return contracts.validRexOpenAck(result) and equal(field(args, "requestId"), field(result, "requestId")) and safeId(field(result, "taskId"));
     if (!equal(field(result, "hubId"), hub_id)) return false;
     const task_id = field(result, "taskId");

@@ -26,11 +26,22 @@ export class RoutedFiles implements HostFiles {
   private readonly remotes = new Map<string, PipeFiles>();
   private readonly clients = new Map<string, WorkerRexClient>();
   private readonly mcp = new Set<string>();
+  private readonly paused = new Set<string>();
+  // Native-owned automatic slots publish metadata before becoming routable.
+  // Slots/identities are never reused for another worker in this process.
+  protected addTransport(machineId: string, pipe: PipeFiles, client: WorkerRexClient, mcp: boolean, paused: boolean) {
+    if (machineId === this.machineId || this.remotes.has(machineId) || this.remotes.size >= 8 || !validRexClient(client)) throw new Error("Conflicting native worker registration");
+    this.remotes.set(machineId, pipe); this.clients.set(machineId, client);
+    if (mcp) this.mcp.add(machineId);
+    if (paused) this.paused.add(machineId);
+  }
+  protected activateTransport(machineId: string) { this.paused.delete(machineId); }
   rexClientFor(machineId: string) { return this.clients.get(machineId); }
   private readonly observing = new Set<string>();
   async registeredHosts(): Promise<HostItem[]> {
     return Promise.all([...this.remotes].map(async ([machineId, pipe]): Promise<HostItem> => {
       let connection: HostItem["connection"] = "unknown";
+      if (this.paused.has(machineId)) return { machineId, kind: "worker", rex: this.clients.has(machineId), connection: "offline" };
       if (!this.observing.has(machineId)) {
         this.observing.add(machineId);
         // One retained read correlation per route, even when callers time out.
@@ -58,7 +69,7 @@ export class RoutedFiles implements HostFiles {
       if(!plan || typeof plan!=="object" || (plan as {taskMachineId?:unknown}).taskMachineId!==binding.machineId) return Promise.resolve({ok:false,code:"mcp_refused",output:"MCP worker differs from assigned host; no fallback"});
     }
     const remote = this.remotes.get(binding.machineId);
-    if (!remote || (operation === "mcp_call" ? !this.mcp.has(binding.machineId) : !this.clients.has(binding.machineId) && !["read", "write", "edit", "bash"].includes(operation))) return Promise.resolve({ ok: false, code: "offline", output: "offline: assigned worker/capability unavailable; this attempt was not sent; earlier attempts may have happened; no local fallback" });
+    if (!remote || this.paused.has(binding.machineId) || (operation === "mcp_call" ? !this.mcp.has(binding.machineId) : !this.clients.has(binding.machineId) && !["read", "write", "edit", "bash"].includes(operation))) return Promise.resolve({ ok: false, code: "offline", output: "offline: assigned worker/capability unavailable; this attempt was not sent; earlier attempts may have happened; no local fallback" });
     return remote.call(binding, id, operation, args, signal, onProgress);
   }
   async close(): Promise<void> { await Promise.all([this.local.close(), ...[...this.remotes.values()].map(remote => remote.close())]); }

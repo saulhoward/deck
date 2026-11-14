@@ -28,9 +28,17 @@ const help =
     \\  deck rex open|reopen|status|inspect --task CHAT_ID [--port 52800]
     \\    [--rex /path/to/rex] [--server unix:///path/to/socket] [--host-id UUID] [--instance-id UUID]
     \\  deck serve --stdio --mock [--directory PATH] [--runtime PATH]
-    \\  deck hub [--tui | --no-tui] [--port 52800] [--task CHAT_ID] [--message TEXT]
-    \\  deck agent [--tui | --no-tui] [--port 52800] [--task CHAT_ID] [--message TEXT]
-    \\    TTYs default to the Zig TUI; --message and redirected input use the plain client.
+    \\  deck hub [--port 52800] [--directory STATE]
+    \\    Print/reuse or launch the managed local hub Rex session, then exit.
+    \\  deck hub --here [--tui | --no-tui] [--port 52800] [--task CHAT_ID] [--message TEXT]
+    \\  deck agent [--hub REX_HOST | --local] [--directory STATE] [--port 52800]
+    \\    Create & start form in local Rex; worker/cwd/terminal stay on this machine.
+    \\  deck agent [connection options] --list | --resume NAME | --drafts
+    \\  deck agent [connection options] --recover STARTUP_ID | --discard REQUEST_ID --confirm
+    \\    Recovery and discard both require --confirm. Use deck agent --help for details.
+    \\    Selection: --hub, DECK_HUB_REX_HOST, otherwise local; --local ignores env.
+    \\  deck agent --tui | --no-tui [--port 52800] [--task CHAT_ID] [--message TEXT]
+    \\    Advanced direct clients: TTYs use the TUI; --message uses the plain client.
     \\    TUI: i insert, Esc normal, Enter send, Shift-Enter newline, :help, :q detach.
     \\    :sidebar-toggle overrides the responsive sidebar; Ctrl-S also sends.
     \\  deck remote-check --registry /private/registry.json --machine MACHINE_ID
@@ -38,7 +46,12 @@ const help =
     \\    Read-only peer/registration diagnostic; does not connect a worker or expose the hub.
     \\  deck --help | --version
     \\
+    \\serve initializes fresh/default state under its writer lock; init is optional.
+    \\An existing store without its identity refuses; never remove writer.lock.
     \\The chat API binds only 127.0.0.1. --stdio selects private framed IPC instead.
+    \\Automatic workers use authenticated Rex API-14 forwarding and pinned enrollment.
+    \\Enrollment uses loopback port+1 (65534 for port 65535), with eight worker slots.
+    \\No automatic Rex installation, worker replacement or remote-to-local fallback.
     \\--workers enables pinned Tailscale links; Rex/task relay needs explicit worker opt-in.
     \\--workspace PATH sets the initial hub workspace (saved chats keep their binding).
     \\Native read/write/exact-edit/bash tools run as your user, without a sandbox.
@@ -75,16 +88,17 @@ const help =
     \\Rex open/reopen is best-effort, ownerless-task-only, with no automatic retry.
     \\Duplicates after races/lost replies need manual cleanup. No GUI focus/attach.
     \\Plain /rex open|reopen|status|inspect uses the selected task and defaults/saved target.
-    \\Hub TUI /tasks and /select CHAT_ID inspect read-only; /hub returns to hub.
-    \\Hub /task TITLE uses its saved workspace; /task-at JSON selects {machineId,cwd,title}.
+    \\Hub TUI :tasks and :select CHAT_ID inspect read-only; :hub returns to hub.
+    \\Hub :task TITLE uses its saved workspace; :task-at JSON selects {machineId,cwd,title}.
     \\Both save creation before requesting Rex; no non-Rex task participation.
-    \\TUI /rex shows selected-task status; i inspects, o explicitly opens/reopens.
+    \\TUI :rex shows selected-task status; i inspects, o explicitly opens/reopens.
     \\Rex task clients are allocation-verified and locked to one task.
     \\Direct --task launches are read-only, including plain and one-shot paths.
     \\Remote task clients reuse the verified worker link; no extra login or exposed HTTP.
     \\Approved remote launcher: deck agent --launch-from ABS_WORKER_DIRECTORY [--help].
     \\Launcher list/create/open/inspect is separate from task input and hub authority.
-    \\Rex uses worker-local Unix endpoints (API 8/10 only). Jobs/child terminals remain future.
+    \\Terminal allocation uses local Unix endpoints (API 8/10/14); forwarding requires 14.
+    \\Jobs/child terminals remain future.
     \\
 ;
 
@@ -183,10 +197,12 @@ fn run(native: Native, allocator: std.mem.Allocator, options: Options) !void {
         try std.Io.File.stdout().writeStreamingAll(io, "Deck initialized (existing identity preserved).\n");
         return;
     }
-    var dir = try std.Io.Dir.cwd().openDir(io, path, .{});
+    try std.Io.Dir.cwd().createDirPath(io, path);
+    var dir = try std.Io.Dir.cwd().openDir(io, path, .{ .iterate = true });
     defer dir.close(io);
     const held = try state.lock(io, dir);
     defer held.close(io);
+    try state.initializeLocked(io, allocator, dir);
     const config = try state.load(io, allocator, dir);
     defer config.deinit();
     const database = try std.fs.path.join(allocator, &.{ path, "session.sqlite" });
@@ -243,13 +259,18 @@ fn run(native: Native, allocator: std.mem.Allocator, options: Options) !void {
     defer if (remote) |*manager| manager.deinit();
     const routes = if (remote) |*manager| try manager.json() else null;
     defer if (routes) |bytes| std.heap.page_allocator.free(bytes);
+    const automatic = if (!options.stdio and options.runtime == null and options.workers == null) try @import("rex_enrollment.zig").Hub.init(native, path, config.value.machine_id, options.port) else null;
+    defer if (automatic) |manager| manager.deinit();
+    const automatic_routes = if (automatic) |manager| try manager.json() else null;
+    defer if (automatic_routes) |bytes| std.heap.page_allocator.free(bytes);
     var inherited: std.ArrayList(std.Io.File) = .empty;
     defer inherited.deinit(allocator);
     try inherited.appendSlice(allocator, &.{ held, .{ .handle = requests[1], .flags = .{ .nonblocking = false } }, .{ .handle = results[0], .flags = .{ .nonblocking = false } }, .{ .handle = controls[1], .flags = .{ .nonblocking = false } } });
     if (remote) |manager| try inherited.appendSlice(allocator, manager.inherit.items);
-    const child_argv = [_][]const u8{ node_path, runtime, database, config.value.machine_id, cwd, descriptor, if (options.mock) "--mock" else "--auto", options.model, result_fd, request_fd, control_fd, native_executable, routes orelse "", options.mcp_catalog orelse "" };
+    if (automatic) |manager| try inherited.appendSlice(allocator, manager.inherit.items);
+    const child_argv = [_][]const u8{ node_path, runtime, database, config.value.machine_id, cwd, descriptor, if (options.mock) "--mock" else "--auto", options.model, result_fd, request_fd, control_fd, native_executable, routes orelse "", options.mcp_catalog orelse "", automatic_routes orelse "" };
     var child = try std.process.spawn(io, .{
-        .argv = if (options.mcp_catalog != null) &child_argv else child_argv[0 .. child_argv.len - 1],
+        .argv = child_argv[0 .. child_argv.len - (if (automatic != null) @as(usize, 0) else if (options.mcp_catalog != null) @as(usize, 1) else @as(usize, 2))],
         .stdin = if (options.stdio) .inherit else .pipe,
         .stdout = if (options.stdio) .inherit else .pipe,
         .inherit_files = inherited.items,
@@ -265,6 +286,13 @@ fn run(native: Native, allocator: std.mem.Allocator, options: Options) !void {
     worker_started = true;
     defer thread.join();
     if (remote) |*manager| {
+        manager.closeChildEnds();
+        manager.start() catch |err| {
+            child.kill(io);
+            return err;
+        };
+    }
+    if (automatic) |manager| {
         manager.closeChildEnds();
         manager.start() catch |err| {
             child.kill(io);
@@ -405,7 +433,69 @@ fn launchClient(native: Native, allocator: std.mem.Allocator, args: []const []co
 pub fn main(init: std.process.Init) void {
     const allocator = init.gpa;
     const native: Native = .{ .io = init.io, .environ = init.minimal.environ };
-    const args = init.minimal.args.toSlice(init.arena.allocator()) catch std.process.exit(1);
+    var args = init.minimal.args.toSlice(init.arena.allocator()) catch std.process.exit(1);
+    if (args.len > 1 and std.mem.eql(u8, args[1], "hub")) {
+        if (@import("hub_session.zig").managed(args[2..])) {
+            @import("hub_session.zig").run(native, allocator, args[2..]) catch |err| {
+                const message = switch (err) {
+                    error.LocalHubUnavailable => "deck: local hub unavailable; run deck serve first\n",
+                    error.LocalRexUnavailable => "deck: local Rex unavailable or unsupported; start/update Rex, or use deck hub --here\n",
+                    error.HubLaunchUnconfirmed => "deck: managed hub launch/presence unconfirmed; inspect its saved session before another launch; use deck hub --here meanwhile\n",
+                    error.ClientAlreadyStarting => "deck: another launcher owns this hub session; wait for it to finish\n",
+                    else => "deck: managed hub unavailable; check arguments, identity and private client storage; use deck hub --here\n",
+                };
+                std.Io.File.stderr().writeStreamingAll(init.io, message) catch {};
+                std.process.exit(1);
+            };
+            return;
+        }
+        var direct: std.ArrayList([:0]const u8) = .empty;
+        direct.appendSlice(init.arena.allocator(), args[0..2]) catch std.process.exit(1);
+        var index: usize = 2;
+        var here = false;
+        var help_requested = false;
+        while (index < args.len) : (index += 1) {
+            const arg = args[index];
+            if (std.mem.eql(u8, arg, "--help")) {
+                help_requested = true;
+                continue;
+            }
+            if (std.mem.eql(u8, arg, "--here")) {
+                if (here) std.process.exit(2);
+                here = true;
+                continue;
+            }
+            direct.append(init.arena.allocator(), arg) catch std.process.exit(1);
+            if (!std.mem.eql(u8, arg, "--tui") and !std.mem.eql(u8, arg, "--no-tui") and !std.mem.eql(u8, arg, "--login") and index + 1 < args.len) {
+                index += 1;
+                direct.append(init.arena.allocator(), args[index]) catch std.process.exit(1);
+            }
+        }
+        if (help_requested) {
+            std.Io.File.stdout().writeStreamingAll(init.io, help) catch {};
+            return;
+        }
+        args = direct.items;
+    }
+    if (args.len > 1 and std.mem.eql(u8, args[1], "agent") and @import("agent_startup.zig").managed(args[2..])) {
+        @import("agent_startup.zig").run(init, args[2..]) catch |err| {
+            const message = switch (err) {
+                error.RexForwardRequiresApi14 => "deck: automatic startup requires Rex API 14 (preview.19); update the selected Rex client/server explicitly. Nothing installed and no fallback used.\n",
+                error.InvalidArguments, error.InvalidHubEndpoint => "deck: invalid agent options or Rex endpoint; use deck agent --help. No fallback used.\n",
+                error.SelectedHubUnavailable => "deck: selected hub/worker unavailable or incompatible; run the matching deck serve on the selected host. No local fallback.\n",
+                error.LocalRexUnavailable => "deck: local Rex unavailable/unsupported; start/update Rex. Task terminals must stay on this machine.\n",
+                error.WorkerConflict => "deck: existing worker identity/build/client differs or session creation is unconfirmed. Inspect it; no worker replaced or state reset.\n",
+                error.WorkerUnavailable => "deck: worker startup/readiness unconfirmed. Any started worker is left intact; no task created and no work replayed.\n",
+                error.BootstrapLaunchUnconfirmed => "deck: task-form terminal creation unconfirmed. Inspect saved startup metadata and Rex; do not blindly launch a duplicate.\n",
+                error.ClientAlreadyStarting => "deck: another launcher is starting this connection; wait for it to finish.\n",
+                error.AgentActionUnconfirmed => "deck: agent action not confirmed; no fallback or automatic retry.\n",
+                else => "deck: agent startup refused; check private client storage, selected hub and Rex authentication/version. No fallback, worker replacement or effect replay.\n",
+            };
+            std.Io.File.stderr().writeStreamingAll(init.io, message) catch {};
+            std.process.exit(1);
+        };
+        return;
+    }
     if (args.len > 1 and std.mem.eql(u8, args[1], "login")) {
         login(native, allocator, args[2..]) catch |err| {
             std.debug.print("deck: login unavailable ({s}); check initialized --directory and hub --port\n", .{@errorName(err)});
@@ -483,6 +573,8 @@ pub fn main(init: std.process.Init) void {
     run(native, allocator, options) catch |err| {
         const message = switch (err) {
             error.RestoreIncomplete => "deck: incomplete restore; leave it offline and restore into a new directory\n",
+            error.AddressInUse => "deck: hub/enrollment port already in use; choose an unused --port pair\n",
+            error.MissingStateIdentity => "deck: state directory is not empty but has no identity; restore its config or choose a new directory; no identity created\n",
             error.PathAlreadyExists => "deck: destination already exists; use a new backup/restore directory\n",
             error.BackupFailed => "deck: backup/restore did not complete; originals were not replaced\n",
             error.WouldBlock => "deck: this state directory already has a running writer\n",
@@ -514,6 +606,12 @@ test {
     _ = @import("rex_open.zig");
     _ = @import("rex_endpoint.zig");
     _ = @import("rex.zig");
+    _ = @import("rex_forward.zig");
+    _ = @import("rex_forward_test.zig");
+    _ = @import("hub_session.zig");
+    _ = @import("agent_startup.zig");
+    _ = @import("agent_form.zig");
+    _ = @import("rex_bootstrap.zig");
     _ = @import("worker_test.zig");
     _ = @import("worker_limits_test.zig");
     _ = @import("shell_test.zig");

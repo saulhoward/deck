@@ -9,7 +9,7 @@ fn refused(code: []const u8) shell.Result {
 fn absolute(path: []const u8) bool {
     return path.len > 0 and path.len <= 4096 and path[0] == '/' and std.mem.indexOfScalar(u8, path, 0) == null;
 }
-fn findRex(native: Native, allocator: std.mem.Allocator) ![]const u8 {
+pub fn findRex(native: Native, allocator: std.mem.Allocator) ![]const u8 {
     const path = try native.environ.getAlloc(allocator, "PATH");
     defer allocator.free(path);
     var dirs = std.mem.splitScalar(u8, path, ':');

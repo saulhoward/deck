@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { createServer } from "node:net";
+import { freeHubPort } from "./hub-port.test.support.js";
 import { hubCommand } from "./hub-client.js";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -74,15 +74,14 @@ test("native startup refuses missing credentials and op failures before creating
 
 test("native login delegates a held state to its running hub and never starts an offline login", { skip: !binary, timeout: 25000 }, async () => {
   const f = await fixture();
-  const reservation = createServer(); reservation.listen(0, "127.0.0.1"); await once(reservation, "listening");
-  const address = reservation.address(); assert.ok(address && typeof address !== "string");
-  const port = address.port; await new Promise<void>(resolve => reservation.close(() => resolve()));
+  const port = await freeHubPort();
   const hub = spawn(binary!, ["serve", "--mock", "--directory", f.state, "--port", String(port)], { env: f.env, stdio: "pipe" });
   const closed = once(hub, "close"); hub.stdout.resume(); let errors = ""; hub.stderr.on("data", chunk => { errors += chunk; });
   try {
     let status: any;
     for (let i = 0; i < 100; i++) { try { status = await hubCommand(port, "status"); break; } catch { await new Promise(r => setTimeout(r, 30)); } }
     assert.ok(status, errors); assert.match(status.machineId, /^[a-f0-9]{32}$/);
+    assert.equal(status.machineId, JSON.parse(await readFile(join(f.state, "config.json"), "utf8")).machine_id, `readiness must belong to this fixture, not a raced port: ${errors}`);
     // Mock refuses real login, but only AFTER the native online handoff and
     // identity checks. No fake-provider hooks are added to production code.
     const login = f.invoke(["login", "openai", "--directory", f.state, "--port", String(port)]);

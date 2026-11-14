@@ -17,7 +17,7 @@ export function validCommandArgs(command: string, raw: unknown): boolean {
     validModelSettingsArgs(command, args) && validRexArgs(command, args) && validViewArgs(command, args) && validMutationArgs(command, args);
 }
 export function validReplyContext(request: ReplyContext): boolean {
-  return (!["model_settings", "set_model_settings", "mcp_catalog", "tool_profiles", "set_tool_profiles"].includes(request.command) || request.hubId !== undefined) && (request.hubId === undefined || (validTransportId(request.hubId) && request.hubId.length <= 200)) && validCommandArgs(request.command, request.args);
+  return (!["rex_adopt", "model_settings", "set_model_settings", "mcp_catalog", "tool_profiles", "set_tool_profiles"].includes(request.command) || request.hubId !== undefined) && (request.hubId === undefined || (validTransportId(request.hubId) && request.hubId.length <= 200)) && validCommandArgs(request.command, request.args);
 }
 export function validClientRequest(value: unknown): value is RequestEnvelope {
   return validRequestEnvelope(value) && validReplyContext(value);

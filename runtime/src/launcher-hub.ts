@@ -1,6 +1,8 @@
 // Narrow hub-side launcher authority, distinct from allocation-bound task RPC.
 // The route is trusted native configuration; nothing in the body can select a
-// machine, client executable, Rex endpoint, MCP grant or general hub command.
+// machine, client executable, MCP grant or general hub command. Adoption names a
+// target only to match an existing native-owned bootstrap record; it cannot
+// select an arbitrary process or create a replacement terminal.
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { AgentDoc, type ConversationId } from "@earendil-works/pi-durable";
 import { ChatDoc, DeckError, type DeckRuntime } from "./deck.js";
@@ -27,7 +29,7 @@ export async function launcherResponse(runtime: DeckRuntime, machineId: string, 
   };
   const guard=async()=>{
     if(!approved || frame.launcher?.hubId!==runtime.hubId)refused();
-    if(request.command==="launch_open" || request.command==="launch_inspect") {
+    if(request.command==="launch_open" || request.command==="launch_inspect" || request.command==="launch_adopt") {
       try{await task(request.args.chatId);}catch{refused();}
     }
   };
@@ -54,6 +56,8 @@ export async function launcherResponse(runtime: DeckRuntime, machineId: string, 
           if(saved.title!==a.title || saved.cwd!==a.cwd || JSON.stringify(briefFields(saved.brief??{}))!==JSON.stringify(brief))refused();
           return {...identity,...agentNameFields(saved),requestId:a.requestId,chatId,title:a.title,cwd:a.cwd,brief};
         }
+        case "launch_adopt":
+          return { ...identity, ack: await runtime.adoptTerminal(request.args) };
         case "launch_open":
           // Approved remote clients always use the worker Unix socket. The port
           // remains a stable legacy plan field, not an exposed remote HTTP route.

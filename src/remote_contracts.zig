@@ -60,10 +60,24 @@ pub fn validHello(value: std.json.Value) bool {
     return true;
 }
 
+pub fn validRexRegistration(value: std.json.Value) bool {
+    if (!wire.validRexWorkerRegistration(value) or !validRexClient(value.object.get("rexClient").?) or !ordered(value.object.get("capabilities").?)) return false;
+    const caps = value.object.get("capabilities").?.array.items;
+    if (caps.len != 4 and caps.len != 5) return false;
+    if (!std.mem.eql(u8, caps[0].string, "files") or !std.mem.eql(u8, caps[1].string, "bash") or !std.mem.eql(u8, caps[2].string, "rex") or !std.mem.eql(u8, caps[caps.len - 1].string, "launcher")) return false;
+    return caps.len == 4 or std.mem.eql(u8, caps[3].string, "mcp");
+}
+// Hub identity is checked separately against the actual canonical runtime. The
+// optional first-enrollment pin is not part of a worker's implementation pin.
+pub fn sameRexRegistration(left: wire.RexWorkerRegistration, right: wire.RexWorkerRegistration) bool {
+    return std.mem.eql(u8, left.machineId, right.machineId) and std.mem.eql(u8, left.implementation, right.implementation) and std.mem.eql(wire.WorkerCapability, left.capabilities, right.capabilities) and sameRexClient(left.rexClient, right.rexClient);
+}
+
 // Borrowed registered configuration, owned connection slots. The network owner
 // must serialize access. These slots are not Pi task states or an effect queue.
 pub const Gate = struct {
     registry: wire.RemoteRegistry,
+    rex: ?wire.RexWorkerRegistration = null,
     slots: [64]Slot = @splat(.{}),
     boot_nonce: [32]u8,
     counter: u64 = 0,
@@ -76,6 +90,24 @@ pub const Gate = struct {
         var boot_nonce: [32]u8 = undefined;
         io.random(&boot_nonce);
         return .{ .registry = registry, .boot_nonce = boot_nonce };
+    }
+    pub fn initRex(io: std.Io, registration: wire.RexWorkerRegistration) Gate {
+        std.debug.assert(registration.hubId != null);
+        var gate = init(io, .{ .version = 1, .hubId = "", .hosts = &.{} });
+        gate.rex = registration;
+        return gate;
+    }
+    pub fn challengeRex(self: *Gate, machine: []const u8) !Ticket {
+        const registered = self.rex orelse return error.UnregisteredPeer;
+        if (!std.mem.eql(u8, registered.machineId, machine)) return error.UnregisteredPeer;
+        return self.issue(0, machine);
+    }
+    pub fn acceptRex(self: *Gate, ticket: Ticket, hello: wire.RemoteWorkerHello) !void {
+        errdefer _ = self.disconnect(ticket);
+        const registered = self.rex orelse return error.UnregisteredPeer;
+        if (!self.matches(ticket) or self.slots[ticket.index].phase != .challenged) return error.StaleConnection;
+        if (hello.version != 1 or !std.mem.eql(u8, registered.hubId.?, hello.hubId) or !std.mem.eql(u8, registered.machineId, hello.machineId) or !std.mem.eql(u8, &ticket.connection, hello.connectionId) or !std.mem.eql(u8, registered.implementation, hello.implementation) or !std.mem.eql(wire.WorkerCapability, registered.capabilities, hello.capabilities) or !sameRexClient(registered.rexClient, hello.rexClient)) return error.IdentityMismatch;
+        self.slots[ticket.index].phase = .connected;
     }
     pub fn host(self: *const Gate, peer: wire.TailPeer, machine: []const u8) ?usize {
         for (self.registry.hosts, 0..) |registered, i| {
@@ -90,6 +122,9 @@ pub const Gate = struct {
     pub fn challenge(self: *Gate, peer: wire.TailPeer, machine: []const u8) !Ticket {
         const i = self.host(peer, machine) orelse return error.UnregisteredPeer;
         if (self.registry.hosts[i].implementation == null) return error.WorkerNotRegistered;
+        return self.issue(i, machine);
+    }
+    fn issue(self: *Gate, i: usize, machine: []const u8) !Ticket {
         if (self.slots[i].phase != .offline) return error.ConnectionBusy;
         self.counter = std.math.add(u64, self.counter, 1) catch return error.GenerationExhausted;
         var hash = std.crypto.hash.sha2.Sha256.init(.{});
@@ -103,7 +138,7 @@ pub const Gate = struct {
         return .{ .index = i, .connection = connection };
     }
     fn matches(self: *const Gate, ticket: Ticket) bool {
-        return ticket.index < self.registry.hosts.len and std.mem.eql(u8, &self.slots[ticket.index].connection, &ticket.connection);
+        return ticket.index < (if (self.rex != null) @as(usize, 1) else self.registry.hosts.len) and std.mem.eql(u8, &self.slots[ticket.index].connection, &ticket.connection);
     }
     pub fn accept(self: *Gate, peer: wire.TailPeer, ticket: Ticket, hello: wire.RemoteWorkerHello) !void {
         // The peer argument must come from the local verifier for THIS socket,
@@ -129,4 +164,38 @@ pub const Gate = struct {
 };
 pub fn samePeer(a: wire.TailPeer, b: wire.TailPeer) bool {
     return std.mem.eql(u8, a.nodeId, b.nodeId) and std.mem.eql(u8, a.userId, b.userId);
+}
+
+test "Rex generation gate pins hub/build/client/capabilities without inventing peer attestations" {
+    const registration: wire.RexWorkerRegistration = .{ .version = 1, .hubId = "00000000-0000-4000-8000-000000000001", .machineId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .implementation = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", .capabilities = &.{ .files, .bash, .rex, .launcher }, .rexClient = .{ .executable = "/tools/deck", .socket = "/private/client.sock" } };
+    var gate = Gate.initRex(std.testing.io, registration);
+    try std.testing.expectError(error.UnregisteredPeer, gate.challengeRex("other"));
+    const first = try gate.challengeRex(registration.machineId);
+    var hello: wire.RemoteWorkerHello = .{ .version = 1, .hubId = registration.hubId.?, .machineId = registration.machineId, .connectionId = &first.connection, .implementation = registration.implementation, .capabilities = registration.capabilities, .rexClient = registration.rexClient };
+    hello.rexClient.?.socket = "/other.sock";
+    try std.testing.expectError(error.IdentityMismatch, gate.acceptRex(first, hello));
+    try std.testing.expect(!gate.connected(first));
+    const second = try gate.challengeRex(registration.machineId);
+    hello.connectionId = &second.connection;
+    hello.rexClient = registration.rexClient;
+    try gate.acceptRex(second, hello);
+    try std.testing.expect(gate.connected(second));
+    try std.testing.expect(!gate.disconnect(first));
+    try std.testing.expect(gate.connected(second));
+    try std.testing.expectError(error.ConnectionBusy, gate.challengeRex(registration.machineId));
+    try std.testing.expect(gate.disconnect(second));
+    for (0..3) |field| {
+        const ticket = try gate.challengeRex(registration.machineId);
+        hello.connectionId = &ticket.connection;
+        hello.hubId = registration.hubId.?;
+        hello.implementation = registration.implementation;
+        hello.capabilities = registration.capabilities;
+        switch (field) {
+            0 => hello.hubId = "00000000-0000-4000-8000-000000000002",
+            1 => hello.implementation = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+            else => hello.capabilities = &.{ .files, .bash, .rex },
+        }
+        try std.testing.expectError(error.IdentityMismatch, gate.acceptRex(ticket, hello));
+        try std.testing.expect(!gate.connected(ticket));
+    }
 }

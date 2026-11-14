@@ -101,6 +101,19 @@ export class TuiSession {
     this.state!.notice = "Rex startup registered (historical observation, not current health).";
     this.startupBlocked = false;
   }
+  async startInitial(requestId: string): Promise<boolean> {
+    // Only the native-provenanced wizard transition calls this, after verified
+    // startup. It selects the already-saved exact draft, never fresh text/IDs.
+    if (this.mode !== "task" || this.startupBlocked || !this.state || this.active?.kind !== "input" || this.active.requestId !== requestId || !this.activeSaved) throw new Error("Initial input draft/startup does not match this task");
+    try {
+      if (this.supportsSettings) await this.refreshSettings();
+      await this.deliver();
+      return true;
+    } catch {
+      this.state.notice = "Initial input outcome unconfirmed; exact saved request retained. Observe settings, then :retry or :discard explicitly.";
+      return false;
+    }
+  }
   private async initialize() { if (!this.state) await this.selectChat(this.selected); }
   private async selectChat(target?: string) {
     if (this.state) requireNavigation(this.mode);
@@ -310,6 +323,6 @@ export class TuiSession {
     return structuredClone(state);
   }
 }
-export function localSession(port: number, chatId: string | undefined, hubId: string | undefined, signal: AbortSignal): TuiSession {
-  return new TuiSession((name, args, expected) => hubCommand(port, name, args, expected, signal), chatId, hubId, undefined, port);
+export function localSession(port: number, chatId: string | undefined, hubId: string | undefined, signal: AbortSignal, draftRoot?: string): TuiSession {
+  return new TuiSession((name, args, expected) => hubCommand(port, name, args, expected, signal), chatId, hubId, draftRoot, port);
 }

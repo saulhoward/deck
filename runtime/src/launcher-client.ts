@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import { dirname, isAbsolute, join } from "node:path";
 import { createConnection } from "node:net";
-import { validRemoteWorkerConfig, validLauncherScope, type LauncherRequest } from "./generated/contracts.js";
+import { validRemoteWorkerConfig, validRexWorkerConnection, validMachineIdentity, validLauncherScope, type LauncherRequest } from "./generated/contracts.js";
 import { validRexClient } from "./remote-contracts.js";
 import { validLaunchRequest, validLaunchResponse } from "./launcher-contracts.js";
 import { FrameDecoder, encodeFrame } from "./protocol.js";
@@ -29,6 +29,18 @@ export async function launcherTarget(directory:string):Promise<LauncherTarget> {
     if(!validRemoteWorkerConfig(c) || c.launcher!==true || !c.rexClient || !validRexClient(c.rexClient) || c.rexClient.socket!==join(directory,"client.sock") || !validLauncherScope({hubId:c.hubId}))throw new Error();
     return {hubId:c.hubId,machineId:c.machineId,socket:c.rexClient.socket};
   }catch{throw new Error("Invalid or unapproved worker launcher configuration; no connection attempted");}
+}
+export async function rexLauncherTarget(directory: string): Promise<LauncherTarget> {
+  try {
+    if (!isAbsolute(directory) || /[\0\r\n]/.test(directory)) throw new Error();
+    const info = await lstat(directory); privateOwner(info); if (!info.isDirectory()) throw new Error();
+    const config = await privateJson(join(directory, "config.json"), 16384);
+    const connection = await privateJson(join(directory, "rex-connection.json"), 16384);
+    if (!config || typeof config !== "object" || !("version" in config) || config.version !== 1 || !("machine_id" in config) || !validMachineIdentity(config.machine_id) ||
+        !validRexWorkerConnection(connection) || !connection.hubId || connection.pendingSession || !validRexClient(connection.rexClient) ||
+        connection.rexClient.socket !== `/tmp/deck-rex-${process.getuid?.()}-${config.machine_id}/client.sock`) throw new Error();
+    return { hubId: connection.hubId, machineId: config.machine_id, socket: connection.rexClient.socket };
+  } catch { throw new Error("Automatic Rex worker is not ready; no connection attempted"); }
 }
 export async function launcherCommand(target:LauncherTarget,request:LauncherRequest,signal?:AbortSignal):Promise<unknown> {
   let encoded:Buffer;

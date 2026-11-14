@@ -2,6 +2,9 @@ import * as wire from "./generated/contracts.js";
 import { rexSocketPath } from "./rex-endpoint.js";
 import { validSafePiId, type ReplyContext } from "./mutation-contracts.js";
 
+export function validAdoptArgs(value: unknown): value is wire.RexAdoptArgs {
+  return wire.validRexAdoptArgs(value) && validSafePiId(value.chatId) && validResolvedTarget(value.target) && value.bootstrap.root.startsWith("/") && !value.bootstrap.root.includes("\0") && Buffer.byteLength(value.bootstrap.root) <= 4096;
+}
 export function validOpenArgs(value: unknown): value is wire.RexOpenArgs {
   if (!wire.validRexOpenArgs(value) || !validSafePiId(value.chatId)) return false;
   const target = value.target;
@@ -15,12 +18,13 @@ export function validResolvedTarget(value: unknown): value is wire.RexOpenTarget
 }
 export function validRexReadArgs(value: unknown): value is wire.RexReadArgs { return wire.validRexReadArgs(value) && validSafePiId(value.chatId); }
 export function validRexArgs(command: string, value: unknown): boolean {
-  return command === "rex_open" ? validOpenArgs(value) : ["rex_status", "rex_inspect"].includes(command) ? validRexReadArgs(value) : true;
+  return command === "rex_adopt" ? validAdoptArgs(value) : command === "rex_open" ? validOpenArgs(value) : ["rex_status", "rex_inspect"].includes(command) ? validRexReadArgs(value) : true;
 }
 export function validRexReply(request: ReplyContext, value: unknown): boolean {
-  if (!["rex_open", "rex_status", "rex_inspect"].includes(request.command)) return true;
+  if (!["rex_open", "rex_adopt", "rex_status", "rex_inspect"].includes(request.command)) return true;
   if (!wire.validRexUuid(request.hubId) || !validRexArgs(request.command, request.args)) return false;
   const args = request.args as wire.RexOpenArgs;
+  if (request.command === "rex_adopt") return wire.validRexAdoptAck(value) && value.hubId === request.hubId && value.chatId === args.chatId && value.requestId === args.requestId && validSafePiId(value.taskId);
   if (request.command === "rex_open") return wire.validRexOpenAck(value) && value.chatId === args.chatId && value.requestId === args.requestId && validSafePiId(value.taskId);
   if (request.command === "rex_inspect") return wire.validRexInspectionSnapshot(value) && value.chatId === args.chatId && value.hubId === request.hubId && (value.taskId === null || validSafePiId(value.taskId)) && value.finishedAtMs >= value.startedAtMs && (value.status === "sampled") === (value.observation !== null) && (!value.observation || (value.observation.state === "exited") === (value.observation.exitCode !== null));
   if (!wire.validRexStatusSnapshot(value) || value.chatId !== args.chatId || value.hubId !== request.hubId || (value.status === "unallocated") !== (value.taskId === null) || (value.taskId !== null && !validSafePiId(value.taskId)) || (value.status === "allocated" && value.binding === null)) return false;

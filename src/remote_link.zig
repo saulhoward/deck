@@ -11,9 +11,12 @@ const relay = @import("task_relay.zig");
 pub const Verify = *const fn (Native, std.mem.Allocator, []const u8, std.Io.net.IpAddress, *std.atomic.Value(bool)) anyerror!std.json.Parsed(wire.TailPeer);
 pub const Link = struct {
     native: Native,
-    registry: wire.RemoteRegistry,
-    index: usize,
-    tailscale: []const u8,
+    registry: wire.RemoteRegistry = .{ .version = 1, .hubId = "", .hosts = &.{} },
+    index: usize = 0,
+    tailscale: []const u8 = "",
+    // Set only by the native automatic-enrollment owner on a loopback listener.
+    // Rex authenticates the remote tunnel; this is not a TailPeer assertion.
+    rex: ?wire.RexWorkerRegistration = null,
     listener: std.Io.net.Server,
     verify: Verify = @import("tailscale.zig").verify,
     input: tcp.fd_t,
@@ -45,7 +48,17 @@ pub const Link = struct {
             }
         }
     };
+    const Host = struct { machineId: []const u8, implementation: ?[]const u8, capabilities: ?[]const wire.WorkerCapability, rexClient: ?wire.WorkerRexClient, peer: ?wire.TailPeer = null };
+    fn host(self: *const Link) Host {
+        if (self.rex) |r| return .{ .machineId = r.machineId, .implementation = r.implementation, .capabilities = r.capabilities, .rexClient = r.rexClient };
+        const r = self.registry.hosts[self.index];
+        return .{ .machineId = r.machineId, .implementation = r.implementation, .capabilities = r.capabilities, .rexClient = r.rexClient, .peer = r.peer };
+    }
+    fn hubId(self: *const Link) []const u8 {
+        return if (self.rex) |r| r.hubId.? else self.registry.hubId;
+    }
     fn verified(self: *Link, fd: tcp.fd_t) !void {
+        if (self.rex != null) return tcp.requireLoopback(fd);
         var cancelled = std.atomic.Value(bool).init(false);
         // The address is obtained from this connected socket, not an intro,
         // registry address or earlier remote-check sample.
@@ -61,21 +74,21 @@ pub const Link = struct {
         defer a.free(bytes);
         const intro = try wire.parseRemoteLinkHeader(a, bytes);
         defer intro.deinit();
-        const host = self.registry.hosts[self.index];
-        if (intro.value.channel != .data or intro.value.connectionId != null or !std.mem.eql(u8, intro.value.hubId, self.registry.hubId) or !std.mem.eql(u8, intro.value.machineId, host.machineId)) return error.InvalidHandshake;
-        const ticket = try gate.challenge(host.peer, host.machineId);
+        const registered = self.host();
+        if (intro.value.channel != .data or intro.value.connectionId != null or !std.mem.eql(u8, intro.value.hubId, self.hubId()) or !std.mem.eql(u8, intro.value.machineId, registered.machineId)) return error.InvalidHandshake;
+        const ticket = if (self.rex != null) try gate.challengeRex(registered.machineId) else try gate.challenge(registered.peer.?, registered.machineId);
         errdefer _ = gate.disconnect(ticket);
-        const challenge: wire.RemoteWorkerHello = .{ .version = 1, .hubId = self.registry.hubId, .machineId = host.machineId, .connectionId = &ticket.connection, .implementation = host.implementation.?, .capabilities = host.capabilities.?, .rexClient = host.rexClient };
+        const challenge: wire.RemoteWorkerHello = .{ .version = 1, .hubId = self.hubId(), .machineId = registered.machineId, .connectionId = &ticket.connection, .implementation = registered.implementation.?, .capabilities = registered.capabilities.?, .rexClient = registered.rexClient };
         try tcp.send(self.native.io, fd, challenge);
         const answer = try tcp.receive(self.native.io, fd);
         defer a.free(answer);
         const hello = try wire.parseRemoteWorkerHello(a, answer);
         defer hello.deinit();
-        try gate.accept(host.peer, ticket, hello.value);
+        if (self.rex != null) try gate.acceptRex(ticket, hello.value) else try gate.accept(registered.peer.?, ticket, hello.value);
         try tcp.send(self.native.io, fd, wire.RemoteLinkHeader{ .version = 1, .channel = .data, .hubId = challenge.hubId, .machineId = challenge.machineId, .connectionId = challenge.connectionId });
         const control = try self.pair(.control, ticket);
         errdefer Native.close(control);
-        const clients = if (host.rexClient != null) try self.pair(.clients, ticket) else null;
+        const clients = if (registered.rexClient != null) try self.pair(.clients, ticket) else null;
         errdefer if (clients) |socket| Native.close(socket);
         try tcp.nonblock(fd, true);
         return .{ .data = fd, .control = control, .clients = clients, .ticket = ticket };
@@ -91,7 +104,7 @@ pub const Link = struct {
         defer a.free(bytes);
         const header = try wire.parseRemoteLinkHeader(a, bytes);
         defer header.deinit();
-        if (header.value.channel != channel or header.value.connectionId == null or !std.mem.eql(u8, header.value.connectionId.?, &ticket.connection) or !std.mem.eql(u8, header.value.hubId, self.registry.hubId) or !std.mem.eql(u8, header.value.machineId, self.registry.hosts[self.index].machineId)) return error.InvalidHandshake;
+        if (header.value.channel != channel or header.value.connectionId == null or !std.mem.eql(u8, header.value.connectionId.?, &ticket.connection) or !std.mem.eql(u8, header.value.hubId, self.hubId()) or !std.mem.eql(u8, header.value.machineId, self.host().machineId)) return error.InvalidHandshake;
         try tcp.send(self.native.io, fd, header.value);
         try tcp.nonblock(fd, true);
         return fd;
@@ -119,9 +132,9 @@ pub const Link = struct {
     fn loop(self: *Link) !void {
         const io = self.native.io;
         for ([_]tcp.fd_t{ self.input, self.output, self.control, self.listener.socket.handle }) |fd| try tcp.nonblock(fd, true);
-        var gate = trust.Gate.init(io, self.registry);
+        var gate = if (self.rex) |r| trust.Gate.initRex(io, r) else trust.Gate.init(io, self.registry);
         var client_relay: ?relay.Hub = if (self.clients) |pipes| try relay.Hub.init(pipes) else null;
-        if (client_relay) |*r| r.launcher = std.mem.indexOfScalar(wire.WorkerCapability, self.registry.hosts[self.index].capabilities.?, .launcher) != null;
+        if (client_relay) |*r| r.launcher = std.mem.indexOfScalar(wire.WorkerCapability, self.host().capabilities.?, .launcher) != null;
         defer if (client_relay) |*r| r.deinit();
         var connection: ?Connection = null;
         defer if (connection) |c| c.close();
@@ -294,12 +307,12 @@ pub const Link = struct {
                         if (std.mem.eql(u8, p.request.value.id, request.id)) duplicate = true;
                     }
                     if (duplicate) return error.DuplicateRequest;
-                    if (request.operation == .link_status and std.mem.eql(u8, request.machineId, self.registry.hosts[self.index].machineId)) {
+                    if (request.operation == .link_status and std.mem.eql(u8, request.machineId, self.host().machineId)) {
                         // Hub-local observation only: no worker request, journal or execution.
                         const reply = try std.json.Stringify.valueAlloc(a, .{ .version = 1, .id = request.id, .result = .{ .ok = true, .code = "link_status", .output = if (connection != null) @as([]const u8, "connected") else "offline" } }, .{});
                         defer a.free(reply);
                         try to_pi.append(reply);
-                    } else if (wrong_mcp_host or connection == null or !std.mem.eql(u8, request.machineId, self.registry.hosts[self.index].machineId) or (if (request.operation == .mcp_call) std.mem.indexOfScalar(wire.WorkerCapability, self.registry.hosts[self.index].capabilities.?, .mcp) == null else !supported(request.operation) and self.clients == null)) {
+                    } else if (wrong_mcp_host or connection == null or !std.mem.eql(u8, request.machineId, self.host().machineId) or (if (request.operation == .mcp_call) std.mem.indexOfScalar(wire.WorkerCapability, self.host().capabilities.?, .mcp) == null else !supported(request.operation) and self.clients == null)) {
                         try failure(&to_pi, request, false);
                     } else {
                         try to_worker.append(copy);
