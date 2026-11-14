@@ -62,6 +62,20 @@ pub fn set(self: *Editor, value: []const u8) !void {
     self.clearStack(&self.undo);
     self.clearStack(&self.redo);
 }
+// External editor results are one undoable local edit, never an admission.
+// Allocate before changing text so even allocation failure preserves the prompt.
+pub fn replace(self: *Editor, value: []const u8) !void {
+    if (value.len > limit or !std.unicode.utf8ValidateSlice(value) or std.mem.indexOfScalar(u8, value, 0) != null) return error.InvalidEditorText;
+    try self.text.ensureTotalCapacity(self.a, value.len);
+    try self.checkpoint();
+    self.text.clearRetainingCapacity();
+    self.text.appendSliceAssumeCapacity(value);
+    self.cursor = 0;
+    self.mode = .normal;
+    self.pending = null;
+    self.count = 0;
+    self.insert_saved = false;
+}
 pub fn next(self: *const Editor, at: usize) usize {
     if (at >= self.text.items.len) return self.text.items.len;
     var it = vaxis.unicode.graphemeIterator(self.text.items[at..]);
@@ -474,6 +488,25 @@ fn keys(editor: *Editor, text: []const u8) !void {
         const one = [_]u8{c};
         try editor.key(.{ .codepoint = c, .text = &one });
     }
+}
+test "external editing is exact, atomic on refusal, and one undoable edit" {
+    var e = Editor.init(std.testing.allocator);
+    defer e.deinit();
+    try e.set("original 👩‍💻");
+    try e.replace("new\n\t  bytes\n");
+    try std.testing.expectEqualStrings("new\n\t  bytes\n", e.text.items);
+    try std.testing.expectEqual(.normal, e.mode);
+    try keys(&e, "u");
+    try std.testing.expectEqualStrings("original 👩‍💻", e.text.items);
+    try e.key(.{ .codepoint = 'r', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqualStrings("new\n\t  bytes\n", e.text.items);
+    const huge: [limit + 1]u8 = @splat('x');
+    for ([_][]const u8{ &huge, "\xff", "bad\x00text" }) |value| {
+        try std.testing.expectError(error.InvalidEditorText, e.replace(value));
+        try std.testing.expectEqualStrings("new\n\t  bytes\n", e.text.items);
+    }
+    try e.replace("");
+    try std.testing.expectEqualStrings("", e.text.items);
 }
 test "Vim insert, counts, operators, change, yank/paste and undo/redo" {
     var e = Editor.init(std.testing.allocator);

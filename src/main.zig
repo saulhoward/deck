@@ -525,6 +525,7 @@ test {
     _ = @import("model_settings.zig");
     _ = tui;
     _ = @import("tui_editor.zig");
+    _ = @import("tui_external_editor.zig");
     _ = @import("tui_bridge.zig");
     _ = @import("remote_test.zig");
     _ = @import("remote_transport_test.zig");

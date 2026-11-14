@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmod, readFile } from "node:fs/promises";
+import { chmod, readFile, readdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
-import { resolve, join, basename } from "node:path";
+import { resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { clientEnv } from "./client.test.env.js";
@@ -160,12 +160,12 @@ test("TUI closed requests and display projection reject controls without changin
 });
 
 const testBinary = process.env.DECK_TEST_BINARY;
-test("real PTY: /model and Shift-Tab change settings without losing the prompt or submitting input", { skip: !testBinary, timeout: 20_000 }, async () => {
+test("real PTY: :model and Shift-Tab change settings without losing the prompt or submitting input", { skip: !testBinary, timeout: 20_000 }, async () => {
   const f = await fixture(true);
   try {
     await pty(f.port, f.local.env, [
-      { wait: "mock/echo [medium]" }, { keys: "ikeep me" }, { keys: "\x1b" },
-      { keys: "/model" }, { wait: "/model" }, { wait: "client idle" }, { keys: "\r" }, { wait: "MODELS" },
+      { wait: "mock/echo [medium]" }, { keys: "keep me" }, { keys: "\x1b" },
+      { keys: ":model" }, { wait: ":model" }, { wait: "client idle" }, { keys: "\r" }, { wait: "MODELS" },
       { keys: "j\r" }, { wait: "settings applied" },
       { keys: "\x1b[Z" }, { wait: "mock/zeta [high]" },
       { keys: "\x1b[Z" }, { wait: "mock/zeta [off]" },
@@ -196,7 +196,7 @@ test("real PTY: Rex title and program status track agent work without polling fl
   try {
     const output = await pty(f.port, f.local.env, [
       { wait_status: "idle" }, { sleep: 1.2 },
-      { keys: "iwork" }, { keys: "\x1b" }, { keys: ":send" }, { wait: "client idle" }, { keys: "\r" },
+      { keys: "work" }, { keys: "\x1b" }, { keys: ":send" }, { wait: "client idle" }, { keys: "\r" },
       { wait_status: "working" }, { wait_status: "done" }, { sleep: 1.2 },
       { keys: "\x1b" }, { wait_status: "idle" }, { sleep: 1.2 },
       { keys: "ifail" }, { keys: "\x1b" }, { keys: ":send" }, { wait: "client idle" }, { keys: "\r" },
@@ -204,7 +204,7 @@ test("real PTY: Rex title and program status track agent work without polling fl
       { keys: ":help" }, { wait: "client idle" }, { sleep: 5.2 }, { wait_status: "clear" },
       { keys: "\x1b" }, { keys: ":q\r" },
     ]);
-    assert.ok(output.includes(`\x1b]2;Δ - ${basename(process.cwd())}\x1b\\`));
+    assert.ok(output.includes("\x1b]2;Δ - hub\x1b\\"));
     const reports = [...output.matchAll(/\x1b\]7501;state=([^:\x1b]+):id=deck(?::[^\x1b]*)?\x1b\\/g)].map((m) => m[1]);
     assert.equal(reports.filter((s) => s === "working").length, 2);
     assert.equal(reports.filter((s) => s === "done").length, 1);
@@ -219,7 +219,7 @@ test("real PTY: Vim editing, literal bracketed paste, Unicode, resize, explicit 
   const f = await fixture();
   try {
     await pty(f.port, f.local.env, [
-      { wait: "mock/echo" }, { keys: "\x1b]52;c;c2VjcmV0\x07" }, { keys: "ihello world" }, { keys: "\x1b" }, { keys: "0cwZig" }, { keys: "\x1b" },
+      { wait: "mock/echo" }, { keys: "\x1b]52;c;c2VjcmV0\x07" }, { keys: "hello world" }, { keys: "\x1b" }, { keys: "0cwZig" }, { keys: "\x1b" },
       { keys: "A" }, { keys: "\x1b[200~\n:q! 👩🏽‍💻\x1b[201~" }, { keys: "\x1b" },
       { resize: [12, 32] }, { resize: [40, 100] }, { keys: ":send" }, { wait: ":send" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Input admitted" },
       { keys: "\tgg" }, { keys: "\x04" }, { keys: ":older" }, { wait: ":older" }, { wait: "client idle" }, { keys: "\r" }, { wait: "line 100" },
@@ -235,7 +235,7 @@ test("real PTY: uncertain input stays locked, survives detach and retries only b
   try {
     f.loss(true);
     await pty(f.port, f.local.env, [
-      { wait: "mock/echo" }, { keys: "ikeep exact bytes 👩🏽‍💻" }, { keys: "\u0013" }, { wait: "unconfirmed" },
+      { wait: "mock/echo" }, { keys: "keep exact bytes 👩🏽‍💻" }, { keys: "\u0013" }, { wait: "unconfirmed" },
       { wait: "SAVED LOCKED" }, { keys: "ignored edit" }, { keys: "\u0013" }, { keys: "\u001b" }, { keys: ":q\r" },
     ]);
     const saved = (await store.list())[0]!; assert.ok(saved);
@@ -275,17 +275,17 @@ test("real PTY: real isolated mock hub retains input and answer after TUI detach
     }
     assert.ok(status, errors); assert.match(status.binding.agentName, /^[a-z]+$/);
     await pty(port, local.env, [
-      { wait: `${status.model.provider}/${status.model.modelId}` }, { keys: "ihello from real Zig TUI" }, { keys: "\x13" },
-      { wait: "Input admitted" }, { wait: "Deck prototype response" }, { wait: `${status.binding.agentName} · #` }, { keys: ":q\r" },
+      { wait: `${status.model.provider}/${status.model.modelId}` }, { keys: "hello from real Zig TUI" }, { keys: "\x13" },
+      { wait: "Input admitted" }, { wait: "Deck prototype response" }, { wait: "Δ hub" }, { keys: ":q\r" },
     ]);
     const history: any = await hubCommand(port, "history", { chatId: status.chatId, limit: 80 }, status.hubId);
     assert.ok(history.items.some((v: any) => v.kind === "deck.input" && v.data.text === "hello from real Zig TUI"));
     assert.ok(history.items.some((v: any) => v.kind === "pi.assistant"));
     const settings: any = await hubCommand(port, "model_settings", { chatId: status.chatId }, status.hubId);
     await pty(port, local.env, [
-      { wait: `${status.model.provider}/${status.model.modelId}` }, { wait: `${status.binding.agentName} · #` },
-      { keys: "/task TUI created task" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Rex open unconfirmed" },
-      { keys: "/tasks" }, { wait: "client idle" }, { keys: "\r" }, { wait: "TASKS" }, { keys: "j\r" },
+      { wait: `${status.model.provider}/${status.model.modelId}` }, { wait: "Δ hub" }, { keys: "\x1b" },
+      { keys: ":task TUI created task" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Rex open unconfirmed" },
+      { keys: ":tasks" }, { wait: "client idle" }, { keys: "\r" }, { wait: "TASKS" }, { keys: "j\r" },
       { wait: "Read-only task inspection" }, { wait: `[${settings.selection.thinkingLevel}]` }, { wait: "READ ONLY" },
       { keys: "itask-only input" }, { keys: "\x1b" }, { keys: ":send" }, { wait: "client idle" }, { keys: "\r" },
       { wait: "Read-only task inspection" }, { wait: "0/16384 bytes" }, { keys: ":q\r" },
@@ -306,9 +306,9 @@ test("real PTY: Vesper sidebar, centered Markdown/table, expanding prompt and En
   const f = await fixture(true, false, true); const screens: Record<string, string> = {};
   try {
     const output = await pty(f.port, f.local.env, [
-      { wait: "wintermute · #2" }, { wait_row: { row: 38, text: "Δ wintermute" } }, { capture: "collapsed" },
+      { wait: "Report" }, { wait_row: { row: 38, text: "Δ hub" } }, { capture: "collapsed" },
       { resize: [40, 140] }, { sleep: .2 }, { capture: "wide" },
-      { keys: "ihello" }, { keys: "\x1b[13;2u" }, { keys: "second" }, { keys: "\x1b[13;2u" }, { keys: "third" }, { capture: "expanded" },
+      { keys: "hello" }, { keys: "\x1b[13;2u" }, { keys: "second" }, { keys: "\x1b[13;2u" }, { keys: "third" }, { capture: "expanded" },
       { keys: "\r" }, { wait: "Input admitted" }, { keys: "\x1b" },
       { resize: [40, 80] }, { capture: "narrow" },
       { keys: ":sidebar-toggle\r" }, { capture: "forced" },
@@ -317,7 +317,12 @@ test("real PTY: Vesper sidebar, centered Markdown/table, expanding prompt and En
     if (process.env.DECK_TUI_CAPTURE) console.log(JSON.stringify(screens));
     // pyte display strings omit the continuation cell of wide glyphs.
     const wide = screens.wide!.split("\n").map(row => row.replaceAll("界", "界 ")), expanded = screens.expanded!.split("\n").map(row => row.replaceAll("界", "界 "));
-    assert.match(wide[2]!, /Δ wintermute/); assert.match(wide[4]!, /hub/);
+    assert.equal(wide[2]!.indexOf("Δ hub"), 124); assert.equal(wide[4]!.slice(113).trim(), "");
+    assert.doesNotMatch(screens.wide!, /wintermute|PROMPT|NORMAL|you ·|#\d/);
+    assert.ok(wide.some(row => row.indexOf("• Please render") === 14));
+    assert.ok(wide.some(row => row.indexOf("Δ Report") === 14));
+    assert.equal(wide[39]!.slice(0, 112).trim(), "mock/echo [medium]");
+    assert.equal(wide[39]!.indexOf("mock/echo"), 93);
     assert.ok(wide.every(row => row[112] === "│"));
     assert.ok(wide.slice(5).every(row => !row.slice(113).trim()), "rest of sidebar stays empty");
     assert.ok(wide.some(row => row.includes("Task") && row.includes("Status")));
@@ -328,16 +333,64 @@ test("real PTY: Vesper sidebar, centered Markdown/table, expanding prompt and En
     const rules = (rows: string[]) => rows.flatMap((row, i) => row.startsWith("─") ? [i] : []);
     assert.equal(rules(wide)[1]! - rules(wide)[0]!, 3); // two input rows
     assert.equal(rules(expanded)[1]! - rules(expanded)[0]!, 4);
-    assert.match(screens.narrow!.split("\n")[38]!, /Δ wintermute/);
-    assert.match(screens.collapsed!.split("\n")[38]!, /Δ wintermute/);
+    assert.match(screens.narrow!.split("\n")[38]!, /Δ hub/);
+    assert.match(screens.collapsed!.split("\n")[38]!, /Δ hub/);
     assert.ok(screens.forced!.split("\n").every(row => row.replaceAll("界", "界 ")[54] === "│"));
-    assert.match(screens.hidden!.split("\n")[38]!, /Δ wintermute/);
+    assert.match(screens.hidden!.split("\n")[38]!, /Δ hub/);
     const admits = f.requests.filter(r => r.command === "admit");
     assert.equal(admits.length, 1); assert.equal(admits[0].args.text, "hello\nsecond\nthird");
     assert.match(output, /38[:;]2[:;]255[:;]199[:;]153/);
     assert.match(output, /48[:;]2[:;]16[:;]16[:;]16/);
   } finally { await f.close(); }
 });
+
+test("real PTY: footer commands, literal slash input and Normal-mode model leader", { skip: !testBinary, timeout: 15000 }, async () => {
+  const f = await fixture(true); const screens: Record<string, string> = {};
+  try {
+    await pty(f.port, f.local.env, [
+      { wait: "mock/echo" }, { keys: "/model literal" }, { keys: "\x1b" },
+      { keys: " m" }, { wait: "MODELS" }, { keys: "\x1b" },
+      { keys: ":send" }, { wait: "client idle" }, { capture: "command" }, { keys: "\r" },
+      { wait: "Input admitted" }, { keys: ":q\r" },
+    ], screens);
+    const rows = screens.command!.split("\n");
+    assert.equal(rows[39]!.indexOf(":send"), 1);
+    assert.equal(rows[39]!.indexOf("mock/echo [medium]"), 81);
+    assert.equal(f.requests.filter(r => r.command === "admit").length, 1);
+    assert.equal(f.requests.find(r => r.command === "admit").args.text, "/model literal");
+    assert.equal(f.requests.filter(r => r.command === "set_model_settings").length, 0);
+  } finally { await f.close(); }
+});
+
+for (const mode of ["ok", "exit", "oversized", "symlink", "fifo", "invalid", "missing", "interrupt", "suspend", "terminate"]) {
+  test(`real PTY: external editor ${mode} restores terminal, keeps exact input and cleans private files`, { skip: !testBinary, timeout: 20000 }, async () => {
+    const f = await fixture(); const root = f.local.env.DECK_CLIENT_STATE_DIRECTORY;
+    const original = "draft /literal 👩‍💻"; const edited = "edited\n  exact 👩‍💻\n";
+    const script = join(root, "fake editor.py"); const report = join(root, "editor-report.json");
+    try {
+      await writeFile(script, `import sys, os, json, stat, termios\nfrom pathlib import Path\np = Path(sys.argv[-1])\nassert sys.argv[1] == 'quoted flag'\nassert stat.S_IMODE(p.stat().st_mode) == 0o600\nassert stat.S_IMODE(p.parent.stat().st_mode) == 0o700\nassert os.tcgetpgrp(0) == os.getpgrp()\nassert termios.tcgetattr(0)[3] & termios.ICANON\nassert termios.tcgetattr(0)[3] & termios.ECHO\nPath(os.environ['EDITOR_REPORT']).write_text(json.dumps({'original': p.read_text(), 'pid': os.getpid()}))\nprint('EDITOR_READY', flush=True)\ninput()\nmode = os.environ['EDITOR_TEST_MODE']\nif mode == 'exit': sys.exit(7)\nif mode == 'symlink':\n p.unlink()\n p.symlink_to(os.environ['EDITOR_REPORT'])\nelif mode == 'fifo':\n p.unlink()\n os.mkfifo(p)\nelif mode == 'oversized': p.write_text('x' * 16385)\nelif mode == 'invalid': p.write_bytes(b'\\xff')\nelse: p.write_text(${JSON.stringify(edited)})\n`);
+      const env = { ...f.local.env, TMPDIR: root, EDITOR: mode === "missing" ? "/does-not-exist/deck-editor" : `python3 "${script}" 'quoted flag'`, EDITOR_REPORT: report, EDITOR_TEST_MODE: mode };
+      const steps: object[] = [{ wait: "mock/echo" }, { keys: original }, { keys: "\x1b" }, { keys: "v" }];
+      if (mode !== "missing") steps.push({ wait: "EDITOR_READY" });
+      if (mode === "terminate") steps.push({ signal: "SIGTERM" });
+      else {
+        if (mode !== "missing") steps.push({ keys: mode === "interrupt" ? "\x03" : mode === "suspend" ? "\x1a" : "\r" });
+        steps.push({ wait: mode === "ok" ? "Editor contents loaded" : "Editor failed" }, { keys: ":send" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Input admitted" }, { keys: ":q\r" });
+      }
+      const output = await pty(f.port, env, steps);
+      if (mode !== "missing") {
+        const observed = JSON.parse(await readFile(report, "utf8")); assert.equal(observed.original, original);
+        assert.throws(() => process.kill(observed.pid, 0), { code: "ESRCH" });
+      }
+      const admits = f.requests.filter(r => r.command === "admit");
+      assert.equal(admits.length, mode === "terminate" ? 0 : 1);
+      if (admits.length) assert.equal(admits[0].args.text, mode === "ok" ? edited : original);
+      assert.equal(f.requests.filter(r => r.command === "stop").length, 0);
+      assert.deepEqual((await readdir(root)).filter(name => name.startsWith("deck-editor-")), []);
+      if (mode !== "terminate") assert.ok((output.match(/\x1b\[\?1049h/g) ?? []).length >= 2);
+    } finally { await f.close(); }
+  });
+}
 
 test("real PTY: SIGTERM restores terminal without stopping the hub", { skip: !testBinary, timeout: 15_000 }, async () => {
   const f = await fixture();

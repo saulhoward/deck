@@ -53,13 +53,20 @@ export function agentNameFields(metadata: AgentNameMetadata): AgentNameMetadata 
   return metadata.agentName === undefined ? {} : { agentName: metadata.agentName, agentNameAlgorithm: metadata.agentNameAlgorithm!, ...(metadata.agentRune === undefined ? {} : { agentRune: metadata.agentRune }) };
 }
 
-// Call inside the SAME transaction that creates Deck metadata. Existing names
-// are never recomputed, including when their algorithm is no longer selected.
+// Call inside the SAME transaction that creates Deck metadata. Task names are
+// never recomputed. Canonical main has the fixed hub-v1 identity; its one-time
+// rename preserves any previous claim and does not rewind either cursor.
 export async function assignAgentName(tx: Tx, chatId: ConversationId, metadata: AgentNameMetadata, algorithm = currentAgentNameAlgorithm, hub = false): Promise<void> {
   await assignRune(tx, metadata, hub);
   if (metadata.agentName !== undefined || metadata.agentNameAlgorithm !== undefined) {
     if (!validAgentName(metadata.agentName) || !validAgentName(metadata.agentNameAlgorithm)) throw new Error("Invalid saved agent name/version");
     if ((await tx.doc(NameClaim, metadata.agentName, chatId)).chatId !== chatId) throw new Error("Agent name already belongs to another conversation");
+    if (!hub) return;
+  }
+  if (hub) {
+    if ((await tx.doc(NameClaim, "hub", chatId)).chatId !== chatId) throw new Error("Agent name already belongs to another conversation");
+    metadata.agentName = "hub";
+    metadata.agentNameAlgorithm = "hub-v1";
     return;
   }
   if (!validAgentName(algorithm.id)) throw new Error("Invalid agent-name algorithm ID");

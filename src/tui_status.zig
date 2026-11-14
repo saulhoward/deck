@@ -121,11 +121,11 @@ pub fn publish(self: *Reporter, view: View, now: std.Io.Timestamp) !void {
 /// One bounded, control-safe title for both OSC 2 and OSC 7501. Preserve UTF-8
 /// boundaries; filesystem bytes need not be UTF-8. Never emit raw path controls.
 pub fn directoryTitle(out: *[192]u8, cwd: []const u8) []const u8 {
-    return identityTitle(out, cwd, "Δ");
+    return identityTitle(out, cwd, "·");
 }
 pub fn identityTitle(out: *[192]u8, cwd: []const u8, rune: []const u8) []const u8 {
     const trimmed = std.mem.trimEnd(u8, cwd, "/");
-    const name = if (trimmed.len == 0) "/" else std.fs.path.basename(trimmed);
+    const name = if (std.mem.eql(u8, rune, "Δ")) "hub" else if (trimmed.len == 0) "/" else std.fs.path.basename(trimmed);
     const symbol = if (wire.validAgentRune(.{ .string = rune })) rune else "·";
     @memcpy(out[0..symbol.len], symbol);
     @memcpy(out[symbol.len..][0..3], " - ");
@@ -194,10 +194,11 @@ test "terminal status uses fresh settled observations, not polling, ACKs or old 
 
 test "OSC title and status are bounded, safe, change-only and cleaned up by namespace" {
     var title: [192]u8 = undefined;
-    try std.testing.expectEqualStrings("Δ - repo", directoryTitle(&title, "/tmp/repo/"));
-    try std.testing.expectEqualStrings("Δ - /", directoryTitle(&title, "/"));
+    try std.testing.expectEqualStrings("Δ - hub", identityTitle(&title, "/tmp/repo/", "Δ"));
+    try std.testing.expectEqualStrings("· - repo", directoryTitle(&title, "/tmp/repo/"));
+    try std.testing.expectEqualStrings("· - /", directoryTitle(&title, "/"));
     const unsafe = directoryTitle(&title, "/tmp/ab\x1b\x07\n\t\x7f\u{85}\u{202e}cd\xff");
-    try std.testing.expectEqualStrings("Δ - abcd�", unsafe);
+    try std.testing.expectEqualStrings("· - abcd�", unsafe);
     var unicode_name: [300]u8 = undefined;
     for (0..100) |i| @memcpy(unicode_name[i * 3 ..][0..3], "界");
     const long = directoryTitle(&title, &unicode_name);

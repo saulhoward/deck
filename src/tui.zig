@@ -6,6 +6,7 @@ const fw = vaxis.vxfw;
 const Native = @import("native.zig");
 const Bridge = @import("tui_bridge.zig");
 const Editor = @import("tui_editor.zig");
+const ExternalEditor = @import("tui_external_editor.zig");
 const wire = @import("generated/contracts.zig");
 const TerminalStatus = @import("tui_status.zig");
 const Theme = @import("tui_theme.zig");
@@ -29,22 +30,24 @@ const help =
     \\0 ^ $ gg G            line / buffer motions; numeric counts
     \\d c y + motion        delete / change / yank; dd cc yy
     \\x X D C Y r, p P      edits / replace / internal-register paste
-    \\v V, u, Ctrl-R        visual selection, undo / redo
+    \\v                     edit prompt in $EDITOR (Normal mode)
+    \\V, u, Ctrl-R          linewise visual selection, undo / redo
+    \\Space t / m / n       tasks / models / new task (Normal mode)
     \\Enter                 send; Shift-Enter (or Insert Ctrl-J) newline
     \\:sidebar-toggle       override responsive right sidebar visibility
     \\
-    \\/new                  hub only: JSON task-brief composer (Ctrl-S creates)
-    \\/hosts                registered hosts; Enter selects host for new task
-    \\/brief                inspect saved creation brief (read only)
+    \\:new                  hub only: JSON task-brief composer (Ctrl-S creates)
+    \\:hosts                registered hosts; Enter selects host for new task
+    \\:brief                inspect saved creation brief (read only)
     \\:cancel               clear an unsubmitted task form, not admitted work
-    \\/tasks                hub only: inspect tasks read-only
-    \\/task TITLE           hub only: create task and open Rex
-    \\/task-at JSON         hub only: {machineId,cwd,title} target
-    \\/select ID /hub       hub only: inspect task / return to hub
-    \\Task clients are Rex-bound and locked; use /rex open to participate.
-    \\/rex                  selected task Rex status; i inspect, o open
-    \\/rex open             explicit best-effort open; no automatic retry
-    \\/model or :model      hub model picker; j/k/arrows, Enter, Esc
+    \\:tasks                hub only: inspect tasks read-only
+    \\:task TITLE           hub only: create task and open Rex
+    \\:task-at JSON         hub only: {machineId,cwd,title} target
+    \\:select ID :hub       hub only: inspect task / return to hub
+    \\Task clients are Rex-bound and locked; use :rex open to participate.
+    \\:rex                  selected task Rex status; i inspect, o open
+    \\:rex open             explicit best-effort open; no automatic retry
+    \\:model                hub model picker; j/k/arrows, Enter, Esc
     \\Shift-Tab             cycle supported thinking levels (idle chat)
     \\Ctrl-S or :send       explicitly submit (steer); save before send
     \\:retry / :discard     resolve saved input; no automatic replay
@@ -53,7 +56,9 @@ const help =
     \\:help or F1           this help; Esc closes
     \\
     \\Saved requests are locked; retry uses original bytes, not preview.
-    \\Unsubmitted editor text is in memory only. :q protects it.
+    \\Starts in Insert mode; Esc then : enters a footer command.
+    \\Unsubmitted text stays local. $EDITOR uses a temporary private file.
+    \\:q protects unsent text; editor failure preserves it.
     \\Switching refuses unsent text or unresolved requests; nothing is lost.
     \\Markdown chat, bounded task pages, 16 KiB prompt, 32 undo steps.
     \\No macros, dot-repeat, search, text objects or system clipboard.
@@ -63,7 +68,7 @@ const dim = Theme.dim;
 const accent = Theme.green;
 const bar = Theme.dim;
 const hub_bar = bar;
-const Row = struct { text: []const u8 = "", style: vaxis.Style = base, offset: usize = 0, cells: ?Markdown.Line = null, speaker: bool = false };
+const Row = struct { text: []const u8 = "", style: vaxis.Style = base, offset: usize = 0, cells: ?Markdown.Line = null, speaker: ?[]const u8 = null, speaker_style: vaxis.Style = dim };
 
 const TransportStatus = enum {
     quiet,
@@ -200,7 +205,8 @@ const Model = struct {
     focus: enum { prompt, chat } = .prompt,
     command: std.ArrayList(u8) = .empty,
     command_mode: bool = false,
-    command_prefix: u8 = ':',
+    leader: bool = false,
+    external_edit: bool = false,
     model_picker: bool = false,
     model_index: usize = 0,
     task_picker: bool = false,
@@ -281,7 +287,7 @@ const Model = struct {
     }
     fn canWrite(self: *Model) bool {
         if (!self.readOnly()) return true;
-        self.note("Read-only task inspection. /rex open to participate in its Rex session.");
+        self.note("Read-only task inspection. :rex open to participate in its Rex session.");
         return false;
     }
     fn canList(self: *Model) bool {
@@ -295,7 +301,7 @@ const Model = struct {
     fn configure(self: *Model, selection: wire.ModelSelection) !void {
         if (!self.canWrite()) return;
         const current = self.settings() orelse {
-            self.note("Model settings unavailable; open /model (requires an updated hub).");
+            self.note("Model settings unavailable; open :model (requires an updated hub).");
             return;
         };
         if (self.locked() or self.settings_uncertain) {
@@ -310,7 +316,7 @@ const Model = struct {
     fn cycleThinking(self: *Model) !void {
         if (!self.canWrite()) return;
         const current = self.settings() orelse {
-            self.note("Open /model to read available settings first.");
+            self.note("Open :model to read available settings first.");
             return;
         };
         for (current.models) |model| {
@@ -329,7 +335,7 @@ const Model = struct {
             try self.configure(selection);
             return;
         }
-        self.note("Selected model no longer in the hub catalog; choose /model.");
+        self.note("Selected model no longer in the hub catalog; choose :model.");
     }
     fn canNavigate(self: *Model) bool {
         if (!self.canList()) return false;
@@ -354,7 +360,7 @@ const Model = struct {
     fn beginTaskForm(self: *Model, machine: ?[]const u8) !void {
         if (!self.canNavigate()) return;
         if (self.readOnly()) {
-            self.note("Return to /hub to create a task.");
+            self.note("Return to :hub to create a task.");
             return;
         }
         if (self.bridge.pending != null) {
@@ -392,7 +398,7 @@ const Model = struct {
     fn createAt(self: *Model, json: []const u8) !void {
         if (!self.canNavigate()) return;
         const raw = std.json.parseFromSlice(std.json.Value, self.a, json, .{}) catch {
-            self.note("Invalid /task-at JSON: use {machineId,cwd,title}.");
+            self.note("Invalid :task-at JSON: use {machineId,cwd,title}.");
             return;
         };
         defer raw.deinit();
@@ -407,7 +413,7 @@ const Model = struct {
     fn createTask(self: *Model, title: []const u8, target: ?wire.TaskCreationTarget) !void {
         if (!self.canNavigate()) return;
         if (self.readOnly()) {
-            self.note("Return to /hub to create and open a Rex task.");
+            self.note("Return to :hub to create and open a Rex task.");
             return;
         }
         if (title.len == 0 or title.len > 200) {
@@ -466,10 +472,10 @@ const Model = struct {
         } else if (std.mem.eql(u8, cmd, "tasks")) try self.taskPage(null) else if (std.mem.startsWith(u8, cmd, "task-at ")) try self.createAt(cmd[8..]) else if (std.mem.startsWith(u8, cmd, "task ")) try self.createTask(std.mem.trim(u8, cmd[5..], " "), null) else if (std.mem.startsWith(u8, cmd, "select ")) {
             const id = std.mem.trim(u8, cmd[7..], " ");
             const n = std.fmt.parseInt(u64, id, 10) catch 0;
-            if (n == 0 or n > 9007199254740991 or id[0] == '0' or !std.ascii.isDigit(id[0])) self.note("Use /select with a positive chat ID from /tasks.") else try self.selectChat(id);
+            if (n == 0 or n > 9007199254740991 or id[0] == '0' or !std.ascii.isDigit(id[0])) self.note("Use :select with a positive chat ID from :tasks.") else try self.selectChat(id);
         } else if (std.mem.eql(u8, cmd, "hub") or std.mem.eql(u8, cmd, "main")) {
             if (self.state()) |s| try self.selectChat(s.hubChatId);
-        } else if (std.mem.eql(u8, cmd, "rex") or std.mem.eql(u8, cmd, "rex status")) try self.issue(.rexStatus) else if (std.mem.eql(u8, cmd, "rex inspect")) try self.issue(.rexInspect) else if (std.mem.eql(u8, cmd, "rex open") or std.mem.eql(u8, cmd, "rex reopen")) try self.issue(.rexOpen) else if (std.mem.eql(u8, cmd, "model")) try self.issue(.models) else if (self.command_prefix == '/') self.note(if (self.bridge.client_mode == .task) "Task locked: /rex or /model; :help for chat commands." else "Use /tasks, /task TITLE, /select ID, /hub, /rex or /model.") else if (std.mem.eql(u8, cmd, "q") or std.mem.eql(u8, cmd, "quit")) self.quit(ctx, false) else if (std.mem.eql(u8, cmd, "q!")) self.quit(ctx, true) else if (std.mem.eql(u8, cmd, "help")) self.help_visible = true else {
+        } else if (std.mem.eql(u8, cmd, "rex") or std.mem.eql(u8, cmd, "rex status")) try self.issue(.rexStatus) else if (std.mem.eql(u8, cmd, "rex inspect")) try self.issue(.rexInspect) else if (std.mem.eql(u8, cmd, "rex open") or std.mem.eql(u8, cmd, "rex reopen")) try self.issue(.rexOpen) else if (std.mem.eql(u8, cmd, "model")) try self.issue(.models) else if (std.mem.eql(u8, cmd, "q") or std.mem.eql(u8, cmd, "quit")) self.quit(ctx, false) else if (std.mem.eql(u8, cmd, "q!")) self.quit(ctx, true) else if (std.mem.eql(u8, cmd, "help")) self.help_visible = true else {
             const action: ?Action = if (std.mem.eql(u8, cmd, "send")) .send else if (std.mem.eql(u8, cmd, "retry")) .retry else if (std.mem.eql(u8, cmd, "discard")) .discard else if (std.mem.eql(u8, cmd, "stop")) .stop else if (std.mem.eql(u8, cmd, "older")) .older else if (std.mem.eql(u8, cmd, "latest")) .latest else null;
             if (action) |a| try self.issue(a) else self.note("Unknown command. :help shows the supported Vim and client commands.");
         }
@@ -566,6 +572,12 @@ const Model = struct {
             }
             return;
         }
+        const normal = self.focus == .chat or self.editor.mode != .insert or self.locked() or self.readOnly();
+        if (normal and self.leader) {
+            self.leader = false;
+            if (key.matches('t', .{})) try self.taskPage(null) else if (key.matches('m', .{})) try self.issue(.models) else if (key.matches('n', .{})) try self.beginTaskForm(null);
+            return;
+        }
         if (key.matches(vaxis.Key.enter, .{ .shift = true }) and self.focus == .prompt) {
             if (!self.locked() and !self.readOnly()) {
                 self.editor.mode = .insert;
@@ -577,10 +589,22 @@ const Model = struct {
             try self.issue(.send);
             return;
         }
-        const normal = self.focus == .chat or self.editor.mode != .insert or self.locked() or self.readOnly();
-        if ((normal and key.matches(':', .{})) or ((normal or self.editor.text.items.len == 0) and key.matches('/', .{}))) {
+        if (normal and key.matches(' ', .{})) {
+            self.leader = true;
+            return;
+        }
+        if (normal and key.matches(':', .{})) {
             self.command_mode = true;
-            self.command_prefix = if (key.matches('/', .{})) '/' else ':';
+            return;
+        }
+        if (normal and key.matches('v', .{})) {
+            if (!self.canWrite()) return;
+            if (self.locked() or self.bridge.pending != null) {
+                self.note("Editor unavailable while a request is pending or the prompt is locked.");
+                return;
+            }
+            self.external_edit = true;
+            ctx.quit = true; // Stop/join terminal input before giving the TTY to $EDITOR.
             return;
         }
         if (normal and self.window_prefix) {
@@ -742,7 +766,7 @@ const Model = struct {
                     }
                 }
                 self.ticks += 1;
-                if (self.ticks % 10 == 0 and self.bridge.pending == null and !self.command_mode and !self.paste_mode and !self.model_picker and !self.task_picker and !self.hosts_view and !self.brief_view and !self.rex_view) {
+                if (self.ticks % 10 == 0 and self.bridge.pending == null and !self.command_mode and !self.leader and !self.paste_mode and !self.model_picker and !self.task_picker and !self.hosts_view and !self.brief_view and !self.rex_view) {
                     try self.issue(.poll);
                 }
                 // A slow background read becomes visible even without input or
@@ -764,6 +788,7 @@ const Model = struct {
             .paste_start => {
                 if (self.terminal_status) |status| status.presentation.acknowledge();
                 self.paste_mode = true;
+                self.leader = false;
                 self.reject_paste = self.command_mode or self.help_visible or self.model_picker or self.task_picker or self.hosts_view or self.brief_view or self.rex_view or self.locked() or self.readOnly();
                 self.paste_overflow = false;
                 self.paste_buffer.clearRetainingCapacity();
@@ -829,7 +854,7 @@ const Model = struct {
                 line(ctx, surface, 1, h - 3, if (page.next != null) "More pages: n · first page: g" else "Last page · first page: g", dim, null, 0);
             };
             line(ctx, surface, 1, h - 2, self.notice[0..self.notice_len], dim, null, 0);
-            line(ctx, surface, 1, h - 1, "j/k · Enter inspect · Esc cancel · /task TITLE creates + opens Rex", accent, null, 0);
+            line(ctx, surface, 1, h - 1, "j/k · Enter inspect · Esc cancel · :task TITLE creates + opens Rex", accent, null, 0);
             return surface;
         }
         if (self.hosts_view) {
@@ -898,7 +923,7 @@ const Model = struct {
                 }
             }
             line(ctx, surface, 1, h - 2, self.notice[0..self.notice_len], dim, null, 0);
-            line(ctx, surface, 1, h - 1, if (self.readOnly()) "Read-only settings · Esc close · /rex open to participate" else "j/k or arrows · Enter select · Esc cancel · idle chats only", accent, null, 0);
+            line(ctx, surface, 1, h - 1, if (self.readOnly()) "Read-only settings · Esc close · :rex open to participate" else "j/k or arrows · Enter select · Esc cancel · idle chats only", accent, null, 0);
             return surface;
         }
         if (self.help_visible) {
@@ -926,21 +951,22 @@ const Model = struct {
         self.chat_height = chat_h;
         var chat: std.ArrayList(Row) = .empty;
         if (s) |snap| for (snap.entries) |entry| {
-            const label = if (entry.role == .assistant)
-                try std.fmt.allocPrint(ctx.arena, "{s} {s} · #{d}", .{ rune(snap), snap.agentName orelse "assistant", entry.id })
-            else
-                try std.fmt.allocPrint(ctx.arena, "{s} · #{d}", .{ if (entry.role == .user) "you" else @tagName(entry.role), entry.id });
-            try chat.append(ctx.arena, .{ .text = label, .style = if (entry.role == .user) accent else dim, .speaker = true });
+            const label = if (entry.role == .assistant) rune(snap) else if (entry.role == .user) "•" else "·";
+            const first_row = chat.items.len;
             if (entry.role == .assistant or entry.role == .user) {
                 for (try Markdown.render(ctx, entry.text, layout.body, base)) |cells| try chat.append(ctx.arena, .{ .cells = cells });
             } else try rows(ctx, &chat, entry.text, layout.body, dim);
+            if (chat.items.len == first_row) try chat.append(ctx.arena, .{});
+            chat.items[first_row].speaker = label;
+            chat.items[first_row].speaker_style = if (entry.role == .user) accent else dim;
             try chat.append(ctx.arena, .{});
         };
-        if (chat.items.len == 0) try rows(ctx, &chat, if (s == null) "Connecting to the local hub…" else if (self.readOnly()) "Read-only inspection · /rex open to participate" else "Press i to write · Enter to send · :help", layout.body, dim);
+        if (chat.items.len == 0) try rows(ctx, &chat, if (s == null) "Connecting to the local hub…" else if (self.readOnly()) "Read-only inspection · :rex open to participate" else "Enter to send · Esc for Normal mode · :help", layout.body, dim);
         self.scroll_max = chat.items.len -| chat_h;
         self.scroll = @min(self.scroll, self.scroll_max);
         const first = self.scroll_max - self.scroll;
         for (chat.items[first..@min(chat.items.len, first + chat_h)], 0..) |row, y| {
+            if (row.speaker) |speaker| lineLimit(ctx, surface, layout.x -| 2, @intCast(y), speaker, row.speaker_style, null, 0, layout.x);
             if (row.cells) |cells| {
                 var x = layout.x;
                 for (cells) |cell| {
@@ -948,23 +974,18 @@ const Model = struct {
                     surface.writeCell(x, @intCast(y), cell);
                     x += cell.char.width;
                 }
-            } else lineLimit(ctx, surface, if (row.speaker and layout.x > 2) @max(1, layout.x -| 22) else layout.x, @intCast(y), row.text, row.style, null, 0, right);
+            } else lineLimit(ctx, surface, layout.x, @intCast(y), row.text, row.style, null, 0, layout.x + layout.body);
         }
-        const mode = if (self.readOnly()) "READ ONLY" else if (s != null and s.?.draft != null and !s.?.draft.?.saved) "LOCKED UNSAVED" else if (s != null and s.?.draft != null and s.?.draft.?.clipped) "SAVED PREVIEW" else if (s != null and s.?.draft != null and s.?.draft.?.saved) "SAVED LOCKED" else if (self.locked()) "LOCKED" else switch (self.editor.mode) {
-            .normal => "NORMAL",
-            .insert => "INSERT",
-            .visual => "VISUAL",
-            .visual_line => "V-LINE",
-        };
+        const mode = if (self.readOnly()) "READ ONLY" else if (s != null and s.?.draft != null and !s.?.draft.?.saved) "LOCKED UNSAVED" else if (s != null and s.?.draft != null and s.?.draft.?.clipped) "SAVED PREVIEW" else if (s != null and s.?.draft != null and s.?.draft.?.saved) "SAVED LOCKED" else if (self.locked()) "LOCKED" else "";
         for (0..layout.main) |x| for ([_]u16{ upper, h - 3 }) |y| surface.writeCell(@intCast(x), y, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = Theme.rule });
-        const border = try std.fmt.allocPrint(ctx.arena, " {s}{s} · {s} ", .{ if (self.task_form) "TASK BRIEF / " else "", if (self.focus == .chat) "CHAT" else "PROMPT", mode });
-        lineLimit(ctx, surface, 1, upper, border, dim, null, 0, right);
+        const border = try std.fmt.allocPrint(ctx.arena, " {s}{s} ", .{ if (self.task_form) "TASK BRIEF " else "", mode });
+        if (self.task_form or mode.len > 0) lineLimit(ctx, surface, 1, upper, border, dim, null, 0, right);
         const bytes_label = try std.fmt.allocPrint(ctx.arena, " {d}/16384 bytes ", .{self.editor.text.items.len});
         if (layout.main > border.len + bytes_label.len + 4) lineLimit(ctx, surface, @intCast(right - bytes_label.len), upper, bytes_label, Theme.rule, null, 0, right);
         // Operational notices remain visible above the prompt, never swallowed
         // by decorative chrome or the (intentionally otherwise empty) sidebar.
-        const notice = if (self.command_mode) try std.fmt.allocPrint(ctx.arena, "{c}{s}", .{ self.command_prefix, self.command.items }) else self.notice[0..self.notice_len];
-        lineLimit(ctx, surface, 1, upper - 1, notice, if (self.command_mode) accent else dim, null, 0, right);
+        const notice = self.notice[0..self.notice_len];
+        lineLimit(ctx, surface, 1, upper - 1, notice, dim, null, 0, right);
         if (notice.len == 0) if (s) |snap| {
             const preview = snap.preview[0 .. std.mem.indexOfScalar(u8, snap.preview, '\n') orelse snap.preview.len];
             if (preview.len > 0) lineLimit(ctx, surface, layout.x, upper - 1, try std.fmt.allocPrint(ctx.arena, "live · {s}", .{preview}), dim, null, 0, right);
@@ -980,15 +1001,18 @@ const Model = struct {
             const end = @min(self.editor.cursor - row.offset, row.text.len);
             surface.cursor = .{ .col = @intCast(layout.x + @min(layout.body - 1, displayWidth(ctx, row.text[0..end]))), .row = @intCast(prompt_y + cursor_row - start), .shape = if (self.editor.mode == .insert) .beam else .block };
         }
-        if (self.command_mode) surface.cursor = .{ .row = upper - 1, .col = @intCast(@min(right - 1, displayWidth(ctx, self.command.items) + 2)), .shape = .beam };
         var name_buffer: [192]u8 = undefined;
-        const saved_name = if (s) |snap| snap.agentName orelse "unnamed" else "connecting";
-        const identity = try std.fmt.allocPrint(ctx.arena, "{s} {s}", .{ if (s) |snap| rune(snap) else "·", Theme.name(&name_buffer, saved_name, self.animation()) });
-        const role = if (s) |snap| (if (std.mem.eql(u8, snap.chatId, snap.hubChatId)) "hub" else if (snap.kind == .subagent) "subagent" else "agent") else "";
+        const is_hub = if (s) |snap| std.mem.eql(u8, snap.chatId, snap.hubChatId) else false;
+        const saved_name = if (is_hub) "hub" else if (s) |snap| snap.agentName orelse "unnamed" else "connecting";
+        const identity = try std.fmt.allocPrint(ctx.arena, "{s} {s}", .{ if (s) |snap| rune(snap) else "·", Theme.name(&name_buffer, saved_name, if (is_hub) null else self.animation()) });
+        const role = if (is_hub) "" else if (s) |snap| (if (snap.kind == .subagent) "subagent" else "agent") else "";
         if (layout.sidebar > 0) {
             for (0..h) |y| surface.writeCell(layout.main, @intCast(y), .{ .char = .{ .grapheme = "│", .width = 1 }, .style = Theme.rule });
-            line(ctx, surface, layout.main + 3, 2, identity, Theme.orange, null, 0);
-            line(ctx, surface, layout.main + 3, 4, role, dim, null, 0);
+            const available = layout.sidebar - 3;
+            const identity_x: u16 = @intCast(layout.main + 2 + (available - @min(available, displayWidth(ctx, identity))) / 2);
+            const role_x: u16 = @intCast(layout.main + 2 + (available - @min(available, displayWidth(ctx, role))) / 2);
+            lineLimit(ctx, surface, identity_x, 2, identity, Theme.orange, null, 0, w - 1);
+            lineLimit(ctx, surface, role_x, 4, role, dim, null, 0, w - 1);
         }
         const identity_width: u16 = @intCast(@min(displayWidth(ctx, identity), layout.main / 2));
         const status_right = if (layout.sidebar == 0) layout.main - identity_width - 2 else right;
@@ -1004,9 +1028,26 @@ const Model = struct {
         // Reserve room for uncertainty even with long model names.
         const warning = if (!self.online) try std.fmt.allocPrint(ctx.arena, "STALE · {s}", .{self.shown_transport.text()}) else if (self.command_mode or self.shown_transport == .waiting or self.shown_transport == .fenced) self.shown_transport.text() else "";
         const warning_width = @min(right - 2, displayWidth(ctx, warning));
-        const model_right: u16 = @intCast(if (warning_width > 0) right - warning_width - 1 else right);
-        lineLimit(ctx, surface, 1, h - 1, status, dim, null, 0, model_right);
-        if (warning_width > 0) lineLimit(ctx, surface, @intCast(right - warning_width), h - 1, warning, if (self.command_mode and self.online) dim else Theme.orange, null, 0, right);
+        const model_width = @min(displayWidth(ctx, status), if (self.command_mode or warning_width > 0) right / 2 else right - 1);
+        const model_x: u16 = @intCast(right - model_width);
+        lineLimit(ctx, surface, model_x, h - 1, status, dim, null, 0, right);
+        const command_right = model_x -| 1;
+        if (self.command_mode) {
+            const command_text = try std.fmt.allocPrint(ctx.arena, ":{s}", .{self.command.items});
+            // Scroll the entry, not the model, when an Ex command is long.
+            var start_byte: usize = 0;
+            var it = vaxis.unicode.graphemeIterator(command_text);
+            var remaining = displayWidth(ctx, command_text);
+            while (remaining >= command_right -| 1) {
+                const g = it.next() orelse break;
+                start_byte = g.start + g.len;
+                remaining -= glyph(ctx, g.bytes(command_text)).width;
+            }
+            lineLimit(ctx, surface, 1, h - 1, command_text[start_byte..], accent, null, 0, command_right);
+            surface.cursor = .{ .row = h - 1, .col = @intCast(@min(command_right, 1 + remaining)), .shape = .beam };
+            // Keep slot/fence information observable without displacing commands.
+            if (warning_width > 0) lineLimit(ctx, surface, 1, upper - 1, warning, if (self.online) dim else Theme.orange, null, 0, right);
+        } else if (warning_width > 0) lineLimit(ctx, surface, 1, h - 1, warning, Theme.orange, null, 0, command_right);
         return surface;
     }
 };
@@ -1073,6 +1114,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     if (hub_id) |id| bridge.hub_id = try init.gpa.dupe(u8, id);
     if (chat_id) |id| bridge.chat_id = try init.gpa.dupe(u8, id);
     var model: Model = .{ .a = init.gpa, .bridge = &bridge, .editor = Editor.init(init.gpa) };
+    model.editor.mode = .insert;
     defer model.deinit();
     stopping.store(false, .monotonic);
     const signals = [_]std.posix.SIG{ .TERM, .HUP, .INT };
@@ -1084,26 +1126,48 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     const ignore_pipe: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.IGN }, .mask = std.posix.sigemptyset(), .flags = 0 };
     std.posix.sigaction(.PIPE, &ignore_pipe, &previous_pipe);
     defer std.posix.sigaction(.PIPE, &previous_pipe, null);
-    var buffer: [4096]u8 = undefined;
-    var app = fw.App.init(init.io, init.gpa, init.environ_map, &buffer) catch |err| {
-        vaxis.recover();
-        vaxis.tty.global_tty = null;
-        return err;
-    };
-    defer {
-        app.deinit();
-        vaxis.tty.global_tty = null;
-    }
-    // Bracketed paste uses key events; never decode/allocate unsolicited OSC 52.
-    app.vx.opts.system_clipboard_allocator = null;
     const cwd = std.process.currentPathAlloc(init.io, init.gpa) catch null;
     defer if (cwd) |path| init.gpa.free(path);
-    var title_buffer: [192]u8 = undefined;
-    var terminal_status: TerminalStatus = .{ .vx = &app.vx, .writer = app.tty.writer(), .title = TerminalStatus.identityTitle(&title_buffer, cwd orelse "unknown", if (allocation_id == null) "Δ" else "·") };
-    defer terminal_status.end();
-    try terminal_status.begin();
-    model.terminal_status = &terminal_status;
-    try app.run(model.widget(), .{ .framerate = 30 });
+    while (!stopping.load(.monotonic)) {
+        {
+            var buffer: [4096]u8 = undefined;
+            var app = fw.App.init(init.io, init.gpa, init.environ_map, &buffer) catch |err| {
+                vaxis.recover();
+                vaxis.tty.global_tty = null;
+                return err;
+            };
+            defer {
+                app.deinit();
+                vaxis.tty.global_tty = null;
+            }
+            // Bracketed paste uses key events; never decode/allocate unsolicited OSC 52.
+            app.vx.opts.system_clipboard_allocator = null;
+            var title_buffer: [192]u8 = undefined;
+            const snapshot = model.state();
+            var terminal_status: TerminalStatus = .{ .vx = &app.vx, .writer = app.tty.writer(), .title = TerminalStatus.identityTitle(&title_buffer, if (snapshot) |s| s.cwd orelse "unknown" else cwd orelse "unknown", if (snapshot) |s| Model.rune(s) else if (chat_id == null) "Δ" else "·") };
+            defer terminal_status.end();
+            try terminal_status.begin();
+            model.terminal_status = &terminal_status;
+            defer model.terminal_status = null;
+            try app.run(model.widget(), .{ .framerate = 30 });
+        } // Event loop joined, raw mode/alternate screen/title restored first.
+        if (!model.external_edit or stopping.load(.monotonic)) break;
+        model.external_edit = false;
+        model.online = false;
+        model.busy_started = null;
+        const edited = ExternalEditor.run(.{ .io = init.io, .environ = init.minimal.environ }, init.gpa, init.environ_map, model.editor.text.items, &stopping) catch |err| {
+            var message: [256]u8 = undefined;
+            model.note(std.fmt.bufPrint(&message, "Editor failed ({s}); prompt unchanged. Set $EDITOR to an executable with optional arguments.", .{@errorName(err)}) catch "Editor failed; prompt unchanged.");
+            continue;
+        };
+        defer init.gpa.free(edited);
+        model.editor.replace(edited) catch {
+            model.note("Could not load editor contents; prompt unchanged.");
+            continue;
+        };
+        model.focus = .prompt;
+        model.note("Editor contents loaded; Enter sends, i edits. Nothing submitted.");
+    }
 }
 
 test "paste is atomic literal data and layout uses bounded grapheme-safe surfaces" {
@@ -1164,8 +1228,9 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     var rendered: std.ArrayList(u8) = .empty;
     defer rendered.deinit(a);
     for (surface.buffer) |cell| try rendered.appendSlice(a, cell.char.grapheme);
-    try std.testing.expect(std.mem.indexOf(u8, rendered.items, "wintermute · #1") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rendered.items, "assistant · #1") == null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.items, "Δ unsafe") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.items, "wintermute") == null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered.items, "#1") == null);
     for (surface.buffer) |cell| {
         try std.testing.expect(std.mem.indexOfScalar(u8, cell.char.grapheme, 27) == null);
         try std.testing.expect(std.mem.indexOf(u8, cell.char.grapheme, "\xc2\x9b") == null);
@@ -1215,6 +1280,8 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     try std.testing.expect(std.mem.indexOf(u8, footer.items, "STALE") != null);
     bridge.pending = null;
     model.snapshot.?.value.case0.snapshot.draft = .{ .kind = .input, .requestId = "saved", .text = "preview", .clipped = false, .saved = false };
+    try model.press(&ctx, .{ .codepoint = 'v', .text = "v" });
+    try std.testing.expect(!model.external_edit and !ctx.quit);
     model.quit(&ctx, false);
     try std.testing.expect(!ctx.quit);
     model.snapshot.?.value.case0.snapshot.draft.?.saved = true;
@@ -1248,6 +1315,9 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     model.snapshot.?.value.case0.snapshot.chatId = "2";
     try model.editor.set("");
     try std.testing.expect(model.readOnly());
+    ctx.quit = false;
+    try model.press(&ctx, .{ .codepoint = 'v', .text = "v" });
+    try std.testing.expect(!model.external_edit and !ctx.quit);
     try model.press(&ctx, .{ .codepoint = 'i', .text = "i" });
     try Model.event(&model, &ctx, .paste_start);
     try model.press(&ctx, .{ .codepoint = 'x', .text = "must not edit" });
@@ -1260,7 +1330,7 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     try std.testing.expectEqualDeep(hub_bar.bg, inspect_surface.buffer[3999].style.bg);
     try std.testing.expect(inspect_surface.cursor == null);
 
-    // Task clients use a different color and cannot navigate, including /main.
+    // Task clients use a different color and cannot navigate, including :main.
     bridge.client_mode = .task;
     model.snapshot.?.value.case0.snapshot.clientMode = .task;
     try std.testing.expect(!model.readOnly());
@@ -1269,10 +1339,28 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
         try model.ex(&ctx);
         try std.testing.expect(bridge.pending == null);
     }
+    for ([_]u21{ 't', 'n' }) |key| {
+        try model.press(&ctx, .{ .codepoint = ' ' });
+        try model.press(&ctx, .{ .codepoint = key });
+        try std.testing.expect(bridge.pending == null and !model.task_form and !model.leader);
+    }
+    bridge.pending = .{ .version = 1, .id = "read", .action = .poll };
+    try model.press(&ctx, .{ .codepoint = 'v' });
+    try std.testing.expect(!model.external_edit and !ctx.quit);
+    bridge.pending = null;
     const task_surface = try Model.draw(&model, draw_ctx);
     try std.testing.expectEqualDeep(bar.bg, task_surface.buffer[0].style.bg);
     try std.testing.expectEqualDeep(bar.bg, task_surface.buffer[3999].style.bg);
     try std.testing.expectEqualDeep(hub_bar.bg, bar.bg); // Same monochrome chrome, authority is not a color.
+    var wide_ctx = draw_ctx;
+    wide_ctx.max.width = 140;
+    model.sidebar_override = true;
+    model.snapshot.?.value.case0.snapshot.agentRune = "ᚦ";
+    const centered = try Model.draw(&model, wide_ctx);
+    try std.testing.expectEqualStrings("ᚦ", centered.buffer[2 * 140 + 120].char.grapheme);
+    try std.testing.expectEqualStrings("a", centered.buffer[4 * 140 + 124].char.grapheme);
+    try model.press(&ctx, .{ .codepoint = 'v' });
+    try std.testing.expect(model.external_edit and ctx.quit);
 }
 
 test "transport display suppresses quick polls but shows slow reads and explicit actions" {

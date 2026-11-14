@@ -190,8 +190,8 @@ export class TuiSession {
       // the acknowledged creation back into an input/task retry queue.
       try {
         const opened = await this.command("rex_open", { chatId: ack.chatId, requestId: randomUUID(), port: this.port }, this.hubId);
-        this.state!.notice = `Task ${ack.chatId} created. ${opened.status === "reused" ? "Rex client reused" : "Rex attempt admitted, not yet ready"}. /select ${ack.chatId} inspects only; participate in Rex.`;
-      } catch { this.state!.notice = `Task ${ack.chatId} created; Rex open unconfirmed. /select ${ack.chatId}, inspect Rex, then explicitly open/reopen if needed. No automatic retry.`; }
+        this.state!.notice = `Task ${ack.chatId} created. ${opened.status === "reused" ? "Rex client reused" : "Rex attempt admitted, not yet ready"}. :select ${ack.chatId} inspects only; participate in Rex.`;
+      } catch { this.state!.notice = `Task ${ack.chatId} created; Rex open unconfirmed. :select ${ack.chatId}, inspect Rex, then explicitly open/reopen if needed. No automatic retry.`; }
     }
   }
   async handle(request: TuiRequest): Promise<TuiSnapshot> {
@@ -219,7 +219,7 @@ export class TuiSession {
         if (this.active || this.settingsUncertain) throw new Error("Resolve saved requests/settings before creating a task");
         const form = request.taskForm ?? request.taskTarget;
         if (!form?.machineId && !this.binding) throw new Error("Saved workspace binding unavailable; no task requested");
-        // New form selection uses registered hosts. Legacy /task-at retains its
+        // New form selection uses registered hosts. Legacy :task-at retains its
         // exact arbitrary/offline binding contract and drafts are never retargeted.
         if (request.taskForm?.machineId) {
           if (!this.supportsHosts) throw new Error("Hub lacks registered-host inventory");
@@ -258,7 +258,7 @@ export class TuiSession {
         await this.deliver(); break;
       case "models": await this.refreshSettings(); break;
       case "configure": {
-        if (!this.supportsSettings || !state.modelSettings) throw new Error("Open /model to read this hub's settings first");
+        if (!this.supportsSettings || !state.modelSettings) throw new Error("Open :model to read this hub's settings first");
         if (this.settingsUncertain) throw new Error("Previous settings outcome unconfirmed; observe current settings before choosing again");
         if (this.active || (await this.store!.list()).some((d) => d.chatId === this.chatId)) throw new Error("Resolve saved requests before changing model/thinking");
         const change = request.configuration!;

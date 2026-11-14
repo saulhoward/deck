@@ -260,12 +260,12 @@ for (const lose of [false, true]) test(`real PTY: deck hub brief composer, host 
     const child = spawn("python3", [resolve("scripts/tui-pty-test.py"), binary!, "hub", "--tui", "--port", String(f.port)], { env: f.local.env, stdio: ["pipe", "pipe", "pipe"] });
     let out = "", errors = ""; child.stdout.on("data", c => out += String(c)); child.stderr.on("data", c => errors += String(c));
     const steps: any[] = [
-      { wait: "history for 1" }, { keys: "/hosts" }, { wait: "client idle" }, { keys: "\r" }, { wait: "HOSTS" }, { wait: "offline" }, { keys: "j\r" }, { wait: "TASK BRIEF" },
-      { keys: ":cancel\r" }, { wait: "Unsubmitted task form cleared" }, { keys: "/new" }, { wait: "client idle" }, { keys: "\r" }, { wait: "TASK BRIEF" },
+      { wait: "history for 1" }, { keys: "\x1b" }, { keys: ":hosts" }, { wait: "client idle" }, { keys: "\r" }, { wait: "HOSTS" }, { wait: "offline" }, { keys: "j\r" }, { wait: "TASK BRIEF" },
+      { keys: ":cancel\r" }, { wait: "Unsubmitted task form cleared" }, { keys: ":new" }, { wait: "client idle" }, { keys: "\r" }, { wait: "TASK BRIEF" },
       { keys: "\x1b[200~" + JSON.stringify(form) + "\x1b[201~" }, { wait: "END_BRIEF" }, { keys: "\x1b" }, { keys: ":send" }, { wait: "client idle" }, { keys: "\r" },
     ];
     if (lose) steps.push({ wait: "LOCKED" }, { wait: "END_BRIEF" }, { keys: ":retry" }, { wait: "client idle" }, { keys: "\r" });
-    steps.push({ wait: "Task 3 created" }, { keys: "/select 3" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Read-only task inspection" }, { keys: "/brief" }, { wait: "client idle" }, { keys: "\r" }, { wait: "immutable creation snapshot" }, { wait: "Exact problem" }, { keys: "\x1b" }, { keys: ":q\r" });
+    steps.push({ wait: "Task 3 created" }, { keys: ":select 3" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Read-only task inspection" }, { keys: ":brief" }, { wait: "client idle" }, { keys: "\r" }, { wait: "immutable creation snapshot" }, { wait: "Exact problem" }, { keys: "\x1b" }, { keys: ":q\r" });
     child.stdin.end(JSON.stringify(steps)); const [code] = await once(child, "exit"); assert.equal(code, 0, errors + out);
     const creates = f.requests.filter(r => r.command === "create_task_brief"); assert.equal(creates.length, lose ? 2 : 1);
     assert.equal(f.requests.filter(r => r.command === "create_task").length, 0);
@@ -276,16 +276,16 @@ for (const lose of [false, true]) test(`real PTY: deck hub brief composer, host 
   } finally { await f.close(); }
 });
 
-for (const tui of [false, true]) test(`${tui ? "real PTY" : "plain client"}: /task-at saves exact explicit target and opens Rex without input`, { skip: tui && !binary, timeout: 30_000 }, async () => {
+for (const tui of [false, true]) test(`${tui ? "real PTY: :" : "plain client: /"}task-at saves exact explicit target and opens Rex without input`, { skip: tui && !binary, timeout: 30_000 }, async () => {
   const f = await fixture();
   try {
     const target = { machineId: "b".repeat(32), cwd: "/remote path 🧪", title: " exact remote title " };
-    const command = `/task-at ${JSON.stringify(target)}`;
+    const command = `${tui ? ":" : "/"}task-at ${JSON.stringify(target)}`;
     const child = tui
       ? spawn("python3", [fileURLToPath(new URL("../../scripts/tui-pty-test.py", import.meta.url)), resolve(binary!), "agent", "--tui", "--port", String(f.port)], { env: { ...f.local.env, DECK_NODE: process.execPath } })
       : spawn(process.execPath, [fileURLToPath(new URL("./client.js", import.meta.url)), "--port", String(f.port)], { env: f.local.env });
     const closed = once(child, "close"); child.stdout.resume(); let errors = ""; child.stderr.on("data", b => { errors += b; });
-    child.stdin.end(tui ? JSON.stringify([{ wait: "history for 1" }, { keys: command }, { wait: "/task-at" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Task 3 created" }, { keys: ":q\r" }]) : `${command}\n/exit\n`);
+    child.stdin.end(tui ? JSON.stringify([{ wait: "history for 1" }, { keys: "\x1b" }, { keys: command }, { wait: "exact remote title" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Task 3 created" }, { keys: ":q\r" }]) : `${command}\n/exit\n`);
     assert.equal((await closed)[0], 0, errors);
     const creation = f.requests.filter(r => r.command === "create_task"); assert.equal(creation.length, 1);
     for (const [key, value] of Object.entries(target)) assert.equal(creation[0].args[key], value);
@@ -299,8 +299,8 @@ test("real PTY: allocation-registered Rex TUI participates but refuses every tas
   const f = await fixture();
   try {
     Object.assign(f.chats[1]!, { agentRune: "ᚦ", agentName: "frostwire", agentNameAlgorithm: "wintermute-v1" });
-    const steps: object[] = [{ wait: "history for 2" }, { wait: "Rex startup registered" }];
-    for (const cmd of ["/tasks", "/hosts", "/new", "/hub", "/main", "/select 1", "/task forbidden", "/task-at {}"]) steps.push({ keys: cmd }, { wait: "client idle" }, { keys: "\r" }, { wait: "Rex task client locked" });
+    const steps: object[] = [{ wait: "history for 2" }, { wait: "Rex startup registered" }, { keys: "\x1b" }];
+    for (const cmd of [":tasks", ":hosts", ":new", ":hub", ":main", ":select 1", ":task forbidden", ":task-at {}"]) steps.push({ keys: cmd }, { wait: "client idle" }, { keys: "\r" }, { wait: "Rex task client locked" });
     // Command mode pauses polls and exposes precise transport readiness. A
     // neutral footer during normal editing does not mean Ctrl-S can be queued.
     steps.push({ keys: "iallowed in Rex" }, { keys: "\x1b" }, { keys: ":send" }, { wait: ":send" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Input admitted" }, { keys: ":q\r" });
@@ -317,16 +317,32 @@ test("real PTY: allocation-registered Rex TUI participates but refuses every tas
   } finally { await f.close(); }
 });
 
-test("real PTY: hub inspection is read-only, creation opens Rex, and /hub returns", { skip: !binary, timeout: 30_000 }, async () => {
+test("real PTY: task/new leaders retain hub authority and preserve unsent input", { skip: !binary, timeout: 20000 }, async () => {
+  const f = await fixture();
+  try {
+    const child = spawn("python3", [fileURLToPath(new URL("../../scripts/tui-pty-test.py", import.meta.url)), resolve(binary!), "hub", "--tui", "--port", String(f.port)], { env: { ...f.local.env, DECK_NODE: process.execPath } });
+    const closed = once(child, "close"); child.stdout.resume(); let errors = ""; child.stderr.on("data", b => { errors += b; });
+    child.stdin.end(JSON.stringify([
+      { wait: "history for 1" }, { keys: "\x1b" }, { keys: " t" }, { wait: "TASKS" }, { keys: "\x1b" },
+      { keys: " n" }, { wait: "TASK BRIEF" }, { keys: ":cancel\r" }, { wait: "Unsubmitted task form cleared" },
+      { keys: "ikeep this" }, { keys: "\x1b" }, { keys: " n" }, { wait: "Unsent prompt preserved" }, { wait: "keep this" }, { keys: ":q!\r" },
+    ]));
+    assert.equal((await closed)[0], 0, errors);
+    assert.ok(f.requests.some(r => r.command === "list_chats"));
+    assert.ok(!f.requests.some(r => ["admit", "create_task", "create_task_brief", "rex_open", "stop"].includes(r.command)));
+  } finally { await f.close(); }
+});
+
+test("real PTY: hub inspection is read-only, creation opens Rex, and :hub returns", { skip: !binary, timeout: 30_000 }, async () => {
   const f = await fixture();
   try {
     const command = (text: string) => [{ keys: text }, { wait: text }, { wait: "client idle" }, { keys: "\r" }];
     const steps = [
-      { wait: "history for 1" }, { keys: "ikeep this" }, { keys: "\x1b" }, ...command("/tasks"), { wait: "TASKS" },
+      { wait: "history for 1" }, { keys: "keep this" }, { keys: "\x1b" }, ...command(":tasks"), { wait: "TASKS" },
       { keys: "j\r" }, { wait: "Unsent prompt preserved" }, { keys: "\x1b" }, { wait: "keep this" }, { keys: "dd" }, { wait: "0/16384 bytes" },
-      ...command("/task New task 🧪"), { wait: "Task 3 created" }, ...command("/tasks"), { wait: "New task" }, { keys: "jj\r" },
-      { wait: "history for 3" }, { wait: "READ ONLY" }, { keys: "imust not edit" }, { keys: "\x1b[200~pasted input\x1b[201~" }, { keys: "\x13" }, { wait: "Read-only task inspection" }, { wait: "0/16384 bytes" }, ...command("/rex"), { wait: "Allocation: unallocated" }, { keys: "i" }, { wait: "Presence: unbound" },
-      { keys: "o" }, { wait: "Rex attempt admitted" }, { keys: "\x1b" }, ...command("/hub"), { wait: "history for 1" }, { keys: ":q\r" },
+      ...command(":task New task 🧪"), { wait: "Task 3 created" }, ...command(":tasks"), { wait: "New task" }, { keys: "jj\r" },
+      { wait: "history for 3" }, { wait: "READ ONLY" }, { keys: "imust not edit" }, { keys: "\x1b[200~pasted input\x1b[201~" }, { keys: "\x13" }, { wait: "Read-only task inspection" }, { wait: "0/16384 bytes" }, ...command(":rex"), { wait: "Allocation: unallocated" }, { keys: "i" }, { wait: "Presence: unbound" },
+      { keys: "o" }, { wait: "Rex attempt admitted" }, { keys: "\x1b" }, ...command(":hub"), { wait: "history for 1" }, { keys: ":q\r" },
     ];
     const driver = fileURLToPath(new URL("../../scripts/tui-pty-test.py", import.meta.url));
     const child = spawn("python3", [driver, resolve(binary!), "agent", "--tui", "--port", String(f.port)], { env: { ...f.local.env, DECK_NODE: process.execPath } });

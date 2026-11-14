@@ -56,7 +56,7 @@ test("real hub TUI detach/reopen leaves an in-flight MCP invocation, grants and 
     await runtime.call("admit",{chatId,requestId:"detach",text:"MCP:gated",mode:"followUp"},hub);
     const started=await waitFor(async()=>JSON.parse(await readFile(join(f.workspace,"started.json"),"utf8")));
     for(let i=0;i<2;i++) {
-      const tui: import("node:child_process").SpawnSyncReturns<string>=spawnSync("python3",[fileURLToPath(new URL("../../scripts/tui-pty-test.py",import.meta.url)),binary!,"hub","--tui","--port",String(address.port)],{input:JSON.stringify([{wait_status:"working"},{keys:":q\r"}]),encoding:"utf8",timeout:10000,env:{...process.env,DECK_NODE:process.execPath,DECK_CLIENT_STATE_DIRECTORY:join(f.root,"client")}});
+      const tui: import("node:child_process").SpawnSyncReturns<string>=spawnSync("python3",[fileURLToPath(new URL("../../scripts/tui-pty-test.py",import.meta.url)),binary!,"hub","--tui","--port",String(address.port)],{input:JSON.stringify([{wait_status:"working"},{keys:"\x1b"},{keys:":q\r"}]),encoding:"utf8",timeout:10000,env:{...process.env,DECK_NODE:process.execPath,DECK_CLIENT_STATE_DIRECTORY:join(f.root,"client")}});
       assert.equal(tui.status,0,tui.stderr+tui.stdout);assert.equal(JSON.parse(tui.stdout).restored,true);
       process.kill(started.pid,0);assert.equal(runtime.child.exitCode,null);assert.equal((await runtime.call("activity",{chatId},hub)).busy,true);
       assert.deepEqual(await runtime.call("tool_profiles",{chatId},hub),grants);assert.equal(await readFile(join(f.workspace,"counter.txt"),"utf8"),"x");

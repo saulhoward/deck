@@ -44,7 +44,7 @@ test("names are atomic, unique across versions, stable on retry/restart, and not
   const f = await fixture();
   try {
     const main = await f.runtime.harness.snapshot(ChatDoc, f.runtime.main.id, context);
-    assert.equal(main!.agentName, "wintermute"); assert.equal(main!.agentRune, "Δ");
+    assert.equal(main!.agentName, "hub"); assert.equal(main!.agentNameAlgorithm, "hub-v1"); assert.equal(main!.agentRune, "Δ");
     const bindingOnly = await f.runtime.createTask("Binding only", main!);
     assert.notEqual((await f.runtime.harness.snapshot(ChatDoc, bindingOnly.id, context))!.agentName, main!.agentName);
     await assert.rejects(f.runtime.harness.createConversation({ ownership: { kind: "ownerless" }, init: async (tx, id) => {
@@ -88,6 +88,28 @@ test("names are atomic, unique across versions, stable on retry/restart, and not
     assert.equal(f.faux.state.callCount, 0);
     const page = await f.runtime.listChats({ limit: 100 });
     assert.ok(page.items.every(item => item.agentName && validChatListItem(item)));
+  } finally { await f.close(); }
+});
+
+test("startup renames only canonical hub and permanently retains its legacy name claim", async () => {
+  const f = await fixture();
+  try {
+    await f.runtime.main.commit(async tx => {
+      const metadata = await tx.doc(ChatDoc, f.runtime.main.id);
+      metadata.agentName = "wintermute"; metadata.agentNameAlgorithm = "wintermute-v1";
+    }, context);
+    const before = (await f.runtime.harness.snapshot(ChatDoc, f.runtime.main.id, context))!;
+    const history = await f.runtime.history(String(f.runtime.main.id));
+    await f.restart();
+    assert.deepEqual(await f.runtime.harness.snapshot(ChatDoc, f.runtime.main.id, context), { ...before, agentName: "hub", agentNameAlgorithm: "hub-v1" });
+    assert.deepEqual(await f.runtime.history(String(f.runtime.main.id)), history);
+    const next = await f.runtime.createTask("Not the hub", f.options.binding);
+    const saved = (await f.runtime.harness.snapshot(ChatDoc, next.id, context))!;
+    assert.equal(saved.agentName, "glasscut"); // wintermute remains claimed by the root
+    assert.equal(saved.agentRune, agentRunes[0]); // renaming consumed no rune
+    await f.restart();
+    assert.deepEqual(await f.runtime.harness.snapshot(ChatDoc, next.id, context), saved);
+    assert.equal(f.faux.state.callCount, 0);
   } finally { await f.close(); }
 });
 
@@ -136,6 +158,6 @@ test("TUI receives saved names through status and task pages while assistant rol
     const page = await ui.handle({ version: 1, id: "2", action: "tasks" });
     assert.equal(page.tasks!.items.find(item => item.chatId === String(task.id))!.agentName, metadata.agentName);
     const hub = await ui.handle({ version: 1, id: "3", action: "select", chatId: String(f.runtime.main.id) });
-    assert.equal(hub.agentRune, "Δ"); assert.equal(hub.agentName, "wintermute"); assert.notEqual(hub.agentName, snapshot.agentName);
+    assert.equal(hub.agentRune, "Δ"); assert.equal(hub.agentName, "hub"); assert.notEqual(hub.agentName, snapshot.agentName);
   } finally { await f.close(); }
 });
