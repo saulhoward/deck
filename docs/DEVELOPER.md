@@ -310,6 +310,10 @@ Do not hand-edit `src/generated/contracts.zig` or `runtime/src/generated/contrac
 
 ### Package checks
 
+The public installation entry point is `nix profile add github:saulhoward/deck`. Nix selects `packages.<system>.default`; no extra fragment, registry entry or separate installer is needed. The default output is the full `deck`/`deck-worker` package for `aarch64-darwin`, `aarch64-linux` and `x86_64-linux`. The pinned Nixpkgs has dropped `x86_64-darwin`, so that system is not advertised; a successful native Zig cross-build is not evidence that the full Nix closure evaluates there. `#worker` selects the native-only alternative. The lockfile and source allowlist make GitHub builds independent of untracked checkout files. Do not replace the default with the worker-only package or require a development shell at runtime.
+
+CI evaluates all advertised systems with `nix flake check --all-systems --no-build`, builds/checks the runner's native system, and installs the checked-out default package into a disposable `--profile`, checks both executables, and runs `package.test.js` through that profile's `bin/deck`. This complements the derivation's installcheck: it exercises profile symlinks and wrappers, a temporary HOME/cwd, lazy SDK assets, native tools, history and backup/restore without provider calls or global Node on PATH. It does not modify the runner's default profile or start an operator service. For a published-source acceptance check, repeat the profile install with `github:saulhoward/deck` instead of `.`; use `--refresh` when checking a newly pushed default-branch revision.
+
 ```sh
 nix flake check path:.
 nix build path:.

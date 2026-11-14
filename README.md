@@ -12,6 +12,31 @@ Deck is a personal coding-agent tool. It has a Zig hub, command-line client, and
 
 These documents distinguish current behavior from the target design. A local build does not publish a release or update a running hub.
 
+## Install with Nix
+
+On **Apple Silicon macOS** or **ARM64/x86-64 Linux**, with a recent Nix and the `nix-command` / `flakes` features enabled:
+
+```sh
+nix profile add github:saulhoward/deck
+deck --help
+```
+
+No checkout, global Node or npm installation is needed. The default package installs **`deck` and `deck-worker`**, including Deck's private Node/runtime and Bash. Make sure your Nix profile's `bin` directory is on `PATH` (normally configured by the Nix installer). If Nix reports disabled experimental features, enable `experimental-features = nix-command flakes` in your Nix configuration. The first install may compile Deck and run its build checks; no Deck-specific binary cache is required or configured.
+
+Installation does **not** start a hub, create its state, configure model credentials or install/upgrade Rex. Follow the [current workflow](#current-workflow) and [provider setup](#connect-a-provider) on the coordinator. Automatic task startup needs separately installed **Rex API 14** on the execution machine and remote coordinator.
+
+To upgrade an existing installation, first follow the [stop, drain and backup procedure](#stop-upgrade-and-back-up), then:
+
+```sh
+nix profile upgrade --refresh deck
+```
+
+The unqualified GitHub reference follows this repository's default branch (`master`); it is not a stable release channel. For a new installation pinned to a reviewed revision, use `github:saulhoward/deck/<full-commit-sha>` instead. Keep prior builds while resolving existing work and pinned worker/client registrations; upgrading a profile does not migrate them or restart services.
+
+Intel macOS is not supported by this flake's pinned Nixpkgs. Native Zig cross-builds for that target are not a working Nix installation path.
+
+For a native-only worker without the TUI or Node/Pi runtime, install `github:saulhoward/deck#worker` **instead**. The full package already supplies `deck-worker`, so do not add both packages to the same profile.
+
 ## Target workflow
 
 **Design boundary; current commands are described below.** Keep one hub-owned Pi runtime and SQLite store for the hub conversation, every task's primary conversation, and its children. Model calls originate at the hub; workspace operations and approved MCP tools execute on their designated hosts.
