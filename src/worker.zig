@@ -288,21 +288,81 @@ fn control(state: *State, fd: std.posix.fd_t) void {
 fn processJob(state: *State, slot: *Slot, body: []u8) void {
     const io = state.native.io;
     defer state.jobs.finish(io);
-    defer {
-        state.mutex.lockUncancelable(io);
-        slot.id = 0;
-        state.mutex.unlock(io);
-    }
     defer std.heap.page_allocator.free(body);
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    var progress = ProgressContext{ .state = state, .slot = slot };
-    const response = controlled(state.native, allocator, state.journal, state.machine_id, body, &slot.cancelled, .{ .context = &progress, .publish = ProgressContext.publish }, state.rex_client, state.mcp, !state.network) catch blk: {
-        const id = std.fmt.allocPrint(allocator, "{d}", .{slot.id}) catch return;
-        break :blk std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = id, .result = Result{ .ok = false, .output = if (slot.id >= (@as(u64, 1) << 63)) "Inspection inconclusive" else "effect_uncertain: worker failed; inspect effects before retrying", .code = if (slot.id >= (@as(u64, 1) << 63)) "inspection_failed" else "effect_uncertain" } }, .{}) catch return;
+    const response = completed: {
+        // Retain the result and stop using the slot before publishing completion.
+        // A caller can retry as soon as it reads the reply; clearing in a function
+        // defer would race that retry (and could keep completed capacity busy).
+        defer {
+            state.mutex.lockUncancelable(io);
+            slot.id = 0;
+            state.mutex.unlock(io);
+        }
+        var progress = ProgressContext{ .state = state, .slot = slot };
+        break :completed controlled(state.native, allocator, state.journal, state.machine_id, body, &slot.cancelled, .{ .context = &progress, .publish = ProgressContext.publish }, state.rex_client, state.mcp, !state.network) catch blk: {
+            const id = std.fmt.allocPrint(allocator, "{d}", .{slot.id}) catch return;
+            break :blk std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = id, .result = Result{ .ok = false, .output = if (slot.id >= (@as(u64, 1) << 63)) "Inspection inconclusive" else "effect_uncertain: worker failed; inspect effects before retrying", .code = if (slot.id >= (@as(u64, 1) << 63)) "inspection_failed" else "effect_uncertain" } }, .{}) catch return;
+        };
     };
     state.send(response) catch {};
+}
+
+test "completed worker releases its slot before reply I/O and never clears a reused slot" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const a = std.testing.allocator;
+    const cwd = try tmp.dir.realPathFileAlloc(io, ".", a);
+    defer a.free(cwd);
+    const body = try std.json.Stringify.valueAlloc(a, .{ .version = 1, .id = "1", .machineId = "local", .cwd = cwd, .operation = "bash", .args = .{ .command = "printf once >> count.txt", .timeout = 5 } }, .{});
+    defer a.free(body);
+    const fds = try Native.pipe();
+    defer for (fds) |fd| Native.close(fd);
+    var state = State{ .native = Native.testing(), .journal = tmp.dir, .machine_id = "local", .output = .{ .handle = fds[1], .flags = .{ .nonblocking = false } } };
+    const slot = &state.slots[0];
+    slot.id = 1;
+    var thread: ?std.Thread = null;
+    defer if (thread) |job| job.join();
+    {
+        // Hold reply publication so the test does not depend on winning the
+        // tiny scheduling window between a successful write and slot cleanup.
+        state.writes.lockUncancelable(io);
+        defer state.writes.unlock(io);
+        const copy = try std.heap.page_allocator.dupe(u8, body);
+        state.jobs.start(io);
+        thread = std.Thread.spawn(.{}, processJob, .{ &state, slot, copy }) catch |err| {
+            state.jobs.finish(io);
+            std.heap.page_allocator.free(copy);
+            return err;
+        };
+        const started = Io.Clock.awake.now(io);
+        while (true) {
+            state.mutex.lockUncancelable(io);
+            const released = slot.id == 0;
+            state.mutex.unlock(io);
+            if (released) break;
+            if (started.durationTo(Io.Clock.awake.now(io)).toNanoseconds() >= 5 * std.time.ns_per_s) return error.SlotNotReleasedBeforeReply;
+            try io.sleep(.fromMilliseconds(1), .awake);
+        }
+        // Completion must already be retained, with no repeated shell effect.
+        var replay_arena = std.heap.ArenaAllocator.init(a);
+        defer replay_arena.deinit();
+        const replay = try operation(Native.testing(), replay_arena.allocator(), tmp.dir, "local", body);
+        const parsed = try contracts.parseNativeResponse(a, replay);
+        defer parsed.deinit();
+        try std.testing.expect(parsed.value.result.?.ok);
+        const count = try tmp.dir.readFileAlloc(io, "count.txt", a, .limited(32));
+        defer a.free(count);
+        try std.testing.expectEqualStrings("once", count);
+        state.mutex.lockUncancelable(io);
+        slot.id = 2; // Another admitted operation can now own this slot.
+        state.mutex.unlock(io);
+    }
+    state.jobs.wait(io);
+    try std.testing.expectEqual(@as(u64, 2), slot.id);
 }
 
 pub fn serve(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8) void {
