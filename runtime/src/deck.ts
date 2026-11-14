@@ -142,7 +142,7 @@ export class DeckRuntime {
         init: async (tx, id) => {
           const metadata = await tx.doc(ChatDoc, id);
           Object.assign(metadata, { machineId: options.binding.machineId, cwd: options.binding.cwd });
-          await assignAgentName(tx, id, metadata);
+          await assignAgentName(tx, id, metadata, undefined, true);
         },
       });
       // Upgrade Deck conversations before recovered work resumes. Do not create
@@ -152,7 +152,7 @@ export class DeckRuntime {
         const page = await harness.commit(tx => tx.scanConversations({ order: "ascending" }, 100, namesCursor), context);
         for (const record of page.items) {
           if (await harness.snapshot(ChatDoc, record.id, context)) {
-            await harness.commit(async tx => assignAgentName(tx, record.id, await tx.doc(ChatDoc, record.id)), context);
+            await harness.commit(async tx => assignAgentName(tx, record.id, await tx.doc(ChatDoc, record.id), undefined, record.id === main.id), context);
           }
         }
         namesCursor = page.next;

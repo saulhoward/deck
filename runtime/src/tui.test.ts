@@ -12,7 +12,7 @@ import { hubCommand } from "./hub-client.js";
 import { displayText, TuiSession, validRequest, validReply } from "./tui-session.js";
 import type { ActivitySnapshot, ModelSettingsChange, ModelSettingsSnapshot, TuiRequest } from "./generated/contracts.js";
 
-async function fixture(withSettings = false, withProgramStatus = false) {
+async function fixture(withSettings = false, withProgramStatus = false, withStyle = false) {
   const local = await clientEnv(); const requests: any[] = []; let loss = false, malformed = false, oversized = false, hang = false;
   let settingsLoss = false, settingsInvalid = false;
   const settings: ModelSettingsSnapshot = { hubId: "tui-test", chatId: "1", selection: { provider: "mock", modelId: "echo", thinkingLevel: "medium" }, defaultModel: { provider: "mock", modelId: "echo" }, models: ["echo", "zeta"].map((modelId) => ({ provider: "mock", modelId, name: modelId, thinkingLevels: ["off", "low", "medium", "high"], defaultThinkingLevel: "medium" })) };
@@ -26,7 +26,7 @@ async function fixture(withSettings = false, withProgramStatus = false) {
     if (withProgramStatus && (command === "history" || command === "activity") && activity.agentStatus?.state === "working" && ++statusReads >= 3) {
       activity.agentStatus = { state: statusOutcome, taskId: String(statusId) }; activity.busy = false;
     }
-    if (command === "status") result = { ...(withSettings ? { modelSettings: 1 } : {}), hubId: "tui-test", hubGuard: 1, mainChatId: "1", chatId: "1", provider: "mock", model: { provider: "mock", modelId: "echo" }, tools: "offline" };
+    if (command === "status") result = { ...(withStyle ? { machineId: "local", binding: { machineId: "local", cwd: process.cwd(), kind: "main", title: "Hub", agentName: "wintermute", agentNameAlgorithm: "wintermute-v1", agentRune: "Δ" } } : {}), ...(withSettings ? { modelSettings: 1 } : {}), hubId: "tui-test", hubGuard: 1, mainChatId: "1", chatId: "1", provider: "mock", model: { provider: "mock", modelId: "echo" }, tools: "offline" };
     else if (command === "model_settings") result = settingsInvalid ? { ...settings, chatId: "2" } : settings;
     else if (command === "set_model_settings") {
       if (JSON.stringify(args.expected) !== JSON.stringify(settings.selection)) { response.end(JSON.stringify({ version: 1, id, ok: false, error: { code: "conflict", message: "Refresh settings" } })); return; }
@@ -38,7 +38,7 @@ async function fixture(withSettings = false, withProgramStatus = false) {
       if (hang) return;
       if (oversized && args.limit > 1) { response.end(JSON.stringify({ version: 1, id, ok: false, error: { code: "too_large", message: "Page too large" } })); return; }
       const newest = args.before ? Number(args.before) - 1 : 120;
-      const items = Array.from({ length: Math.min(args.limit, 20) }, (_, i) => ({ id: newest - i, kind: "deck.input", data: { text: `line ${newest - i}\nretained 👩🏽‍💻 é\n\x1b]52;c;DO_NOT_RENDER\x07safe` } }));
+      const items = withStyle ? [{ id: 2, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "text", text: "# Report\n**Ready** with `code`\n\n| Task | Status |\n| :--- | ---: |\n| Unicode 界 | done |\n| Rendering | ready |" }] }] }, { id: 1, kind: "deck.input", data: { text: "Please render this cleanly." } }] : Array.from({ length: Math.min(args.limit, 20) }, (_, i) => ({ id: newest - i, kind: "deck.input", data: { text: `line ${newest - i}\nretained 👩🏽‍💻 é\n\x1b]52;c;DO_NOT_RENDER\x07safe` } }));
       result = { items, next: String(items.at(-1)!.id), ...(args.includeActivity ? { activity } : {}), ...(args.includeProgress ? { progress } : {}) };
     } else if (command === "activity") result = activity;
     else if (command === "progress") result = progress;
@@ -180,7 +180,7 @@ test("real PTY: /model and Shift-Tab change settings without losing the prompt o
     assert.ok(!f.requests.some((r) => r.command === "stop" || r.command === "create_task"));
   } finally { await f.close(); }
 });
-async function pty(port: number, env: NodeJS.ProcessEnv, steps: unknown[]) {
+async function pty(port: number, env: NodeJS.ProcessEnv, steps: unknown[], screens?: Record<string, string>) {
   assert.ok(testBinary); const binary = resolve(testBinary);
   const driver = fileURLToPath(new URL("../../scripts/tui-pty-test.py", import.meta.url));
   const child = spawn("python3", [driver, binary, "agent", "--tui", "--port", String(port)], { env: { ...env, DECK_NODE: process.execPath } });
@@ -188,6 +188,7 @@ async function pty(port: number, env: NodeJS.ProcessEnv, steps: unknown[]) {
   child.stdout.on("data", (chunk) => { output += chunk; }); child.stderr.on("data", (chunk) => { errors += chunk; }); child.stdin.end(JSON.stringify(steps));
   assert.equal((await closed)[0], 0, errors);
   const result = JSON.parse(output); assert.equal(result.restored, true);
+  if (screens) Object.assign(screens, result.screens);
   const terminal = Buffer.from(result.output, "base64").toString(); assert.doesNotMatch(terminal, /DO_NOT_RENDER/); return terminal;
 }
 test("real PTY: Rex title and program status track agent work without polling flicker or stale completion", { skip: !testBinary, timeout: 25_000 }, async () => {
@@ -285,7 +286,7 @@ test("real PTY: real isolated mock hub retains input and answer after TUI detach
       { wait: `${status.model.provider}/${status.model.modelId}` }, { wait: `${status.binding.agentName} · #` },
       { keys: "/task TUI created task" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Rex open unconfirmed" },
       { keys: "/tasks" }, { wait: "client idle" }, { keys: "\r" }, { wait: "TASKS" }, { keys: "j\r" },
-      { wait: "deck / hub · TUI created task" }, { wait: `[${settings.selection.thinkingLevel}]` }, { wait: "READ ONLY" },
+      { wait: "Read-only task inspection" }, { wait: `[${settings.selection.thinkingLevel}]` }, { wait: "READ ONLY" },
       { keys: "itask-only input" }, { keys: "\x1b" }, { keys: ":send" }, { wait: "client idle" }, { keys: "\r" },
       { wait: "Read-only task inspection" }, { wait: "0/16384 bytes" }, { keys: ":q\r" },
     ]);
@@ -301,6 +302,43 @@ test("real PTY: real isolated mock hub retains input and answer after TUI detach
     await closed; await local.close();
   }
 });
+test("real PTY: Vesper sidebar, centered Markdown/table, expanding prompt and Enter/Shift-Enter", { skip: !testBinary, timeout: 20000 }, async () => {
+  const f = await fixture(true, false, true); const screens: Record<string, string> = {};
+  try {
+    const output = await pty(f.port, f.local.env, [
+      { wait: "wintermute · #2" }, { wait_row: { row: 38, text: "Δ wintermute" } }, { capture: "collapsed" },
+      { resize: [40, 140] }, { sleep: .2 }, { capture: "wide" },
+      { keys: "ihello" }, { keys: "\x1b[13;2u" }, { keys: "second" }, { keys: "\x1b[13;2u" }, { keys: "third" }, { capture: "expanded" },
+      { keys: "\r" }, { wait: "Input admitted" }, { keys: "\x1b" },
+      { resize: [40, 80] }, { capture: "narrow" },
+      { keys: ":sidebar-toggle\r" }, { capture: "forced" },
+      { resize: [40, 140] }, { keys: ":sidebar-toggle\r" }, { capture: "hidden" }, { keys: ":q\r" },
+    ], screens);
+    if (process.env.DECK_TUI_CAPTURE) console.log(JSON.stringify(screens));
+    // pyte display strings omit the continuation cell of wide glyphs.
+    const wide = screens.wide!.split("\n").map(row => row.replaceAll("界", "界 ")), expanded = screens.expanded!.split("\n").map(row => row.replaceAll("界", "界 "));
+    assert.match(wide[2]!, /Δ wintermute/); assert.match(wide[4]!, /hub/);
+    assert.ok(wide.every(row => row[112] === "│"));
+    assert.ok(wide.slice(5).every(row => !row.slice(113).trim()), "rest of sidebar stays empty");
+    assert.ok(wide.some(row => row.includes("Task") && row.includes("Status")));
+    assert.doesNotMatch(screens.wide!, /\*\*Ready\*\*|:---|---:/);
+    assert.ok(expanded.some(row => row.indexOf("hello") === 16));
+    assert.ok(expanded.some(row => row.indexOf("second") === 16));
+    assert.ok(expanded.some(row => row.indexOf("third") === 16));
+    const rules = (rows: string[]) => rows.flatMap((row, i) => row.startsWith("─") ? [i] : []);
+    assert.equal(rules(wide)[1]! - rules(wide)[0]!, 3); // two input rows
+    assert.equal(rules(expanded)[1]! - rules(expanded)[0]!, 4);
+    assert.match(screens.narrow!.split("\n")[38]!, /Δ wintermute/);
+    assert.match(screens.collapsed!.split("\n")[38]!, /Δ wintermute/);
+    assert.ok(screens.forced!.split("\n").every(row => row.replaceAll("界", "界 ")[54] === "│"));
+    assert.match(screens.hidden!.split("\n")[38]!, /Δ wintermute/);
+    const admits = f.requests.filter(r => r.command === "admit");
+    assert.equal(admits.length, 1); assert.equal(admits[0].args.text, "hello\nsecond\nthird");
+    assert.match(output, /38[:;]2[:;]255[:;]199[:;]153/);
+    assert.match(output, /48[:;]2[:;]16[:;]16[:;]16/);
+  } finally { await f.close(); }
+});
+
 test("real PTY: SIGTERM restores terminal without stopping the hub", { skip: !testBinary, timeout: 15_000 }, async () => {
   const f = await fixture();
   try { await pty(f.port, f.local.env, [{ wait: "mock/echo" }, { signal: "SIGTERM" }]); assert.ok(f.requests.every((v) => ["status", "history"].includes(v.command))); }

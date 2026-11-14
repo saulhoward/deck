@@ -1,7 +1,7 @@
 import { defineDoc, defineDocFamily, type ConversationId, type Tx } from "@earendil-works/pi-durable";
-import { validAgentName } from "./generated/contracts.js";
+import { validAgentName, validAgentRune, type AgentRune } from "./generated/contracts.js";
 
-export type AgentNameMetadata = { agentName?: string; agentNameAlgorithm?: string };
+export type AgentNameMetadata = { agentName?: string; agentNameAlgorithm?: string; agentRune?: AgentRune };
 export type AgentNameAlgorithm = { readonly id: string; readonly candidate: (ordinal: number) => string };
 
 // Immutable v1 vocabulary/order/permutation. Change naming by adding a NEW
@@ -34,13 +34,29 @@ const NameClaim = defineDocFamily<{ chatId: number }, number>({
   initial: (chatId) => ({ chatId }), checkpointWhen: () => true,
 });
 
+// Frozen runic-v1 bank: assigned letters/numerals, no punctuation or blanks.
+// Delta belongs exclusively to canonical main; other chats cycle after 86 births.
+export const agentRunes = Object.freeze([...Array.from({ length: 75 }, (_, i) => String.fromCodePoint(0x16a0 + i)), ...Array.from({ length: 11 }, (_, i) => String.fromCodePoint(0x16ee + i))] as AgentRune[]);
+const RuneCursor = defineDoc<{ next: number }>({ kind: "deck.agent-rune-cursor", version: 1, scope: "session", initial: () => ({ next: 0 }), checkpointWhen: () => true });
+async function assignRune(tx: Tx, metadata: AgentNameMetadata, hub: boolean) {
+  if (metadata.agentRune !== undefined) {
+    if (!validAgentRune(metadata.agentRune) || (metadata.agentRune === "Δ") !== hub) throw new Error("Invalid saved agent rune");
+    return;
+  }
+  if (hub) { metadata.agentRune = "Δ"; return; }
+  const cursor = await tx.doc(RuneCursor);
+  if (!Number.isSafeInteger(cursor.next) || cursor.next < 0 || cursor.next >= Number.MAX_SAFE_INTEGER) throw new Error("Agent-rune sequence exhausted");
+  metadata.agentRune = agentRunes[cursor.next++ % agentRunes.length]!;
+}
+
 export function agentNameFields(metadata: AgentNameMetadata): AgentNameMetadata {
-  return metadata.agentName === undefined ? {} : { agentName: metadata.agentName, agentNameAlgorithm: metadata.agentNameAlgorithm! };
+  return metadata.agentName === undefined ? {} : { agentName: metadata.agentName, agentNameAlgorithm: metadata.agentNameAlgorithm!, ...(metadata.agentRune === undefined ? {} : { agentRune: metadata.agentRune }) };
 }
 
 // Call inside the SAME transaction that creates Deck metadata. Existing names
 // are never recomputed, including when their algorithm is no longer selected.
-export async function assignAgentName(tx: Tx, chatId: ConversationId, metadata: AgentNameMetadata, algorithm = currentAgentNameAlgorithm): Promise<void> {
+export async function assignAgentName(tx: Tx, chatId: ConversationId, metadata: AgentNameMetadata, algorithm = currentAgentNameAlgorithm, hub = false): Promise<void> {
+  await assignRune(tx, metadata, hub);
   if (metadata.agentName !== undefined || metadata.agentNameAlgorithm !== undefined) {
     if (!validAgentName(metadata.agentName) || !validAgentName(metadata.agentNameAlgorithm)) throw new Error("Invalid saved agent name/version");
     if ((await tx.doc(NameClaim, metadata.agentName, chatId)).chatId !== chatId) throw new Error("Agent name already belongs to another conversation");

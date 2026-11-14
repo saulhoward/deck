@@ -31,7 +31,8 @@ const help =
     \\  deck hub [--tui | --no-tui] [--port 52800] [--task CHAT_ID] [--message TEXT]
     \\  deck agent [--tui | --no-tui] [--port 52800] [--task CHAT_ID] [--message TEXT]
     \\    TTYs default to the Zig TUI; --message and redirected input use the plain client.
-    \\    TUI: i insert, Esc normal, Tab chat/prompt, Ctrl-S send, :help, :q detach.
+    \\    TUI: i insert, Esc normal, Enter send, Shift-Enter newline, :help, :q detach.
+    \\    :sidebar-toggle overrides the responsive sidebar; Ctrl-S also sends.
     \\  deck remote-check --registry /private/registry.json --machine MACHINE_ID
     \\    --tailscale /absolute/path/to/tailscale --peer TAILSCALE_IP:PORT
     \\    Read-only peer/registration diagnostic; does not connect a worker or expose the hub.

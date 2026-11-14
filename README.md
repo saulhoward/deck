@@ -74,13 +74,19 @@ Use another unused port if 52801 is occupied. The mock provider makes no externa
 
 ## Use the TUI
 
-Interactive terminals use the TUI by default. The hub has teal status bars; Rex task clients use slate-blue bars and show `task / Rex locked`. Inspect a saved task read-only with:
+Interactive terminals use the TUI by default. The Vesper-inspired palette uses a near-black background, gray chrome, white input/answers, and small green/orange accents. The centered chat and expanding prompt are at most **80 terminal columns** wide, with speaker labels outdented when space allows. The prompt starts at two lines, grows up to half the pane, and scrolls internally after that. Horizontal rules frame it; the two-line status bar shows the saved directory/git branch, then model/thinking setting.
+
+A padded right sidebar shows the saved agent name, symbol, and **hub / agent / subagent** role; the rest is blank. It appears automatically at 112 columns, collapses in smaller panes, and can be overridden with `:sidebar-toggle`. The override lasts for this attachment and survives resize. A collapsed sidebar moves the identity to the status bar's top-right. Names briefly resolve through runic glyphs on attachment and pulse intermittently during fresh busy samples; message labels never animate.
+
+Git is a display-only local observation: no git command or hooks run. Repository/worktree HEAD is read only when the client's current directory matches the displayed local workspace. Remote inspection or unavailable metadata shows `branch —`, not a guessed branch. The shared visual theme grants no authority; hub inspection and allocation-bound task participation retain their existing guards. Inspect a saved task read-only with:
 
 ```sh
 deck hub --task CHAT_ID
 ```
 
 Every task, child agent, and the hub agent has a stored `agentName`, separate from its title and numeric chat ID. The TUI uses this name instead of **assistant** above answers and shows it in the task picker. Names such as `wintermute`, `glasscut`, and `staticdrift` are unique within the hub's store and survive retries, restarts, and changes to the naming algorithm. The first algorithm combines two word banks; after its 100 pairs, it adds numeric suffixes such as `wintermute-2`. Existing tasks receive names on upgrade before work resumes. Names are labels, not routing or authorization identifiers.
+
+Every independent/child agent also receives a persisted `agentRune` at birth. The frozen 86-symbol Unicode Runic bank is unique for the first 86 non-hub births in a store, then cycles; existing assignments never change. The canonical hub always receives **Δ**, not a runic symbol. Allocation is atomic with creation, retry-safe, and backfilled for older Deck chats before resume. Agent message headings and terminal titles use these symbols.
 
 In the hub, `/tasks` opens the task picker. It groups parents and children within each bounded scan page; parent IDs can reference another page. Saved binding, sampled connection/activity and historical Rex allocation are separate rows. Offline tasks remain visible. None of these observations is an open/completed task lifecycle. Move with `j/k` or arrows and press Enter to inspect. Use `n` for the next page, `g` for the first page, and Esc to close. `/hub` returns to the hub chat. Inspection cannot edit, send, retry/discard task drafts, stop, or change task settings. Saved task requests remain untouched. Use `/rex open` to participate in its Rex client.
 
@@ -92,7 +98,7 @@ For a structured brief, use `/new` in the hub chat, press `i`, then paste JSON i
 {"title":"Investigate latency","problem":"Requests slow down under load","description":"Measure first; preserve existing behavior."}
 ```
 
-Use `Ctrl-S` or `:send` to create, not to submit model input. Title is limited to 200 UTF-8 bytes, problem to 2,048, description to 8,192; the complete JSON editor has an independent 16 KiB bound. Omit both `machineId` and `cwd` to inherit the hub binding, or supply both explicitly. `/hosts` lists approved hosts; Enter opens a form with that host selected and an empty cwd that you must fill. Offline registration is not availability, and unavailable work never falls back locally. `/new` cannot enroll a host or reassign an existing task. Legacy `/task-at` retains its explicit arbitrary/offline binding contract.
+Use Enter, `Ctrl-S` or `:send` to create, not to submit model input. Title is limited to 200 UTF-8 bytes, problem to 2,048, description to 8,192; the complete JSON editor has an independent 16 KiB bound. Omit both `machineId` and `cwd` to inherit the hub binding, or supply both explicitly. `/hosts` lists approved hosts; Enter opens a form with that host selected and an empty cwd that you must fill. Offline registration is not availability, and unavailable work never falls back locally. `/new` cannot enroll a host or reassign an existing task. Legacy `/task-at` retains its explicit arbitrary/offline binding contract.
 
 Briefs are immutable creation snapshots in this phase. They supply the new task's initial instructions but start no generation. `/brief` reads them without editing context. A later explicit instruction import can replace active instructions; it does not rewrite the saved brief or earlier history. `:cancel` clears only an unsubmitted form. After a lost creation ACK, use the existing exact-draft `:retry`/`:discard` flow; do not start another creation. Brief entry refuses to overwrite an unsent prompt or unresolved request. The separate command line remains 256 bytes with no command paste.
 
@@ -102,8 +108,9 @@ Rex task clients cannot list/create/select other tasks or return to the hub. Hub
 | --- | --- |
 | Start editing | `i` |
 | Return to Normal mode | `Esc` |
-| Add a line in Insert mode | Enter, Shift-Enter, or `Ctrl-J` |
-| Submit or steer input | `Ctrl-S` or `:send` |
+| Add a line | Shift-Enter, or `Ctrl-J` in Insert mode |
+| Submit or steer input | Enter, `Ctrl-S` or `:send` |
+| Toggle the right sidebar | `:sidebar-toggle` |
 | Switch between chat and prompt | Tab or `Ctrl-W w` |
 | Scroll chat | `j/k`, arrows, Page Up/Down, or mouse wheel |
 | Read older or latest history | `:older`, `:latest` |
@@ -125,13 +132,13 @@ Rex task clients cannot list/create/select other tasks or return to the hub. Hub
 
 Editing, submission, settings changes, retry/discard, and stop are available only in the hub chat or the assigned Rex task client, not in read-only inspection.
 
-The editor supports a Vim-style subset: motions, counts, delete/change/yank, visual selection, paste, undo, and redo. It is not full Vim. Enter adds a line; it does not submit. Pasted text never runs a command or submits input.
+The editor supports a Vim-style subset: motions, counts, delete/change/yank, visual selection, paste, undo, and redo. It is not full Vim. Enter submits from the prompt; Shift-Enter adds a line. Distinguishing Shift-Enter requires enhanced keyboard support in the terminal; use Insert-mode `Ctrl-J` otherwise. Pasted text never runs a command or submits input.
 
-Unsubmitted editor text is memory-only and limited to 16 KiB. Exit warns when that text has no confirmed saved draft. The TUI renders bounded plain text and tool summaries, not Markdown. It shows a recent history window, not a complete local transcript.
+Unsubmitted editor text is memory-only and limited to 16 KiB. Exit warns when that text has no confirmed saved draft. The TUI formats bounded Markdown in chat: headings, emphasis, inline/fenced code, lists, quotes, literal links, and aligned/wrapped tables. Narrow tables fall back to stacked cells. This is a terminal-oriented subset, not a browser or full CommonMark engine; HTML/images are not executed/fetched, links are not OSC hyperlinks, and tool/note summaries remain plain text. Formatting never changes stored message or draft bytes. It shows a recent history window, not a complete local transcript.
 
 The client accepts one request at a time. An overlapping action is refused, not queued. Try it again after the reply. Fast background polls keep a neutral `client` label. A poll that takes at least 500 ms shows `client waiting`. Neither label describes worker health.
 
-The terminal title is `Δ - {dirName}`, using the client launch directory. Supported terminals receive OSC 7501 status with `app=deck`. Status distinguishes working, a new reply, a failed run, and required client action. Missing or stale observations clear the indicator. A selected-chat indicator is not proof that the whole hub is idle.
+The terminal title becomes `{rune} - {dirName}`, using the selected saved workspace when available. The hub uses Δ; an older task without rune metadata uses a neutral dot, never the hub symbol. Before the first snapshot, the launch directory is only a provisional display label. Supported terminals receive OSC 7501 status with `app=deck`. Status distinguishes working, a new reply, a failed run, and required client action. Missing or stale observations clear the indicator. A selected-chat indicator is not proof that the whole hub is idle.
 
 ## Use the plain client
 

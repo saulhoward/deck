@@ -28,7 +28,7 @@ test("unsupported schemas fail generation instead of dropping constraints", () =
     (s) => { s.$defs.TransportId.$ref = "#/$defs/ChatId"; },
     (s) => { s.$defs.ChatId = { $ref: "#/$defs/ChatId" }; },
     (s) => { s.$defs.ChatId = { $ref: "#/$defs/Missing" }; },
-    (s) => { s.$defs.ChatId = { enum: ["1", "2"] }; },
+    (s) => { s.$defs.ChatId = { enum: ["ᚠ", "ᚠ"] }; },
     (s) => { s.$defs.ChatId = { type: "integer", minimum: 0, maximum: 9007199254740992 }; },
     (s) => { s.$defs.NullableRexUuid.anyOf[1].type = "boolean"; },
   ];
@@ -60,7 +60,9 @@ test("identifier string enums generate native enums and closed executable guards
   assert.match(output.zig, /pub const RexPresenceState = enum/);
   assert.match(output.ts, /export type AdmissionMode = "steer" \| "followUp"/);
   assert.match(output.zig, /@"followUp"/);
-  for (const values of [[], ["pending", "pending"], ["pending", 1], ["bad-value"], ["pending\n"]]) {
+  assert.match(output.zig, /pub const AgentRune = \[\]const u8/);
+  assert.match(output.ts, /export type AgentRune = "ᚠ"/);
+  for (const values of [[], ["pending", "pending"], ["pending", 1], ["\ud800"], ["pending\n"]]) {
     const copy = structuredClone(schema); copy.$defs.RexPresenceState.enum = values;
     assert.throws(() => compileSchema(copy), /^Error: Contract schema:/);
   }

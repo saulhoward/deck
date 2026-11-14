@@ -57,6 +57,17 @@ title: []const u8,
 presentation: Presentation = .{},
 last: Report = .{ .state = .unknown },
 title_pushed: bool = false,
+title_storage: [192]u8 = undefined,
+
+pub fn identity(self: *Reporter, rune: []const u8, cwd: []const u8) !void {
+    var buffer: [192]u8 = undefined;
+    const title = identityTitle(&buffer, cwd, rune);
+    if (std.mem.eql(u8, title, self.title)) return;
+    @memcpy(self.title_storage[0..title.len], title);
+    self.title = self.title_storage[0..title.len];
+    try self.vx.setTitle(self.writer, self.title);
+    self.last = .{ .state = .unknown, .outcome = std.math.maxInt(u64) };
+}
 
 pub fn begin(self: *Reporter) !void {
     // Window-title stack only, not shell integration or a process-name change.
@@ -110,11 +121,16 @@ pub fn publish(self: *Reporter, view: View, now: std.Io.Timestamp) !void {
 /// One bounded, control-safe title for both OSC 2 and OSC 7501. Preserve UTF-8
 /// boundaries; filesystem bytes need not be UTF-8. Never emit raw path controls.
 pub fn directoryTitle(out: *[192]u8, cwd: []const u8) []const u8 {
+    return identityTitle(out, cwd, "Δ");
+}
+pub fn identityTitle(out: *[192]u8, cwd: []const u8, rune: []const u8) []const u8 {
     const trimmed = std.mem.trimEnd(u8, cwd, "/");
     const name = if (trimmed.len == 0) "/" else std.fs.path.basename(trimmed);
-    const prefix = "Δ - ";
-    @memcpy(out[0..prefix.len], prefix);
-    var n: usize = prefix.len;
+    const symbol = if (wire.validAgentRune(.{ .string = rune })) rune else "·";
+    @memcpy(out[0..symbol.len], symbol);
+    @memcpy(out[symbol.len..][0..3], " - ");
+    const prefix_len = symbol.len + 3;
+    var n: usize = prefix_len;
     var i: usize = 0;
     while (i < name.len) {
         var bytes: []const u8 = "�";
@@ -135,7 +151,7 @@ pub fn directoryTitle(out: *[192]u8, cwd: []const u8) []const u8 {
         @memcpy(out[n..][0..bytes.len], bytes);
         n += bytes.len;
     }
-    if (n == prefix.len) {
+    if (n == prefix_len) {
         @memcpy(out[n..][0..7], "unknown");
         n += 7;
     }

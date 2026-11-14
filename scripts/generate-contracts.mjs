@@ -89,7 +89,7 @@ export function compileSchema(schema) {
       });
       insist(discriminant !== undefined, "oneOf requires a common required property with distinct scalar constants");
     } else if (node.enum !== undefined) {
-      insist(shapeKeys.length === 1 && Array.isArray(node.enum) && node.enum.length > 0 && new Set(node.enum).size === node.enum.length && node.enum.every((value) => typeof value === "string" && /^[a-z][A-Za-z0-9_]*$/.test(value)), "only distinct identifier string enums supported");
+      insist(shapeKeys.length === 1 && Array.isArray(node.enum) && node.enum.length > 0 && new Set(node.enum).size === node.enum.length && node.enum.every((value) => typeof value === "string" && value.length > 0 && value.length <= 128 && value.isWellFormed() && !/[\x00-\x1f\x7f-\x9f]/.test(value)), "only distinct bounded string enums supported");
     } else if (Object.hasOwn(node, "const")) {
       insist(shapeKeys.length === 1 && (typeof node.const === "string" || typeof node.const === "boolean" || Number.isSafeInteger(node.const)), "unsupported constant");
       if (typeof node.const === "string") insist(node.const.isWellFormed(), "invalid Unicode constant");
@@ -135,7 +135,7 @@ export function compileSchema(schema) {
     if (node.$ref) return target(node.$ref);
     if (node.anyOf) return `?${zigType(node.anyOf[0])}`;
     if (node.type === "array") return `[]const ${zigType(node.items)}`;
-    if (node.enum) return `enum { ${node.enum.map((value) => `@${zigQuote(value)}`).join(", ")} }`;
+    if (node.enum) return node.enum.every(value => /^[a-z][A-Za-z0-9_]*$/.test(value)) ? `enum { ${node.enum.map((value) => `@${zigQuote(value)}`).join(", ")} }` : "[]const u8";
     if (node.oneOf) return `union(enum) {
 ${node.oneOf.map((child, index) => `    case${index}: ${zigType(child)},`).join("\n")}
     pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {

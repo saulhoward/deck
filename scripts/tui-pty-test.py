@@ -31,6 +31,7 @@ fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 100, 800, 600))
 os.write(ready_w, b"1")
 os.close(ready_w)
 output = bytearray()
+screens = {}
 rows, cols = 40, 100
 
 class SilentScreen(pyte.Screen):
@@ -42,13 +43,21 @@ class SilentScreen(pyte.Screen):
     def report_device_attributes(self, *args, **kwargs):
         pass
 
+render_cache = None
+
 def rendered():
+    global render_cache
+    key = (len(output), cols, rows)
+    if render_cache is not None and render_cache[0] == key:
+        return render_cache[1]
     screen = SilentScreen(cols, rows)
     # Assertions concern text/cursor layout, not color. pyte 0.8 predates colon
     # SGR parameters. Reparse the bounded capture so chunk-split SGR/UTF-8 is safe.
     text_only = re.sub(rb"\x1b\[[0-9:;]*m", b"", bytes(output))
     pyte.ByteStream(screen).feed(text_only)
-    return "\n".join(screen.display)
+    value = "\n".join(screen.display)
+    render_cache = (key, value)
+    return value
 
 def program_status():
     reports = []
@@ -93,12 +102,16 @@ def pump(seconds):
 
 try:
     for step in steps:
-        if "wait" in step:
-            target = step["wait"]
+        if "wait" in step or "wait_row" in step:
+            target = step["wait"] if "wait" in step else step["wait_row"]["text"]
+            def visible():
+                return rendered() if "wait" in step else rendered().split("\n")[step["wait_row"]["row"]]
             end = time.monotonic() + 6
-            while target not in rendered() and time.monotonic() < end:
+            while target not in visible() and time.monotonic() < end:
                 pump(.02)
-            assert target in rendered(), "Missing %r: %s" % (target, rendered())
+            assert target in visible(), "Missing %r: %s" % (target, rendered())
+        elif "capture" in step:
+            screens[step["capture"]] = rendered()
         elif "wait_status" in step:
             wanted = step["wait_status"]
             end = time.monotonic() + 6
@@ -137,7 +150,7 @@ try:
     reports = program_status()
     assert reports and reports[-1] == {"state": "clear", "id": "deck"}, "Status not cleared on detach"
     assert b"\x1b[22;2t" in output and b"\x1b[23;2t" in output, "Window title not restored"
-    print(json.dumps({"output": base64.b64encode(output).decode(), "restored": True, "programStatus": reports}))
+    print(json.dumps({"output": base64.b64encode(output).decode(), "restored": True, "programStatus": reports, "screens": screens}))
 finally:
     if not exited:
         try:

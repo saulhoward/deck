@@ -8,6 +8,8 @@ const Bridge = @import("tui_bridge.zig");
 const Editor = @import("tui_editor.zig");
 const wire = @import("generated/contracts.zig");
 const TerminalStatus = @import("tui_status.zig");
+const Theme = @import("tui_theme.zig");
+const Markdown = @import("tui_markdown.zig");
 const Action = @FieldType(wire.TuiRequest, "action");
 var stopping: std.atomic.Value(bool) = .init(false);
 fn signal(_: std.posix.SIG) callconv(.c) void {
@@ -28,7 +30,8 @@ const help =
     \\d c y + motion        delete / change / yank; dd cc yy
     \\x X D C Y r, p P      edits / replace / internal-register paste
     \\v V, u, Ctrl-R        visual selection, undo / redo
-    \\Insert Enter          newline (never submit); Ctrl-W/U edit
+    \\Enter                 send; Shift-Enter (or Insert Ctrl-J) newline
+    \\:sidebar-toggle       override responsive right sidebar visibility
     \\
     \\/new                  hub only: JSON task-brief composer (Ctrl-S creates)
     \\/hosts                registered hosts; Enter selects host for new task
@@ -52,15 +55,15 @@ const help =
     \\Saved requests are locked; retry uses original bytes, not preview.
     \\Unsubmitted editor text is in memory only. :q protects it.
     \\Switching refuses unsent text or unresolved requests; nothing is lost.
-    \\Plain text, bounded task pages, 16 KiB prompt, 32 undo steps.
+    \\Markdown chat, bounded task pages, 16 KiB prompt, 32 undo steps.
     \\No macros, dot-repeat, search, text objects or system clipboard.
 ;
-const base: vaxis.Style = .{ .fg = .{ .rgb = .{ 218, 224, 234 } }, .bg = .{ .rgb = .{ 19, 23, 31 } } };
-const dim: vaxis.Style = .{ .fg = .{ .rgb = .{ 135, 149, 170 } }, .bg = base.bg };
-const accent: vaxis.Style = .{ .fg = .{ .rgb = .{ 116, 206, 188 } }, .bg = base.bg, .bold = true };
-const bar: vaxis.Style = .{ .fg = base.fg, .bg = .{ .rgb = .{ 35, 44, 60 } } };
-const hub_bar: vaxis.Style = .{ .fg = base.fg, .bg = .{ .rgb = .{ 27, 77, 70 } } };
-const Row = struct { text: []const u8, style: vaxis.Style, offset: usize };
+const base = Theme.base;
+const dim = Theme.dim;
+const accent = Theme.green;
+const bar = Theme.dim;
+const hub_bar = bar;
+const Row = struct { text: []const u8 = "", style: vaxis.Style = base, offset: usize = 0, cells: ?Markdown.Line = null, speaker: bool = false };
 
 const TransportStatus = enum {
     quiet,
@@ -92,7 +95,7 @@ fn safeGrapheme(text: []const u8) []const u8 {
     if (text.len > 256) return "�";
     var it = (std.unicode.Utf8View.init(text) catch return "�").iterator();
     while (it.nextCodepoint()) |cp| {
-        if (cp < 32 or (cp >= 127 and cp <= 159) or cp == 0x200e or cp == 0x200f or (cp >= 0x202a and cp <= 0x202e) or (cp >= 0x2066 and cp <= 0x2069)) return "�";
+        if (cp < 32 or (cp >= 127 and cp <= 159) or cp == 0x061c or cp == 0x200b or cp == 0x200e or cp == 0x200f or (cp >= 0x2028 and cp <= 0x202e) or (cp >= 0x2060 and cp <= 0x206f) or cp == 0xfeff) return "�";
     }
     if (vaxis.gwidth.gwidth(text, .unicode) == 0) return "�";
     return text;
@@ -134,13 +137,16 @@ fn rows(ctx: fw.DrawContext, list: *std.ArrayList(Row), text: []const u8, width:
     try list.append(ctx.arena, .{ .text = text[start..], .style = style, .offset = start });
 }
 fn line(ctx: fw.DrawContext, surface: fw.Surface, x: u16, y: u16, text: []const u8, style: vaxis.Style, selection_range: ?[2]usize, offset: usize) void {
+    lineLimit(ctx, surface, x, y, text, style, selection_range, offset, surface.size.width);
+}
+fn lineLimit(ctx: fw.DrawContext, surface: fw.Surface, x: u16, y: u16, text: []const u8, style: vaxis.Style, selection_range: ?[2]usize, offset: usize, right: u16) void {
     var it = vaxis.unicode.graphemeIterator(text);
     var col = x;
     while (it.next()) |g| {
         const displayed = glyph(ctx, g.bytes(text));
         const chunk = displayed.text;
         const width = displayed.width;
-        if (@as(usize, col) + width > surface.size.width) break;
+        if (@as(usize, col) + width > @min(right, surface.size.width)) break;
         var s = style;
         if (selection_range) |range| if (offset + g.start >= range[0] and offset + g.start < range[1]) {
             s.reverse = true;
@@ -219,12 +225,31 @@ const Model = struct {
     scroll_max: usize = 0,
     chat_height: usize = 10,
     ticks: u64 = 0,
+    frame: u64 = 0,
+    name_started: ?u64 = null,
+    busy_started: ?u64 = null,
+    activity_seen: u64 = 0,
+    sidebar_override: ?bool = null,
+    sidebar_visible: bool = false,
     pending_since: std.Io.Timestamp = .zero,
     shown_transport: TransportStatus = .quiet,
     uncertain: bool = false,
     online: bool = false,
     notice: [1024]u8 = undefined,
     notice_len: usize = 0,
+    fn animation(self: *Model) ?u64 {
+        if (self.name_started) |start| if (self.frame - start < 18) return self.frame - start;
+        if (self.online and self.frame - self.activity_seen < 100) if (self.busy_started) |start| {
+            const phase = (self.frame - start) % 160;
+            if (phase < 18) return phase;
+        };
+        return null;
+    }
+    fn rune(s: wire.TuiSnapshot) []const u8 {
+        if (std.mem.eql(u8, s.chatId, s.hubChatId)) return "Δ";
+        const value = s.agentRune orelse return "·";
+        return if (std.mem.eql(u8, value, "Δ")) "·" else value;
+    }
     fn deinit(self: *Model) void {
         if (self.snapshot) |s| s.deinit();
         self.editor.deinit();
@@ -427,7 +452,9 @@ const Model = struct {
     }
     fn ex(self: *Model, ctx: *fw.EventContext) !void {
         const cmd = self.command.items;
-        if (std.mem.eql(u8, cmd, "new")) try self.beginTaskForm(null) else if (std.mem.eql(u8, cmd, "hosts")) try self.issue(.hosts) else if (std.mem.eql(u8, cmd, "brief")) {
+        if (std.mem.eql(u8, cmd, "sidebar-toggle")) {
+            self.sidebar_override = !self.sidebar_visible;
+        } else if (std.mem.eql(u8, cmd, "new")) try self.beginTaskForm(null) else if (std.mem.eql(u8, cmd, "hosts")) try self.issue(.hosts) else if (std.mem.eql(u8, cmd, "brief")) {
             self.brief_view = true;
             self.help_scroll = 0;
         } else if (std.mem.eql(u8, cmd, "cancel") and self.task_form) {
@@ -539,7 +566,14 @@ const Model = struct {
             }
             return;
         }
-        if (key.matches('s', .{ .ctrl = true })) {
+        if (key.matches(vaxis.Key.enter, .{ .shift = true }) and self.focus == .prompt) {
+            if (!self.locked() and !self.readOnly()) {
+                self.editor.mode = .insert;
+                try self.editor.insert("\n");
+            }
+            return;
+        }
+        if (key.matches('s', .{ .ctrl = true }) or (self.focus == .prompt and key.matches(vaxis.Key.enter, .{}))) {
             try self.issue(.send);
             return;
         }
@@ -610,6 +644,9 @@ const Model = struct {
                 try ctx.tick(50, self.widget());
             },
             .tick => {
+                const was_animated = self.animation() != null;
+                self.frame +|= 1;
+                if (was_animated or self.animation() != null) ctx.redraw = true;
                 if (stopping.load(.monotonic)) {
                     ctx.quit = true;
                     return;
@@ -637,6 +674,14 @@ const Model = struct {
                         response.deinit();
                     } else {
                         const s = response.value.case0.snapshot;
+                        if (self.snapshot == null or action == .select) self.name_started = self.frame;
+                        if (action == .poll or action == .latest or action == .select) {
+                            self.activity_seen = self.frame;
+                            if (s.activityKnown and s.busy) {
+                                if (self.busy_started == null) self.busy_started = self.frame;
+                            } else self.busy_started = null;
+                        }
+                        if (self.terminal_status) |status| if (s.cwd) |cwd| try status.identity(rune(s), cwd);
                         if (action == .select) {
                             self.task_picker = false;
                             self.hosts_view = false;
@@ -706,6 +751,10 @@ const Model = struct {
                 try ctx.tick(50, self.widget());
             },
             .key_press => |key| {
+                // Give explicit input a quiet interval instead of starting a
+                // background poll between the final typed character and Enter.
+                // An already-issued request is never cancelled or replayed.
+                self.ticks = 0;
                 if (self.terminal_status) |status| status.presentation.acknowledge();
                 self.press(ctx, key) catch |err| {
                     if (err == error.PromptTooLarge) self.note("Prompt limit: 16 KiB. Paste/edit refused; nothing submitted.") else if (err == error.InvalidUtf8) self.note("Invalid UTF-8 input refused; prompt unchanged.") else return err;
@@ -720,6 +769,7 @@ const Model = struct {
                 self.paste_buffer.clearRetainingCapacity();
             },
             .paste_end => {
+                self.ticks = 0;
                 if (self.paste_overflow) self.note("Paste exceeds 16 KiB; entire paste refused, prompt unchanged.") else if (!self.reject_paste and !self.locked() and !self.readOnly()) {
                     self.editor.paste(self.paste_buffer.items) catch |err| {
                         if (err == error.PromptTooLarge or err == error.InvalidUtf8) self.note("Invalid or oversized paste refused in full; prompt unchanged.") else return err;
@@ -742,10 +792,12 @@ const Model = struct {
     fn draw(ptr: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface {
         const self: *Model = @ptrCast(@alignCast(ptr));
         self.shown_transport = self.transportStatus(std.Io.Timestamp.now(self.bridge.io, .awake));
-        const w = @min(240, ctx.max.width orelse 80);
+        const w = @min(512, ctx.max.width orelse 80);
+        // vxfw Surface multiplies u16 dimensions; stay below 65,536 cells.
         const h = @min(120, ctx.max.height orelse 24);
         var surface = try fw.Surface.init(ctx.arena, self.widget(), .{ .width = w, .height = h });
         @memset(surface.buffer, .{ .style = base });
+        if (w == 0 or h == 0) return surface;
         if (w < 20 or h < 9) {
             line(ctx, surface, 0, 0, "Resize to 20 x 9", accent, null, 0);
             return surface;
@@ -858,60 +910,103 @@ const Model = struct {
             line(ctx, surface, 1, h - 1, "HELP · j/k scroll · Esc close", accent, null, 0);
             return surface;
         }
-        const prompt_h: u16 = @min(7, @max(2, h / 4));
-        const chat_h = h - prompt_h - 5;
+        // Normal chat has no banner; dialogs above retain their scoped headings.
+        @memset(surface.buffer, .{ .style = base });
+        const layout = Theme.Layout.init(w, self.sidebar_override);
+        self.sidebar_visible = layout.sidebar > 0;
+        const right = layout.main - 1;
+        var prompt: std.ArrayList(Row) = .empty;
+        try rows(ctx, &prompt, self.editor.text.items, layout.body, base);
+        const last = prompt.items[prompt.items.len - 1];
+        if (displayWidth(ctx, last.text) >= layout.body) try prompt.append(ctx.arena, .{ .offset = self.editor.text.items.len });
+        const prompt_h: u16 = @intCast(@min(@max(2, @min(h / 2, h - 7)), @max(2, prompt.items.len)));
+        const prompt_y = h - 3 - prompt_h;
+        const upper = prompt_y - 1;
+        const chat_h = upper - 1;
         self.chat_height = chat_h;
         var chat: std.ArrayList(Row) = .empty;
         if (s) |snap| for (snap.entries) |entry| {
-            var role_style = accent;
-            if (entry.role == .assistant) role_style.fg = .{ .rgb = .{ 153, 177, 247 } };
-            if (entry.role == .tool or entry.role == .note) role_style = dim;
-            const label = try std.fmt.allocPrint(ctx.arena, "{s} · #{d}", .{ if (entry.role == .assistant) snap.agentName orelse "assistant" else @tagName(entry.role), entry.id });
-            try rows(ctx, &chat, label, w - 4, role_style);
-            try rows(ctx, &chat, entry.text, w - 4, if (entry.role == .note or entry.role == .tool) dim else base);
-            try rows(ctx, &chat, "", w - 4, base);
+            const label = if (entry.role == .assistant)
+                try std.fmt.allocPrint(ctx.arena, "{s} {s} · #{d}", .{ rune(snap), snap.agentName orelse "assistant", entry.id })
+            else
+                try std.fmt.allocPrint(ctx.arena, "{s} · #{d}", .{ if (entry.role == .user) "you" else @tagName(entry.role), entry.id });
+            try chat.append(ctx.arena, .{ .text = label, .style = if (entry.role == .user) accent else dim, .speaker = true });
+            if (entry.role == .assistant or entry.role == .user) {
+                for (try Markdown.render(ctx, entry.text, layout.body, base)) |cells| try chat.append(ctx.arena, .{ .cells = cells });
+            } else try rows(ctx, &chat, entry.text, layout.body, dim);
+            try chat.append(ctx.arena, .{});
         };
-        if (chat.items.len == 0) try rows(ctx, &chat, if (s == null) "Connecting to the local hub…" else if (self.readOnly()) "No retained messages. Read-only; /rex open to participate." else "No retained messages. Press i to write; Ctrl-S to submit.", w - 4, dim);
+        if (chat.items.len == 0) try rows(ctx, &chat, if (s == null) "Connecting to the local hub…" else if (self.readOnly()) "Read-only inspection · /rex open to participate" else "Press i to write · Enter to send · :help", layout.body, dim);
         self.scroll_max = chat.items.len -| chat_h;
         self.scroll = @min(self.scroll, self.scroll_max);
         const first = self.scroll_max - self.scroll;
-        for (chat.items[first..@min(chat.items.len, first + chat_h)], 0..) |row, y| line(ctx, surface, 2, @intCast(y + 1), row.text, row.style, null, 0);
-        const preview = if (s) |snap| snap.preview else "";
-        const live = if (preview.len > 0) try std.fmt.allocPrint(ctx.arena, " live sample · {s}", .{preview[0 .. std.mem.indexOfScalar(u8, preview, '\n') orelse preview.len]}) else "";
-        line(ctx, surface, 1, chat_h + 1, live, dim, null, 0);
+        for (chat.items[first..@min(chat.items.len, first + chat_h)], 0..) |row, y| {
+            if (row.cells) |cells| {
+                var x = layout.x;
+                for (cells) |cell| {
+                    if (x + cell.char.width > layout.x + layout.body) break;
+                    surface.writeCell(x, @intCast(y), cell);
+                    x += cell.char.width;
+                }
+            } else lineLimit(ctx, surface, if (row.speaker and layout.x > 2) @max(1, layout.x -| 22) else layout.x, @intCast(y), row.text, row.style, null, 0, right);
+        }
         const mode = if (self.readOnly()) "READ ONLY" else if (s != null and s.?.draft != null and !s.?.draft.?.saved) "LOCKED UNSAVED" else if (s != null and s.?.draft != null and s.?.draft.?.clipped) "SAVED PREVIEW" else if (s != null and s.?.draft != null and s.?.draft.?.saved) "SAVED LOCKED" else if (self.locked()) "LOCKED" else switch (self.editor.mode) {
             .normal => "NORMAL",
             .insert => "INSERT",
             .visual => "VISUAL",
             .visual_line => "V-LINE",
         };
-        const border = try std.fmt.allocPrint(ctx.arena, " ── {s} / {s} {s} ──  {d}/16384 bytes", .{ if (self.task_form) "TASK BRIEF" else "PROMPT", mode, if (self.focus == .prompt) "●" else "○", self.editor.text.items.len });
-        line(ctx, surface, 0, chat_h + 2, border, accent, null, 0);
-        var prompt: std.ArrayList(Row) = .empty;
-        try rows(ctx, &prompt, self.editor.text.items, w - 4, base);
+        for (0..layout.main) |x| for ([_]u16{ upper, h - 3 }) |y| surface.writeCell(@intCast(x), y, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = Theme.rule });
+        const border = try std.fmt.allocPrint(ctx.arena, " {s}{s} · {s} ", .{ if (self.task_form) "TASK BRIEF / " else "", if (self.focus == .chat) "CHAT" else "PROMPT", mode });
+        lineLimit(ctx, surface, 1, upper, border, dim, null, 0, right);
+        const bytes_label = try std.fmt.allocPrint(ctx.arena, " {d}/16384 bytes ", .{self.editor.text.items.len});
+        if (layout.main > border.len + bytes_label.len + 4) lineLimit(ctx, surface, @intCast(right - bytes_label.len), upper, bytes_label, Theme.rule, null, 0, right);
+        // Operational notices remain visible above the prompt, never swallowed
+        // by decorative chrome or the (intentionally otherwise empty) sidebar.
+        const notice = if (self.command_mode) try std.fmt.allocPrint(ctx.arena, "{c}{s}", .{ self.command_prefix, self.command.items }) else self.notice[0..self.notice_len];
+        lineLimit(ctx, surface, 1, upper - 1, notice, if (self.command_mode) accent else dim, null, 0, right);
+        if (notice.len == 0) if (s) |snap| {
+            const preview = snap.preview[0 .. std.mem.indexOfScalar(u8, snap.preview, '\n') orelse snap.preview.len];
+            if (preview.len > 0) lineLimit(ctx, surface, layout.x, upper - 1, try std.fmt.allocPrint(ctx.arena, "live · {s}", .{preview}), dim, null, 0, right);
+        };
         var cursor_row: usize = 0;
         for (prompt.items, 0..) |row, i| if (self.editor.cursor >= row.offset) {
             cursor_row = i;
         };
         const start = (cursor_row + 1) -| prompt_h;
-        for (prompt.items[start..@min(prompt.items.len, start + prompt_h)], 0..) |row, y| line(ctx, surface, 2, @intCast(chat_h + 3 + y), row.text, row.style, self.editor.selection(), row.offset);
+        for (prompt.items[start..@min(prompt.items.len, start + prompt_h)], 0..) |row, y| lineLimit(ctx, surface, layout.x, @intCast(prompt_y + y), row.text, base, self.editor.selection(), row.offset, layout.x + layout.body);
         if (self.focus == .prompt and !self.command_mode and !self.locked() and !self.readOnly()) {
             const row = prompt.items[cursor_row];
             const end = @min(self.editor.cursor - row.offset, row.text.len);
-            const col = @min(w - 3, 2 + displayWidth(ctx, row.text[0..end]));
-            surface.cursor = .{ .col = @intCast(col), .row = @intCast(chat_h + 3 + cursor_row - start), .shape = if (self.editor.mode == .insert) .beam else .block };
+            surface.cursor = .{ .col = @intCast(layout.x + @min(layout.body - 1, displayWidth(ctx, row.text[0..end]))), .row = @intCast(prompt_y + cursor_row - start), .shape = if (self.editor.mode == .insert) .beam else .block };
         }
-        if (self.command_mode) {
-            const command_line = try std.fmt.allocPrint(ctx.arena, "{c}{s}", .{ self.command_prefix, self.command.items });
-            line(ctx, surface, 1, h - 2, command_line, accent, null, 0);
-            surface.cursor = .{ .row = h - 2, .col = @intCast(@min(w - 1, displayWidth(ctx, self.command.items) + 2)), .shape = .beam };
-        } else line(ctx, surface, 1, h - 2, self.notice[0..self.notice_len], dim, null, 0);
-        for (0..w) |x| surface.writeCell(@intCast(x), h - 1, .{ .style = status_bar });
-        const queued = if (s != null and s.?.activityKnown) try std.fmt.allocPrint(ctx.arena, "{d}", .{s.?.queued}) else "?";
-        const status = try std.fmt.allocPrint(ctx.arena, " {s} · {s} / {s} · {s}{s} · queued {s} · {s} · {s}", .{ self.shown_transport.text(), if (self.focus == .chat) "CHAT" else if (self.task_form) "BRIEF" else "PROMPT", mode, if (self.online) "" else "STALE / ", if (s) |snap| (if (!snap.activityKnown) "activity unavailable" else if (snap.busy) "busy sample" else "idle sample") else "connecting", queued, if (s) |snap| snap.tools else "", if (s) |snap| (if (snap.historical) "older / :latest" else if (self.scroll > 0) "scroll held" else "latest") else "" });
-        line(ctx, surface, 0, h - 1, status, status_bar, null, 0);
-        const hints: []const u8 = if (self.readOnly()) " /rex open  /hub  :q " else if (self.task_form) " ^S create  :cancel  :q " else "  ^S send  :help  :q ";
-        if (w >= 60) line(ctx, surface, @intCast(w - hints.len), h - 1, hints, status_bar, null, 0);
+        if (self.command_mode) surface.cursor = .{ .row = upper - 1, .col = @intCast(@min(right - 1, displayWidth(ctx, self.command.items) + 2)), .shape = .beam };
+        var name_buffer: [192]u8 = undefined;
+        const saved_name = if (s) |snap| snap.agentName orelse "unnamed" else "connecting";
+        const identity = try std.fmt.allocPrint(ctx.arena, "{s} {s}", .{ if (s) |snap| rune(snap) else "·", Theme.name(&name_buffer, saved_name, self.animation()) });
+        const role = if (s) |snap| (if (std.mem.eql(u8, snap.chatId, snap.hubChatId)) "hub" else if (snap.kind == .subagent) "subagent" else "agent") else "";
+        if (layout.sidebar > 0) {
+            for (0..h) |y| surface.writeCell(layout.main, @intCast(y), .{ .char = .{ .grapheme = "│", .width = 1 }, .style = Theme.rule });
+            line(ctx, surface, layout.main + 3, 2, identity, Theme.orange, null, 0);
+            line(ctx, surface, layout.main + 3, 4, role, dim, null, 0);
+        }
+        const identity_width: u16 = @intCast(@min(displayWidth(ctx, identity), layout.main / 2));
+        const status_right = if (layout.sidebar == 0) layout.main - identity_width - 2 else right;
+        const directory = if (s) |snap| snap.cwd orelse "directory unavailable" else "connecting";
+        const branch = if (s) |snap| snap.gitBranch orelse "branch —" else "branch —";
+        const branch_width = @min(displayWidth(ctx, branch), status_right / 2);
+        const branch_x: u16 = @intCast(status_right - branch_width);
+        lineLimit(ctx, surface, 1, h - 2, directory, dim, null, 0, branch_x -| 3);
+        lineLimit(ctx, surface, branch_x -| 2, h - 2, "·", Theme.rule, null, 0, status_right);
+        lineLimit(ctx, surface, branch_x, h - 2, branch, dim, null, 0, status_right);
+        if (layout.sidebar == 0) lineLimit(ctx, surface, layout.main - identity_width - 1, h - 2, identity, Theme.orange, null, 0, right);
+        const status = try std.fmt.allocPrint(ctx.arena, "{s} [{s}]", .{ if (s) |snap| snap.model else "model —", if (self.settings()) |settings_value| @tagName(settings_value.selection.thinkingLevel) else "thinking —" });
+        // Reserve room for uncertainty even with long model names.
+        const warning = if (!self.online) try std.fmt.allocPrint(ctx.arena, "STALE · {s}", .{self.shown_transport.text()}) else if (self.command_mode or self.shown_transport == .waiting or self.shown_transport == .fenced) self.shown_transport.text() else "";
+        const warning_width = @min(right - 2, displayWidth(ctx, warning));
+        const model_right: u16 = @intCast(if (warning_width > 0) right - warning_width - 1 else right);
+        lineLimit(ctx, surface, 1, h - 1, status, dim, null, 0, model_right);
+        if (warning_width > 0) lineLimit(ctx, surface, @intCast(right - warning_width), h - 1, warning, if (self.command_mode and self.online) dim else Theme.orange, null, 0, right);
         return surface;
     }
 };
@@ -1004,7 +1099,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     const cwd = std.process.currentPathAlloc(init.io, init.gpa) catch null;
     defer if (cwd) |path| init.gpa.free(path);
     var title_buffer: [192]u8 = undefined;
-    var terminal_status: TerminalStatus = .{ .vx = &app.vx, .writer = app.tty.writer(), .title = TerminalStatus.directoryTitle(&title_buffer, cwd orelse "unknown") };
+    var terminal_status: TerminalStatus = .{ .vx = &app.vx, .writer = app.tty.writer(), .title = TerminalStatus.identityTitle(&title_buffer, cwd orelse "unknown", if (allocation_id == null) "Δ" else "·") };
     defer terminal_status.end();
     try terminal_status.begin();
     model.terminal_status = &terminal_status;
@@ -1065,7 +1160,7 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     fw.DrawContext.init(.unicode);
     const draw_ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 100, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
     const surface = try Model.draw(&model, draw_ctx);
-    try std.testing.expectEqual(8, surface.cursor.?.col);
+    try std.testing.expectEqual(16, surface.cursor.?.col);
     var rendered: std.ArrayList(u8) = .empty;
     defer rendered.deinit(a);
     for (surface.buffer) |cell| try rendered.appendSlice(a, cell.char.grapheme);
@@ -1078,6 +1173,32 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     var small = draw_ctx;
     small.max = .{ .width = 10, .height = 3 };
     try std.testing.expectEqual(30, (try Model.draw(&model, small)).buffer.len);
+    small.max = .{ .width = 80, .height = 0 };
+    try std.testing.expectEqual(0, (try Model.draw(&model, small)).buffer.len);
+    for ([_]u16{ 20, 40, 80, 111, 112, 140, 512 }) |width| {
+        for ([_]u16{ 9, 10, 24, 120 }) |height| {
+            small.max = .{ .width = width, .height = height };
+            model.sidebar_override = true;
+            const resized = try Model.draw(&model, small);
+            if (resized.cursor) |cursor| try std.testing.expect(cursor.col < width and cursor.row < height);
+        }
+    }
+    model.sidebar_override = null;
+    model.name_started = 0;
+    model.frame = 0;
+    try std.testing.expectEqual(@as(?u64, 0), model.animation());
+    model.frame = 18;
+    try std.testing.expect(model.animation() == null);
+    model.online = true;
+    model.activity_seen = 160;
+    model.busy_started = 0;
+    model.frame = 160;
+    try std.testing.expectEqual(@as(?u64, 0), model.animation());
+    model.frame = 320;
+    try std.testing.expect(model.animation() == null); // stale busy never animates
+    model.name_started = null;
+    model.busy_started = null;
+    model.online = false;
     var large = draw_ctx;
     large.max = .{ .width = 500, .height = 500 };
     bridge.pending = .{ .version = 1, .id = "pending", .action = .poll };
@@ -1086,12 +1207,12 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     try model.issue(.older); // Refusal must not restart the waiting indicator's delay.
     try std.testing.expectEqualDeep(started, model.pending_since);
     const waiting_surface = try Model.draw(&model, large);
-    try std.testing.expectEqual(240 * 120, waiting_surface.buffer.len);
+    try std.testing.expectEqual(500 * 120, waiting_surface.buffer.len);
     var footer: std.ArrayList(u8) = .empty;
     defer footer.deinit(a);
-    for (waiting_surface.buffer[240 * 119 ..]) |cell| try footer.appendSlice(a, cell.char.grapheme);
+    for (waiting_surface.buffer[500 * 119 ..]) |cell| try footer.appendSlice(a, cell.char.grapheme);
     try std.testing.expect(std.mem.indexOf(u8, footer.items, "client waiting") != null);
-    try std.testing.expect(std.mem.indexOf(u8, footer.items, "offline") != null);
+    try std.testing.expect(std.mem.indexOf(u8, footer.items, "STALE") != null);
     bridge.pending = null;
     model.snapshot.?.value.case0.snapshot.draft = .{ .kind = .input, .requestId = "saved", .text = "preview", .clipped = false, .saved = false };
     model.quit(&ctx, false);
@@ -1151,7 +1272,7 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     const task_surface = try Model.draw(&model, draw_ctx);
     try std.testing.expectEqualDeep(bar.bg, task_surface.buffer[0].style.bg);
     try std.testing.expectEqualDeep(bar.bg, task_surface.buffer[3999].style.bg);
-    try std.testing.expect(!std.meta.eql(hub_bar.bg, bar.bg));
+    try std.testing.expectEqualDeep(hub_bar.bg, bar.bg); // Same monochrome chrome, authority is not a color.
 }
 
 test "transport display suppresses quick polls but shows slow reads and explicit actions" {

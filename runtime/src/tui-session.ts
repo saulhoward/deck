@@ -1,5 +1,6 @@
 // Client-only adapter: shared HTTP validation and existing local drafts, no Pi
 // session, store, execution or replay loop. The renderer owns presentation.
+import { localGitBranch } from "./tui-workspace.js";
 import { canParticipate, requireParticipation, requireNavigation, requireCreation, inspectOnly } from "./client-access.js";
 import type { TuiClientMode } from "./generated/contracts.js";
 import { validAgentStatus } from "./view-contracts.js";
@@ -82,6 +83,8 @@ export class TuiSession {
   private participates() { return canParticipate(this.mode, this.chatId, this.hubChatId); }
   private binding?: { machineId: string; cwd: string };
   private settingsUncertain = false;
+  private localWorkspace = false;
+  private gitSampleAt = 0;
   constructor(private readonly command: Command, private readonly selected?: string, private readonly expectedHub?: string, private readonly draftRoot?: string, private readonly port = 52800) {}
   async registerStartup(allocationId: string, blockId: string | undefined) {
     if (this.state || this.startupBlocked) throw new Error("Rex startup cannot be replayed in this client");
@@ -114,12 +117,14 @@ export class TuiSession {
     this.hubId = status.hubId; this.chatId = status.chatId; this.hubChatId = status.mainChatId; this.store = store;
     this.active = active; this.activeSaved = !!active; this.before = undefined;
     this.binding = status.binding && { machineId: status.binding.machineId, cwd: status.binding.cwd };
+    this.localWorkspace = status.binding?.cwd === process.cwd() && (this.mode === "task" || status.machineId === status.binding?.machineId);
+    this.gitSampleAt = 0;
     this.supportsRex = status.rexOpen === 1;
     this.supportsBrief = status.taskBrief === 1; this.supportsHosts = status.hostInventory === 1;
     this.supportsStartup = status.rexStartup === 1;
     this.supportsSettings = status.modelSettings === 1; this.settingsUncertain = this.supportsSettings;
     const notice = !writable ? `${inspectOnly}${saved.length ? " Saved requests remain untouched; review them in the Rex client." : ""}` : active ? `Saved ${active.kind} ${active.requestId}: :retry or :discard; instruction drafts use --no-tui.${saved.length > 1 ? " Other drafts: --no-tui /drafts." : ""}` : "";
-    this.state = { ...(status.binding?.agentName === undefined ? {} : { agentName: status.binding.agentName }), clientMode: this.mode, hubChatId: this.hubChatId!, hubId: this.hubId!, chatId: this.chatId!, title: this.chatId === this.hubChatId ? "Hub" : displayText(status.binding?.title || `Task ${this.chatId}`, 160), model: displayText(`${status.model?.provider ?? ""}/${status.model?.modelId ?? "unknown model"}`, 160), tools: status.tools, activityKnown: false, busy: false, queued: 0, entries: [], hasOlder: false, historical: false, preview: "", notice, draft: null, ...(status.binding?.brief ? { brief: { ...(status.binding.brief.problem === undefined ? {} : { problem: displayText(status.binding.brief.problem, 2048) }), ...(status.binding.brief.description === undefined ? {} : { description: displayText(status.binding.brief.description, 8192) }) } } : {}) };
+    this.state = { ...(status.binding ? { cwd: displayText(status.binding.cwd, 4096), kind: status.binding.kind, ...(status.binding.agentRune === undefined ? {} : { agentRune: status.binding.agentRune }) } : {}), ...(status.binding?.agentName === undefined ? {} : { agentName: status.binding.agentName }), clientMode: this.mode, hubChatId: this.hubChatId!, hubId: this.hubId!, chatId: this.chatId!, title: this.chatId === this.hubChatId ? "Hub" : displayText(status.binding?.title || `Task ${this.chatId}`, 160), model: displayText(`${status.model?.provider ?? ""}/${status.model?.modelId ?? "unknown model"}`, 160), tools: status.tools, activityKnown: false, busy: false, queued: 0, entries: [], hasOlder: false, historical: false, preview: "", notice, draft: null, ...(status.binding?.brief ? { brief: { ...(status.binding.brief.problem === undefined ? {} : { problem: displayText(status.binding.brief.problem, 2048) }), ...(status.binding.brief.description === undefined ? {} : { description: displayText(status.binding.brief.description, 8192) }) } } : {}) };
   }
   private async refreshSettings() {
     if (!this.supportsSettings) throw new Error("Hub does not advertise model settings; upgrade it only when idle");
@@ -206,7 +211,7 @@ export class TuiSession {
       case "tasks": {
         const page = await this.command("list_chats", { limit: 25, ...(this.supportsHosts ? { includeObservations: true } : {}), ...(request.after ? { after: request.after } : {}) }, this.hubId);
         if (this.supportsHosts) state.hosts = await this.command("list_hosts", {}, this.hubId);
-        state.tasks = { items: page.items.map((row: any) => ({ ...(row.agentName === undefined ? {} : { agentName: row.agentName }), chatId: row.chatId, kind: row.kind, title: row.chatId === this.hubChatId ? "Hub" : displayText(row.title, 160), machineId: displayText(row.machineId, 80), cwd: displayText(row.cwd, 256), ...(row.parentChatId ? { parentChatId: row.parentChatId } : {}), activity: row.activity ?? "unknown", rexState: row.rexState ?? "unknown", connection: state.hosts ? state.hosts.items.find(h => h.machineId === row.machineId)?.connection ?? "unregistered" : "unknown" })), ...(request.after ? { after: request.after } : {}), ...(page.next ? { next: page.next } : {}) };
+        state.tasks = { items: page.items.map((row: any) => ({ ...(row.agentRune === undefined ? {} : { agentRune: row.agentRune }), ...(row.agentName === undefined ? {} : { agentName: row.agentName }), chatId: row.chatId, kind: row.kind, title: row.chatId === this.hubChatId ? "Hub" : displayText(row.title, 160), machineId: displayText(row.machineId, 80), cwd: displayText(row.cwd, 256), ...(row.parentChatId ? { parentChatId: row.parentChatId } : {}), activity: row.activity ?? "unknown", rexState: row.rexState ?? "unknown", connection: state.hosts ? state.hosts.items.find(h => h.machineId === row.machineId)?.connection ?? "unregistered" : "unknown" })), ...(request.after ? { after: request.after } : {}), ...(page.next ? { next: page.next } : {}) };
         break;
       }
       case "create": {
@@ -293,6 +298,11 @@ export class TuiSession {
         }
         break;
       }
+    }
+    if (this.localWorkspace && Date.now() - this.gitSampleAt >= 2000) {
+      this.gitSampleAt = Date.now();
+      const branch = await localGitBranch(process.cwd());
+      if (branch === undefined) delete state.gitBranch; else state.gitBranch = branch;
     }
     const text = this.active?.kind === "input" ? displayText(this.active.text, 16384) : "";
     state.settingsPending = this.settingsUncertain;

@@ -7,7 +7,7 @@ import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 import { ChatDoc, DeckRuntime } from "./deck.js";
-import { agentNameAlgorithms, assignAgentName } from "./agent-names.js";
+import { agentNameAlgorithms, agentRunes, assignAgentName } from "./agent-names.js";
 import { validAgentName, validStatusBinding, validChatListItem, validTuiSnapshot } from "./generated/contracts.js";
 import { dispatch } from "./ipc.js";
 import { TuiSession } from "./tui-session.js";
@@ -44,26 +44,30 @@ test("names are atomic, unique across versions, stable on retry/restart, and not
   const f = await fixture();
   try {
     const main = await f.runtime.harness.snapshot(ChatDoc, f.runtime.main.id, context);
-    assert.equal(main!.agentName, "wintermute");
+    assert.equal(main!.agentName, "wintermute"); assert.equal(main!.agentRune, "Δ");
     const bindingOnly = await f.runtime.createTask("Binding only", main!);
     assert.notEqual((await f.runtime.harness.snapshot(ChatDoc, bindingOnly.id, context))!.agentName, main!.agentName);
     await assert.rejects(f.runtime.harness.createConversation({ ownership: { kind: "ownerless" }, init: async (tx, id) => {
       const metadata = await tx.doc(ChatDoc, id); Object.assign(metadata, main);
       await assignAgentName(tx, id, metadata);
-    } }, context), /already belongs/);
+    } }, context), /already belongs|Invalid saved agent rune/);
     const tasks = await Promise.all(Array.from({ length: 110 }, (_, i) => f.runtime.createTask("Same title", f.options.binding, `request-${i}`)));
     const saved = await Promise.all(tasks.map(t => f.runtime.harness.snapshot(ChatDoc, t.id, context)));
     assert.equal(new Set([main, ...saved].map(s => s!.agentName)).size, 111);
     assert.ok(saved.every(s => s!.agentNameAlgorithm === v1.id));
+    assert.equal(new Set(saved.slice(0, 86).map(s => s!.agentRune)).size, 86);
+    assert.ok(saved.every(s => agentRunes.includes(s!.agentRune!)));
+    assert.equal(saved[0]!.agentRune, saved[86]!.agentRune);
     assert.equal((await f.runtime.createTask("Same title", f.options.binding, "request-0")).id, tasks[0]!.id);
     await assert.rejects(f.runtime.createTask("Changed request", f.options.binding, "request-0"), /different arguments/);
-    let rolledBackName: string | undefined;
+    let rolledBackName: string | undefined, rolledBackRune: string | undefined;
     await assert.rejects(f.runtime.harness.createConversation({ ownership: { kind: "ownerless" }, init: async (tx, id) => {
-      const metadata = await tx.doc(ChatDoc, id); await assignAgentName(tx, id, metadata); rolledBackName = metadata.agentName;
+      const metadata = await tx.doc(ChatDoc, id); await assignAgentName(tx, id, metadata); rolledBackName = metadata.agentName; rolledBackRune = metadata.agentRune;
       throw new Error("Roll back creation");
     } }, context), /Roll back creation/);
     const next = await f.runtime.createTask("After rollback", f.options.binding);
     assert.equal((await f.runtime.harness.snapshot(ChatDoc, next.id, context))!.agentName, rolledBackName);
+    assert.equal((await f.runtime.harness.snapshot(ChatDoc, next.id, context))!.agentRune, rolledBackRune);
     // A future algorithm reserves v1's next candidate; switching back must
     // skip that reservation rather than duplicate/rename either conversation.
     let reservedOrdinal = 0;
@@ -103,7 +107,8 @@ test("startup backfills legacy Deck metadata without touching history, bindings 
     await f.restart();
     const saved = (await f.runtime.harness.snapshot(ChatDoc, legacy.id, context))!;
     assert.ok(validAgentName(saved.agentName)); assert.equal(saved.agentNameAlgorithm, v1.id);
-    const { agentName, agentNameAlgorithm, ...retained } = saved;
+    const { agentName, agentNameAlgorithm, agentRune, ...retained } = saved;
+    assert.ok(agentRunes.includes(agentRune!));
     assert.deepEqual(retained, old);
     assert.deepEqual(await f.runtime.history(String(legacy.id)), history);
     assert.equal(await f.runtime.harness.snapshot(ChatDoc, unmanaged.id, context), undefined);
@@ -126,11 +131,11 @@ test("TUI receives saved names through status and task pages while assistant rol
     const command = (command: string, args: unknown, hubId?: string) => dispatch(f.runtime, { version: 1, id: "test", command, args, ...(hubId ? { hubId } : {}) });
     const ui = new TuiSession(command, String(task.id), f.runtime.hubId, join(f.directory, "drafts"));
     const snapshot = await ui.handle({ version: 1, id: "1", action: "poll" });
-    assert.equal(snapshot.agentName, metadata.agentName); assert.equal(snapshot.title, "Title remains separate");
+    assert.equal(snapshot.agentRune, metadata.agentRune); assert.equal(snapshot.agentName, metadata.agentName); assert.equal(snapshot.title, "Title remains separate");
     assert.ok(validTuiSnapshot(snapshot)); assert.equal(snapshot.entries[0]!.role, "assistant");
     const page = await ui.handle({ version: 1, id: "2", action: "tasks" });
     assert.equal(page.tasks!.items.find(item => item.chatId === String(task.id))!.agentName, metadata.agentName);
     const hub = await ui.handle({ version: 1, id: "3", action: "select", chatId: String(f.runtime.main.id) });
-    assert.equal(hub.agentName, "wintermute"); assert.notEqual(hub.agentName, snapshot.agentName);
+    assert.equal(hub.agentRune, "Δ"); assert.equal(hub.agentName, "wintermute"); assert.notEqual(hub.agentName, snapshot.agentName);
   } finally { await f.close(); }
 });
