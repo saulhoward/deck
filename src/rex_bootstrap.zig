@@ -102,7 +102,8 @@ test "native bootstrap proof refuses wrong host/root/cwd/claim and unsafe record
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    var tmp = std.testing.tmpDir(.{});
+    // fchmod needs a readable directory handle, not Linux's default O_PATH.
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
     try tmp.dir.setPermissions(native.io, .fromMode(0o700));
     const root = try tmp.dir.realPathFileAlloc(native.io, ".", a);

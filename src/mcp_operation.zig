@@ -27,7 +27,10 @@ fn retained(native: Native, a: std.mem.Allocator, dir: std.Io.Dir, name: []const
 }
 fn syncDirectory(native: Native, dir: std.Io.Dir) !void {
     // File fsync alone does not make a newly published receipt name durable.
-    const file: std.Io.File = .{ .handle = dir.handle, .flags = .{ .nonblocking = false } };
+    // A default Dir is O_PATH on Linux, which cannot be fsynced. Open a readable
+    // handle relative to it so we sync the same directory without closing the caller's handle.
+    const file = try dir.openFile(native.io, ".", .{});
+    defer file.close(native.io);
     try file.sync(native.io);
 }
 fn save(native: Native, a: std.mem.Allocator, dir: std.Io.Dir, name: []const u8, hash: []const u8, result: ?Result) !void {
@@ -87,4 +90,25 @@ pub fn operation(native: Native, a: std.mem.Allocator, dir: std.Io.Dir, machine:
     try boundary.checkReply(a, request, frame);
     try save(native, a, dir, name, &digest, result);
     return result;
+}
+
+test "MCP receipts are durable with default and iterable directory handles" {
+    const native = Native.testing();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const digest = profiles.hash("request");
+    for ([_]bool{ false, true }) |iterate| {
+        var tmp = std.testing.tmpDir(.{ .iterate = iterate });
+        defer tmp.cleanup();
+        try save(native, a, tmp.dir, "42.json", &digest, null);
+        const accepted = (try retained(native, a, tmp.dir, "42.json", &digest)).?;
+        try std.testing.expectEqualStrings("effect_uncertain", accepted.code);
+        const result: Result = .{ .ok = false, .code = "mcp_refused", .output = "Not dispatched" };
+        try save(native, a, tmp.dir, "42.json", &digest, result);
+        const completed = (try retained(native, a, tmp.dir, "42.json", &digest)).?;
+        try std.testing.expectEqual(result.ok, completed.ok);
+        try std.testing.expectEqualStrings(result.code, completed.code);
+        try std.testing.expectEqualStrings(result.output, completed.output);
+    }
 }
