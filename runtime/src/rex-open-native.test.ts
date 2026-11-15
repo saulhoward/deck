@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
@@ -7,11 +7,39 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fakeRex, REX_UUID } from "./rex-allocation.test.support.js";
+import { freeHubPort } from "./hub-port.test.support.js";
 const binary = process.env.DECK_TEST_BINARY;
-async function until<T>(read: () => Promise<T>, accept: (value: T) => boolean): Promise<T> {
+async function until<T>(read: () => Promise<T>, accept: (value: T) => boolean, failure = () => new Error("Rex open condition not observed")): Promise<T> {
   for (let i = 0; i < 300; i++) { const value = await read(); if (accept(value)) return value; await new Promise((resolve) => setTimeout(resolve, 20)); }
-  throw new Error("Rex open condition not observed");
+  throw failure();
 }
+async function waitForHub(hub: ChildProcess, diagnostics: () => string): Promise<void> {
+  const failure = (reason: string) => new Error(`Hub ${reason} (exit=${hub.exitCode}, signal=${hub.signalCode}): ${diagnostics().trim() || "no stderr"}`);
+  await until(async () => {
+    if (hub.exitCode !== null || hub.signalCode !== null) throw failure("exited before listening");
+    return diagnostics();
+  }, value => value.includes("hub listening"), () => failure("did not listen within the startup budget"));
+}
+
+test("Rex fixture reports an occupied enrollment port instead of a readiness timeout", { skip: !binary, timeout: 10_000 }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "deck-open-port-"));
+  const occupied = createServer();
+  let hub: ReturnType<typeof spawn> | undefined, closed: Promise<unknown> | undefined;
+  try {
+    const port = await freeHubPort();
+    occupied.listen(port + 1, "127.0.0.1"); await once(occupied, "listening");
+    hub = spawn(binary!, ["serve", "--mock", "--directory", root, "--port", String(port)], { timeout: 8000, killSignal: "SIGKILL" });
+    closed = once(hub, "close"); let errors = "";
+    hub.stderr!.on("data", chunk => { errors += String(chunk); }); hub.stdout!.resume();
+    await assert.rejects(waitForHub(hub, () => errors), /Hub exited before listening.*hub\/enrollment port already in use/s);
+    await closed; assert.equal(hub.exitCode, 1);
+  } finally {
+    if (hub && hub.exitCode === null && hub.signalCode === null) hub.kill("SIGKILL");
+    await closed;
+    if (occupied.listening) await new Promise<void>(resolve => occupied.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("public Rex CLI/HTTP uses packaged native effects for new, reuse, replacement and explicit unknown retry", { skip: !binary, timeout: 25_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "deck-open-native-")), server = "unix:///tmp/deck%20rex-fake.sock";
@@ -19,8 +47,10 @@ test("public Rex CLI/HTTP uses packaged native effects for new, reuse, replaceme
   assert.equal(spawnSync(binary!, ["init", "--directory", root]).status, 0);
   const rex = await fakeRex(root, "", server, true); await writeFile(join(root, "views"), "0");
   const bin = join(root, "bin"); await mkdir(bin); await symlink(process.execPath, join(bin, "node"));
-  const probe = createServer(); probe.listen(0, "127.0.0.1"); await once(probe, "listening"); const address = probe.address(); assert.ok(address && typeof address !== "string"); const port = address.port;
-  await new Promise<void>((resolve) => probe.close(() => resolve()));
+  // Default serve binds both the HTTP port and the adjacent enrollment port.
+  // listen(0) probes only one and can collide with ephemeral client connections.
+  const port = await freeHubPort();
+  const config = JSON.parse(await readFile(join(root, "config.json"), "utf8")) as { machine_id: string };
   // An isolated PATH cannot fall through to the user's installed Rex. Routing
   // and focus env must not escape into the native discovery/allocation CLI.
   const env = { ...process.env, PATH: bin, REX_SERVER: "https://wrong.example", REX_HOME: "https://wrong.example", REX_SESSION: "PRIVATE", REX_BLOCK: "PRIVATE", OPENAI_API_KEY: "PRIVATE", DECK_CLIENT_STATE_DIRECTORY: join(root, "drafts") };
@@ -28,12 +58,18 @@ test("public Rex CLI/HTTP uses packaged native effects for new, reuse, replaceme
   const closed = once(hub, "close"); let errors = ""; hub.stderr.on("data", (chunk) => { errors += String(chunk); }); hub.stdout.resume();
   let hubId: string | undefined;
   const command = async (command: string, args = {}): Promise<any> => {
-    const res = await fetch(`http://127.0.0.1:${port}/v1/command`, { method: "POST", body: JSON.stringify({ version: 1, id: "test", hubId, command, args }), signal: AbortSignal.timeout(4000) });
-    const value = await res.json() as any; assert.equal(value.ok, true, JSON.stringify(value)); return value.result;
+    let value: any;
+    try {
+      const res = await fetch(`http://127.0.0.1:${port}/v1/command`, { method: "POST", body: JSON.stringify({ version: 1, id: "test", hubId, command, args }), signal: AbortSignal.timeout(4000) });
+      value = await res.json();
+    } catch (cause) { throw new Error(`Rex fixture ${command} request failed (exit=${hub.exitCode}, signal=${hub.signalCode}): ${errors.trim() || "no stderr"}`, { cause }); }
+    assert.equal(value.ok, true, JSON.stringify(value)); return value.result;
   };
   try {
-    await until(async () => errors, (value) => value.includes("hub listening"));
-    const status = await command("status"); hubId = status.hubId; assert.equal(status.rexOpen, 1);
+    await waitForHub(hub, () => errors);
+    const status = await command("status");
+    assert.equal(status.binding.machineId, config.machine_id); // Probing is not a port lease; never mutate another hub.
+    hubId = status.hubId; assert.equal(status.rexOpen, 1);
     const chatId = (await command("create_task", { title: "Rex public", requestId: "task", ...status.binding })).chatId;
     const cli = (action: string, extra: string[] = [], task = chatId, success = true) => {
       const child = spawnSync(binary!, ["rex", action, "--task", task, "--port", String(port), ...extra], { env, encoding: "utf8", timeout: 8000 });
@@ -100,7 +136,7 @@ for (const fixture of fixtures.filter((f) => ["admitted", "wrong chat", "unsafe 
   await writeFile(writer, `import {appendFileSync} from 'node:fs'; let input=Buffer.alloc(0);process.stdin.on('data',chunk=>{input=Buffer.concat([input,chunk]);while(input.length>=4&&input.length>=4+input.readUInt32BE(0)){const n=input.readUInt32BE(0),request=JSON.parse(input.subarray(4,n+4));input=input.subarray(n+4);appendFileSync(${JSON.stringify(calls)},'read\\n');const body=Buffer.from(JSON.stringify({version:1,id:request.id,ok:true,result:${JSON.stringify(fixture.result)}}));const header=Buffer.alloc(4);header.writeUInt32BE(body.length);process.stdout.write(Buffer.concat([header,body]));}});`);
   const hub = spawn(binary!, ["serve", "--mock", "--directory", root, "--port", String(port), "--runtime", writer]); const closed = once(hub, "close"); let errors = ""; hub.stderr.on("data", (chunk) => { errors += String(chunk); });
   try {
-    await until(async () => errors, (value) => value.includes("hub listening"));
+    await waitForHub(hub, () => errors);
     const value = await fetch(`http://127.0.0.1:${port}/v1/command`, { method: "POST", body: JSON.stringify({ version: 1, id: "test", command: fixture.command, args: fixture.args, hubId: fixture.hubId }), signal: AbortSignal.timeout(3000) }).then((reply) => reply.json(), () => null);
     if (fixture.valid) assert.deepEqual(value, { version: 1, id: "test", ok: true, result: fixture.result }); else assert.equal(value, null);
     assert.equal(await readFile(calls, "utf8"), "read\n"); assert.doesNotMatch(errors, /PRIVATE/);
