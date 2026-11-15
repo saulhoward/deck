@@ -95,8 +95,8 @@ export class TuiSession {
     await this.initialize();
     if (this.chatId === this.hubChatId) throw new Error("Rex task startup cannot target the hub chat");
     if (!this.supportsStartup) throw new Error("Hub lacks Rex startup capability; no input enabled");
-    const page = await this.history();
-    this.state!.entries = this.renderEntries(page); this.before = page.next; this.state!.hasOlder = !!page.next;
+    const page = this.renderHistory(await this.history());
+    this.state!.entries = page.entries; this.before = page.next; this.state!.hasOlder = !!page.next;
     await this.command("rex_startup", args, this.hubId);
     this.state!.notice = "Rex startup registered (historical observation, not current health).";
     this.startupBlocked = false;
@@ -154,9 +154,12 @@ export class TuiSession {
       catch (error) { if (!(error instanceof HubError) || error.policy.action !== "reduce_page" || limit === 1) throw error; limit = Math.max(1, Math.floor(limit / 2)); }
     }
   }
-  private renderEntries(page: any): TuiEntry[] {
+  private renderHistory(page: any): { entries: TuiEntry[]; next: string | undefined } {
     let budget = 128 * 1024;
-    return page.items.slice().reverse().map((entry: any): TuiEntry => {
+    const entries: TuiEntry[] = [];
+    // History arrives newest-first. Spend the view budget in that order so
+    // older tool output cannot hide new input, answers or failure markers.
+    for (const entry of page.items) {
       let role: TuiEntry["role"] = "note", text = "";
       if (entry.kind === "deck.input") {
         role = "user"; text = entry.data.text;
@@ -169,9 +172,16 @@ export class TuiSession {
           return (role === "tool" ? `${message.toolName}${message.isError ? " (error)" : ""}\n` : "") + parts + (message.stopReason === "error" || message.stopReason === "aborted" ? `\n[${message.stopReason}]` : "");
         }).join("\n");
       } else text = `[${entry.kind}: retained entry, not rendered]`;
-      text = budget >= 32 ? displayText(text, Math.min(8192, budget)) : "[view budget]"; budget -= Buffer.byteLength(text);
-      return { id: entry.id, role, text };
-    });
+      text = displayText(text, 8192);
+      const bytes = Buffer.byteLength(text);
+      if (bytes > budget) break;
+      budget -= bytes; entries.push({ id: entry.id, role, text });
+    }
+    // The first entry always fits. If the display window is smaller than the
+    // validated page, :older must start before its oldest displayed ID, not
+    // skip the omitted entries using the server's farther-back cursor.
+    const next = entries.length < page.items.length ? String(entries.at(-1)!.id) : page.next;
+    return { entries: entries.reverse(), next };
   }
   private sample(page: any) {
     // Absence is unknown, never a fresh replay of an old completion/idle sample.
@@ -291,8 +301,8 @@ export class TuiSession {
         state.notice = "Stop requested, not a drained/completed receipt"; break;
       case "older": {
         if (!this.before) { state.notice = "No older history in this view"; break; }
-        const page = await this.history(this.before);
-        const entries = this.renderEntries(page);
+        const page = this.renderHistory(await this.history(this.before));
+        const entries = page.entries;
         this.before = page.next; state.hasOlder = !!page.next;
         if (entries.length === 0) { state.notice = "No older retained history; current view unchanged"; break; }
         state.entries = entries; state.historical = true; break;
@@ -301,8 +311,8 @@ export class TuiSession {
       case "poll": {
         if (this.supportsSettings) await this.refreshSettings();
         if (request.action === "latest" || (!request.hold && !state.historical)) {
-          const page = await this.history(); const entries = this.renderEntries(page);
-          state.entries = entries; this.before = page.next; state.hasOlder = !!page.next; state.historical = false; this.sample(page);
+          const page = await this.history(), rendered = this.renderHistory(page);
+          state.entries = rendered.entries; this.before = rendered.next; state.hasOlder = !!rendered.next; state.historical = false; this.sample(page);
         } else {
           // Keep a scrolled/history window stable; samples never replace it.
           const activity = await this.command("activity", { chatId: this.chatId, includeAgentStatus: true }, this.hubId);
