@@ -31,7 +31,7 @@ export class RexRoutedFiles extends RoutedFiles {
     super(machineId, local, { hubId: routes.hubId ?? "not-yet-bound", hosts: [] });
     try {
       for (const slot of routes.slots) {
-        const pipe = new PipeFiles(slot.readFd, slot.writeFd, slot.controlFd, true);
+        const pipe = new PipeFiles(slot.readFd, slot.writeFd, slot.controlFd);
         this.slots.push({ pipe, registration: slot.registration, activated: false });
         if (slot.registration) this.addTransport(slot.registration.machineId, pipe, slot.registration.rexClient, slot.registration.capabilities.includes("mcp"), true);
       }

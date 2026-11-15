@@ -4,9 +4,10 @@ import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { DeckRuntime } from "./deck.js";
+import { TASK_RECOVERY_IMPLEMENTATION } from "./recovery.test.support.js";
 const [kind, path] = process.argv.slice(2) as [string, string];
 const faux = fauxProvider(); const models = createModels(); models.setProvider(faux.provider);
-const runtime = await DeckRuntime.open(path, { models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: "host", cwd: "/saved" }, environment: () => undefined, hostFiles: { call: async () => { throw new Error("No native effects expected"); } } });
+const runtime = await DeckRuntime.open(path, { implementation: TASK_RECOVERY_IMPLEMENTATION, models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: "host", cwd: "/saved" }, environment: () => undefined, hostFiles: { call: async () => { throw new Error("No native effects expected"); } } });
 setInterval(() => {}, 1000);
 if (kind === "create") {
   const create = runtime.createTask.bind(runtime);

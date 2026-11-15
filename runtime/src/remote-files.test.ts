@@ -45,7 +45,7 @@ test("evented remote pipes do not starve filesystem work and fence only their ow
   const script = `
     import { PipeFiles } from ${JSON.stringify(new URL("./host-files.js", import.meta.url).href)};
     import { readFile } from 'node:fs/promises';
-    const hosts = Array.from({length: 5}, (_, i) => new PipeFiles(3+i*3, 4+i*3, 5+i*3, true));
+    const hosts = Array.from({length: 5}, (_, i) => new PipeFiles(3+i*3, 4+i*3, 5+i*3));
     await readFile(process.argv[1]);
     const binding = {machineId:'${remote}',cwd:'/remote'};
     console.log(JSON.stringify(await Promise.all(hosts.map((host, i) => host.call(binding, String(i+1), 'read', {path:'x'}).catch(e=>({error:e.message}))))));

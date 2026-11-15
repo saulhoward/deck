@@ -25,6 +25,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     }) });
+    // An explicit dependency also bounds compiler processes on toolchains whose
+    // asynchronous build steps can still overlap with `-j1`.
+    if (b.option(bool, "serial", "Compile executables sequentially on small builders") orelse false) worker.step.dependOn(&exe.step);
     b.installArtifact(worker);
     b.installDirectory(.{ .source_dir = b.path("licenses"), .install_dir = .prefix, .install_subdir = "share/licenses/deck" });
     const run = b.addRunArtifact(exe);

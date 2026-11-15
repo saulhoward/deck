@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -34,6 +34,7 @@ test("native backup/restore preserve retained and uncertain effects without repl
     `);
     const native = (directory: string, restored = false) => spawnSync(binary!, ["serve", "--stdio", "--mock", "--directory", directory, "--workspace", root, "--runtime", fixture], { encoding: "utf8", timeout: 5000, env: { ...process.env, ...(restored ? { RESTORED_TEST: "1" } : {}) } });
     const original = native(state); assert.equal(original.status, 0, original.stderr); await rm(join(root, "effect.txt"));
+    for (const path of [join(state, "worker"), join(state, "worker", "operations")]) assert.equal((await stat(path)).mode & 0o777, 0o700);
     const config = JSON.parse(await readFile(join(state, "config.json"), "utf8"));
     const request = { version: 1, id: "9200", machineId: config.machine_id, cwd: await import("node:fs/promises").then((fs) => fs.realpath(root)), operation: "write", args: { path: "uncertain.txt", content: "never replay" } };
     await writeFile(join(state, "worker", "operations", "9200.json"), JSON.stringify({ hash: createHash("sha256").update(JSON.stringify(request)).digest("hex"), result: null }), { mode: 0o600 });
@@ -68,7 +69,7 @@ test("backup refuses a live Pi writer and its orphaned surviving child, without 
     await until(async () => { try { writer = Number(await readFile(pidPath, "utf8")); return !!writer; } catch { return false; } });
     input.writer.write(encodeFrame({ version: 1, id: "ready", command: "status" }));
     let timer: ReturnType<typeof setTimeout> | undefined;
-    try { assert.equal((await Promise.race([frames.next(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Writer readiness timed out")), 5000); })])).value.ok, true, errors); }
+    try { assert.equal((await Promise.race([frames.next(), new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`Writer readiness timed out (exit=${supervisor.exitCode}, signal=${supervisor.signalCode}): ${errors}`)), 5000); })])).value.ok, true, errors); }
     finally { clearTimeout(timer); }
     for (const orphan of [false, true]) {
       if (orphan) { const exited = once(supervisor, "exit"); supervisor.kill("SIGKILL"); await exited; }

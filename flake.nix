@@ -69,7 +69,8 @@
               zig fetch ${sources.vaxis}
               zig fetch ${sources.unicode}
               npm run contracts:check
-              zig build -Doptimize=ReleaseSafe --prefix "$TMPDIR/deck-zig"
+              # Two concurrent Zig compilations can exhaust small builders' RAM.
+              zig build -j1 -Dserial=true -Doptimize=ReleaseSafe --prefix "$TMPDIR/deck-zig"
               npm run build
               runHook postBuild
             '';
@@ -77,9 +78,11 @@
             doCheck = true;
             checkPhase = ''
               runHook preCheck
-              zig build test
+              zig build test -j1
               npm run check
-              DECK_TEST_BINARY="$TMPDIR/deck-zig/bin/deck" npm test
+              # Each integration file may launch several runtimes. Keep their
+              # fixed responsiveness deadlines meaningful on small builders.
+              DECK_TEST_BINARY="$TMPDIR/deck-zig/bin/deck" node --test --test-concurrency=1 runtime/dist/*.test.js scripts/*.test.mjs
               runHook postCheck
             '';
             installPhase = ''

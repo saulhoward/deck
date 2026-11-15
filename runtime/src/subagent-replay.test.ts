@@ -10,6 +10,7 @@ import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { DeckRuntime } from "./deck.js";
+import { SUBAGENT_RECOVERY_IMPLEMENTATION } from "./recovery.test.support.js";
 async function within<T>(promise: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try { return await Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Recovery timed out")), 5000); })]); }
@@ -32,7 +33,7 @@ for (const step of ["created", "answered"] as const) test(`foreground delegation
     child.kill("SIGKILL"); await closed;
     const faux = fauxProvider(); const models = createModels(); models.setProvider(faux.provider);
     faux.setResponses(Array.from({ length: 3 }, () => (request) => request.messages.some((message) => message.role === "user" && typeof message.content === "string" && message.content.startsWith("[Foreground delegation")) ? fauxAssistantMessage("CHILD_ANSWER") : fauxAssistantMessage("Parent recovered")));
-    runtime = await DeckRuntime.open(path, { models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: "ignored-new-default", cwd: "/different" }, environment: () => undefined, hostFiles: { call: async () => { throw new Error("No effects expected"); } } });
+    runtime = await DeckRuntime.open(path, { implementation: SUBAGENT_RECOVERY_IMPLEMENTATION, models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: "ignored-new-default", cwd: "/different" }, environment: () => undefined, hostFiles: { call: async () => { throw new Error("No effects expected"); } } });
     await within(runtime.main.waitForIdle(context));
     const chats = (await runtime.listChats()).items; assert.equal(chats.length, 2);
     const recovered = chats.find((item) => item.kind === "subagent")!;

@@ -20,10 +20,11 @@ import { DraftStore } from "./drafts.js";
 import { RoutedFiles } from "./remote-files.js";
 import type { PipeFiles, FileResult } from "./host-files.js";
 import { dispatch } from "./ipc.js";
+import { MESSAGE_RECOVERY_IMPLEMENTATION } from "./recovery.test.support.js";
 const local = "a".repeat(32), worker = "b".repeat(32);
 function setup() {
   const faux = fauxProvider(), models = createModels(); models.setProvider(faux.provider);
-  return { faux, options: { models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: local, cwd: "/saved" }, environment: () => undefined, hostFiles: {
+  return { faux, options: { implementation: MESSAGE_RECOVERY_IMPLEMENTATION, models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: local, cwd: "/saved" }, environment: () => undefined, hostFiles: {
     call: async () => { throw new Error("No native effect expected"); },
     registeredHosts: async () => [{ machineId: worker, kind: "worker" as const, rex: false, connection: "offline" as const }],
   } } };

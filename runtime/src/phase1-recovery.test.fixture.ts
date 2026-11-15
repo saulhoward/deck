@@ -3,9 +3,10 @@ import { writeFile, rename } from "node:fs/promises";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { DeckRuntime } from "./deck.js";
+import { MESSAGE_RECOVERY_IMPLEMENTATION } from "./recovery.test.support.js";
 const [path, mode] = process.argv.slice(2);
 const faux = fauxProvider(), models = createModels(); models.setProvider(faux.provider);
-const runtime = await DeckRuntime.open(path!, { models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: "a".repeat(32), cwd: "/saved" }, environment: () => undefined, hostFiles: { call: async () => { throw new Error("No native effect expected"); }, registeredHosts: async () => [{ machineId: "b".repeat(32), kind: "worker", rex: false, connection: "offline" }] } });
+const runtime = await DeckRuntime.open(path!, { implementation: MESSAGE_RECOVERY_IMPLEMENTATION, models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: "a".repeat(32), cwd: "/saved" }, environment: () => undefined, hostFiles: { call: async () => { throw new Error("No native effect expected"); }, registeredHosts: async () => [{ machineId: "b".repeat(32), kind: "worker", rex: false, connection: "offline" }] } });
 const task = await runtime.createTask("Reporter", { machineId: "b".repeat(32), cwd: "/remote" });
 const admit = runtime.admit.bind(runtime);
 runtime.admit = async (id, input, signal) => {

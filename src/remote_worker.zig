@@ -374,7 +374,7 @@ pub fn run(native: Native, args: []const []const u8) !void {
     defer for (signals, 0..) |sig, n| std.posix.sigaction(sig, &previous[n], null);
     const journal = try std.fs.path.join(a, &.{ path, "operations" });
     defer a.free(journal);
-    try std.Io.Dir.cwd().createDirPath(native.io, journal);
+    _ = try dir.createDirPathStatus(native.io, "operations", .fromMode(0o700));
     var delay: usize = 10;
     while (!stopping.load(.acquire)) {
         sessionConfigured(native, config.value, &implementation, cli, journal, try tailscale.endpoint(config.value.hubAddress), tailscale.verify, &stopping, if (mcp) |*p| p else null) catch {};

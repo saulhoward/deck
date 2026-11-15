@@ -5,6 +5,37 @@ import type { Duplex } from "node:stream";
 import test from "node:test";
 import { FrameDecoder, encodeFrame } from "./protocol.js";
 
+test("local native pipe leaves the filesystem pool free and closes without peer EOF", { timeout: 10_000 }, async () => {
+  const child = spawn(process.execPath, ["--input-type=module", "-e", `
+    import assert from 'node:assert/strict';
+    import {readFile} from 'node:fs/promises';
+    import {PipeFiles} from ${JSON.stringify(new URL("./host-files.js", import.meta.url).href)};
+    const host = new PipeFiles(3, 4, 5);
+    try {
+      // Let the idle reader start before scheduling filesystem work. With a
+      // blocking fs.ReadStream this consumes the only libuv worker forever.
+      await new Promise(resolve => setTimeout(resolve, 25));
+      assert.ok((await readFile(new URL(${JSON.stringify(new URL("../../package.json", import.meta.url).href)}))).length);
+      assert.equal((await host.call({machineId:'worker',cwd:'/saved'},'1','read',{path:'x'})).output,'safe');
+    } finally { await host.close(); }
+    console.log('filesystem and close verified');
+  `], { env: { ...process.env, UV_THREADPOOL_SIZE: "1" }, stdio: ["ignore", "pipe", "pipe", "pipe", "pipe", "pipe"], timeout: 5000, killSignal: "SIGKILL" });
+  const closed = once(child, "close"); let output = "", errors = "";
+  child.stdout!.on("data", data => { output += data; }); child.stderr!.on("data", data => { errors += data; });
+  const reply = child.stdio[3] as Duplex, requests = (child.stdio[4] as Duplex).pipe(new FrameDecoder());
+  requests.on("data", request => {
+    // Keep the result pipe open: closing an idle reader must not need peer EOF.
+    reply.write(encodeFrame({ version: 1, id: request.id, result: { ok: true, output: "safe" } }));
+  });
+  try {
+    assert.equal((await closed)[0], 0, errors); assert.match(output, /filesystem and close verified/);
+  } finally {
+    requests.destroy(); for (const stream of child.stdio) stream?.destroy();
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await closed;
+  }
+});
+
 // Real inherited descriptors, fake worker, no model/provider/workspace effects.
 for (const mode of ["extra", "code", "exit", "mixed", "missing", "wrong-id", "utf8", "lost", "duplicate", "progress", "preflight", "close"]) {
   test(`native pipe ${mode}: bounded validation fences pending work without replay`, { timeout: 10_000 }, async () => {

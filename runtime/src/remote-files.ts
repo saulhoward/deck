@@ -58,7 +58,7 @@ export class RoutedFiles implements HostFiles {
     for (const host of routes.hosts) for (const fd of [host.readFd, host.writeFd, host.controlFd, ...(host.rexClient ? [host.clientReadFd!, host.clientWriteFd!] : [])]) {
       const stat = fstatSync(fd); if (!stat.isFIFO() && !stat.isSocket()) throw new Error("Invalid native worker pipe");
     }
-    try { for (const host of routes.hosts) { if (host.mcp) this.mcp.add(host.machineId); this.remotes.set(host.machineId, new PipeFiles(host.readFd, host.writeFd, host.controlFd, true)); if (host.rexClient) this.clients.set(host.machineId, host.rexClient); } }
+    try { for (const host of routes.hosts) { if (host.mcp) this.mcp.add(host.machineId); this.remotes.set(host.machineId, new PipeFiles(host.readFd, host.writeFd, host.controlFd)); if (host.rexClient) this.clients.set(host.machineId, host.rexClient); } }
     catch (error) { for (const remote of this.remotes.values()) void remote.close(); throw error; }
   }
   call(binding: Binding, id: string, operation: string, args: NativeArguments, signal?: AbortSignal, onProgress?: (progress: ShellProgress) => void): Promise<FileResult> {

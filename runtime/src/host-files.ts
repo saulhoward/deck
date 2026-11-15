@@ -1,4 +1,3 @@
-import { createReadStream, createWriteStream } from "node:fs";
 import { Socket } from "node:net";
 import { Type } from "@earendil-works/pi-ai";
 import type { Context } from "@earendil-works/chord";
@@ -30,12 +29,13 @@ export class PipeFiles implements HostFiles {
   private failed = false;
   private closing: Promise<void> | undefined;
   private readonly decoder = new FrameDecoder();
-  constructor(readFd: number, writeFd: number, controlFd?: number, evented = false) {
-    // Multiple remote pipes must not consume one blocking libuv filesystem
-    // thread each. uv_pipe-backed Sockets keep these inherited FDs evented.
-    this.reader = evented ? new Socket({ fd: readFd, readable: true, writable: false }) : createReadStream("", { fd: readFd, autoClose: true });
-    this.writer = evented ? new Socket({ fd: writeFd, readable: false, writable: true }) : createWriteStream("", { fd: writeFd, autoClose: true });
-    this.control = controlFd === undefined ? undefined : evented ? new Socket({ fd: controlFd, readable: false, writable: true }) : createWriteStream("", { fd: controlFd, autoClose: true });
+  constructor(readFd: number, writeFd: number, controlFd?: number) {
+    // Even one idle local fs.ReadStream consumes a filesystem worker forever.
+    // Keep all inherited pipes evented so startup hashing, storage and shutdown
+    // cannot starve behind a native read (including with UV_THREADPOOL_SIZE=1).
+    this.reader = new Socket({ fd: readFd, readable: true, writable: false });
+    this.writer = new Socket({ fd: writeFd, readable: false, writable: true });
+    this.control = controlFd === undefined ? undefined : new Socket({ fd: controlFd, readable: false, writable: true });
     const fail = () => { void this.close(); };
     this.control?.on("error", fail);
     this.writer.on("error", fail); this.reader.on("error", fail);
@@ -101,9 +101,9 @@ export class PipeFiles implements HostFiles {
     this.closing = Promise.all(streams.map((stream) => new Promise<void>((resolve) => {
       if (stream.closed) resolve(); else stream.once("close", resolve);
     }))).then(() => {});
-    // Closing the request/control writers wakes Zig, which closes its result writer
-    // after draining. Await all closes before process.exit: fs.read on the inherited
-    // result pipe occupies a libuv thread, and forced exit can otherwise deadlock.
+    // Closing the request/control writers wakes Zig to cancel/drain owned work.
+    // Evented result readers close without waiting for peer EOF. The native
+    // supervisor still joins its workers before releasing the writer lock.
     for (const stream of streams) stream.destroy();
     return this.closing;
   }

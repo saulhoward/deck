@@ -249,7 +249,9 @@ fn run(native: Native, allocator: std.mem.Allocator, options: Options) !void {
     defer allocator.free(result_fd);
     const journal = try std.fs.path.join(allocator, &.{ path, "worker", "operations" });
     defer allocator.free(journal);
-    try std.Io.Dir.cwd().createDirPath(io, journal);
+    // Receipt directories must be private regardless of the operator's umask.
+    // Group-writable defaults also make our own offline backup refuse the state.
+    _ = try dir.createDirPathStatus(io, "worker/operations", .fromMode(0o700));
     const native_executable = try std.process.executablePathAlloc(io, allocator);
     defer allocator.free(native_executable);
     var mcp = if (options.mcp) |path_mcp| try @import("mcp_profiles.zig").Profiles.load(native, path_mcp) else null;

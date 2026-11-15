@@ -7,7 +7,8 @@ import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-work
 import { createRegistry, defineExtension, Harness, type EntryRecord, type ToolExecutionApi, type ToolRegistration } from "@earendil-works/pi-durable";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
-import { bindImplementation, checkCompatibility, defaultImplementation, stampImplementation } from "./compatibility.js";
+import { bindImplementation, checkCompatibility, stampImplementation } from "./compatibility.js";
+import { SUBAGENT_RECOVERY_IMPLEMENTATION } from "./recovery.test.support.js";
 import { ChatDoc } from "./deck.js";
 import { nativeFiles } from "./host-files.js";
 import { foregroundSubagent } from "./subagent.js";
@@ -31,7 +32,7 @@ registry.install(defineExtension({ name: delegation.name, tools: [{ ...tool, exe
   return tool.execute(args, wrapped, context);
 } }] }));
 const storage = await openNodeSqliteStorage(path);
-const implementation = bindImplementation(await defaultImplementation(), true);
+const implementation = bindImplementation(SUBAGENT_RECOVERY_IMPLEMENTATION, true);
 await checkCompatibility(storage, implementation);
 const harness = await Harness.open(storage, { models, registry, env: () => undefined }, context);
 await stampImplementation(harness, implementation);

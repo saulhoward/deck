@@ -254,7 +254,7 @@ Paths in the table are relative to the repository root. Internal adapter methods
 
 ### Pinned tools
 
-Use `nix develop path:.`, not an unrelated system compiler.
+Use `nix develop path:.`, not an unrelated system compiler. On memory-constrained development machines, use `zig build -Dserial=true` to compile the two executables sequentially; `-j1` alone does not prevent their asynchronous compile steps from overlapping on the pinned toolchain.
 
 | Dependency | Pin |
 | --- | --- |
@@ -331,7 +331,7 @@ nix develop path:. -c sh -c '
 '
 ```
 
-The Nix build checks contracts, Zig, TypeScript, and runtime behavior. Its post-install smoke uses a temporary HOME and cwd, with no global Node on PATH. It tests the packaged runtime, native tools, drafts, history, and backup/restore without provider calls.
+The Nix build checks contracts, Zig, TypeScript, and runtime behavior. It runs Zig build jobs and runtime test files serially to avoid exhausting small builders' memory; individual integration tests still exercise concurrent workers and cancellation. No test or production deadline is widened. `npm test` keeps its four-file development default. Fault-injection recovery fixtures use explicit test implementation identities, while native startup and compatibility tests still hash actual code and dependencies. Its post-install smoke uses a temporary HOME and cwd, with no global Node on PATH. It tests the packaged runtime, native tools, drafts, history, and backup/restore without provider calls.
 
 The package installs the Zig executable, compiled runtime, complete locked production npm packages, private Node, and Bash. Complete packages preserve lazy SDK imports and assets. It excludes development dependencies and compiled Deck tests. The wrapper sets `DECK_RUNTIME_ROOT` and `DECK_NODE`. Checkout binaries instead use `runtime/dist` relative to cwd and Node on PATH. `serve --runtime PATH` is an explicit development override.
 
@@ -436,7 +436,7 @@ The hub's `--workers` private registry additionally specifies `listen` on each w
 
 A worker establishes outbound data and control TCP connections to its assigned listener. Both sockets independently verify the actual peer through the local Tailscale daemon. The data challenge/hello pins hub, machine, implementation, capabilities, optional client/socket pair and connection generation; subsequent channel headers bind the same generation and verified peer. Rex workers pair a third independently verified client socket before requests flow. No channel accepts HTTP; task RPC is confined to that optional third channel and hub-side allocation scope. OS-machine authority is not OS-user authentication; the hello fingerprint is a compatibility pin, not hardware attestation.
 
-Each host owns independent inherited native request/result/control pipes and one serialized gate owner. TypeScript routes by the exact saved `machineId`, using evented `uv_pipe` sockets for remote descriptors rather than occupying the filesystem threadpool. No labels, client PATH, default host, or current terminal can retarget a binding. Unregistered/offline hosts return `offline` without sending this attempt; that does not disprove effects from an earlier attempt, including before a hub restart. Remote Rex operations are rejected in both the router and worker unless the exact Rex/client registration was approved. Discovery, allocation, inspection and receipt lookup then use the assigned host's native implementation. The hub selects the registered client path/socket; native allocation checks them against worker config before invoking Rex. Allocation supports only API 8/10/14 and local Unix endpoints. Coordinator forwarding is a distinct API-14 transport; historical API-9/HTTPS probes are not allocation acceptance.
+Each host owns independent inherited native request/result/control pipes and one serialized gate owner. TypeScript routes by the exact saved `machineId`, using evented `uv_pipe` sockets for both local and remote descriptors rather than occupying the filesystem threadpool. An idle local result pipe must not block startup hashing/storage or require peer EOF to close, even with `UV_THREADPOOL_SIZE=1`. No labels, client PATH, default host, or current terminal can retarget a binding. Unregistered/offline hosts return `offline` without sending this attempt; that does not disprove effects from an earlier attempt, including before a hub restart. Remote Rex operations are rejected in both the router and worker unless the exact Rex/client registration was approved. Discovery, allocation, inspection and receipt lookup then use the assigned host's native implementation. The hub selects the registered client path/socket; native allocation checks them against worker config before invoking Rex. Allocation supports only API 8/10/14 and local Unix endpoints. Coordinator forwarding is a distinct API-14 transport; historical API-9/HTTPS probes are not allocation acceptance.
 
 The transport keeps at most 20 in-flight/result slots per host (16 effects plus four progress samples upstream), with 1 MiB frames; it never persists a second execution queue. Connect is bounded to four seconds, handshake frames to 4 KiB/five seconds, and each additional channel pairing to 20 seconds. Network frame reads/writes use absolute five-second deadlines, including partial progress; captures keep the verifier's existing limits. Control heartbeats run independently at one second with a five-second loss threshold. Cancellation uses its own bounded fixed-size records and retains a 16-ID cancellation ring across reconnection. Result backpressure cannot block control delivery. File/progress requests have a 30-second transport deadline; bash has its requested/default timeout plus five seconds. These deadlines establish uncertainty, **not rollback or file-effect drainage**.
 
@@ -823,6 +823,8 @@ Before serving a restored image:
 5. Restore provider access securely. Copied OAuth tokens may be stale; environment-only keys are not backed up.
 
 Hashes detect corruption, not a malicious rewrite of both payload and manifest. Backups are not encrypted. SQLite quick-check is not full Pi semantic validation. This is same-machine offline recovery, not workspace relocation, online backup, exactly-once rollback, or a complete disaster-recovery policy.
+
+See the [startup/recovery review](STARTUP-RECOVERY-REVIEW.md) for the targeted Linux fixes and proposed power-loss durability and bounded-supervision work. Those follow-up protocols are not implemented by the targeted fixes.
 
 ## Change rules
 

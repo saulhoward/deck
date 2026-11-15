@@ -10,6 +10,7 @@ import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider, fauxAssistantMessage, fauxToolCall, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { ChatDoc, DeckRuntime } from "./deck.js";
+import { TASK_RECOVERY_IMPLEMENTATION } from "./recovery.test.support.js";
 function gate() { let release!: () => void; const promise = new Promise<void>((resolve) => { release = resolve; }); return { promise, release }; }
 async function within<T>(promise: Promise<T>): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -18,7 +19,7 @@ async function within<T>(promise: Promise<T>): Promise<T> {
 }
 function setup() {
   const faux = fauxProvider(); const models = createModels(); models.setProvider(faux.provider);
-  return { faux, options: { models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: "host", cwd: "/saved" }, environment: () => undefined, hostFiles: { call: async () => { throw new Error("No native effects expected"); } } } };
+  return { faux, options: { implementation: TASK_RECOVERY_IMPLEMENTATION, models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: "host", cwd: "/saved" }, environment: () => undefined, hostFiles: { call: async () => { throw new Error("No native effects expected"); } } } };
 }
 
 test("model creates on caller binding and messages without waiting; caller stop does not cancel ownerless target", { timeout: 15_000 }, async () => {
