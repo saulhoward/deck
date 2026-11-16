@@ -6,6 +6,7 @@ const Native = @import("native.zig");
 const wire = @import("generated/contracts.zig");
 const storage = @import("private_store.zig");
 const forward = @import("rex_forward.zig");
+const worker_client = @import("worker_client.zig");
 const Mode = enum { create, list, @"resume", drafts, discard, recover };
 const Options = struct { hub: ?[]const u8 = null, local: bool = false, directory: ?[]const u8 = null, rex: ?[]const u8 = null, server: ?[]const u8 = null, port: u16 = 52800, mode: Mode = .create, value: ?[]const u8 = null, confirm: bool = false };
 const Ready = struct { hubId: []const u8, machineId: []const u8 };
@@ -109,10 +110,14 @@ fn connection(native: Native, a: std.mem.Allocator, directory: []const u8) !wire
     const bytes = try @import("mcp_profiles.zig").readPrivate(native, a, try std.fs.path.join(a, &.{ directory, "rex-connection.json" }), 16384);
     return (try wire.parseRexWorkerConnection(a, bytes)).value;
 }
-fn pinned(c: wire.RexWorkerConnection, identity: forward.Identity, port: u16, client: []const u8, implementation: []const u8) bool {
-    return std.mem.eql(u8, c.hostId, identity.host_id) and std.mem.eql(u8, c.account, identity.account) and c.hubPort == port and std.mem.eql(u8, c.rexClient.executable, client) and std.mem.eql(u8, c.implementation, implementation);
+fn sameWorkerScope(c: wire.RexWorkerConnection, identity: forward.Identity, port: u16) bool {
+    return std.mem.eql(u8, c.hostId, identity.host_id) and std.mem.eql(u8, c.account, identity.account) and c.hubPort == port;
 }
-fn workerDirectory(native: Native, a: std.mem.Allocator, root: []const u8, hub: []const u8, executable: []const u8, identity: forward.Identity, port: u16, client: []const u8, cwd: []const u8, cancelled: *std.atomic.Value(bool)) ![]const u8 {
+fn pinned(c: wire.RexWorkerConnection, identity: forward.Identity, port: u16, client: []const u8, implementation: []const u8) bool {
+    return sameWorkerScope(c, identity, port) and std.mem.eql(u8, c.rexClient.executable, client) and std.mem.eql(u8, c.implementation, implementation);
+}
+const WorkerSelection = struct { directory: []const u8, reuse_client: ?[]const u8 = null };
+fn workerDirectory(native: Native, a: std.mem.Allocator, root: []const u8, hub: []const u8, executable: []const u8, identity: forward.Identity, port: u16, client: []const u8, cwd: []const u8, cancelled: *std.atomic.Value(bool)) !WorkerSelection {
     const parent_path = try std.fs.path.join(a, &.{ root, "workers" });
     var parent = try storage.directory(native, parent_path);
     defer parent.close(native.io);
@@ -125,12 +130,21 @@ fn workerDirectory(native: Native, a: std.mem.Allocator, root: []const u8, hub: 
     const path = try std.fs.path.join(a, &.{ parent_path, &key });
     var dir = try storage.directory(native, path);
     defer dir.close(native.io);
-    const implementation = try @import("remote_worker.zig").digest(native);
     const prior = connection(native, a, path) catch |err| switch (err) {
         error.FileNotFound => null,
         else => return err,
     };
-    if (prior) |c| if (!pinned(c, identity, port, client, &implementation) or c.pendingSession) return error.WorkerConflict;
+    if (prior) |c| if (!sameWorkerScope(c, identity, port) or c.pendingSession) return error.WorkerConflict;
+    const implementation = try @import("remote_worker.zig").digest(native);
+    if (prior) |c| {
+        if (!pinned(c, identity, port, client, &implementation)) {
+            if (native.environ.getPosix(worker_client.guard) != null) return error.WorkerClientUnavailable;
+            worker_client.verify(native, a, c.rexClient.executable, c.implementation, &implementation, cancelled) catch return error.WorkerClientUnavailable;
+            // Do not edit pins, signal a PID from metadata or launch a second
+            // daemon. Release this scope's locks before entering its old client.
+            return .{ .directory = path, .reuse_client = c.rexClient.executable };
+        }
+    }
     const writer = storage.lock(native, dir, "writer.lock") catch |err| switch (err) {
         error.ClientAlreadyStarting => null,
         else => return err,
@@ -169,7 +183,7 @@ fn workerDirectory(native: Native, a: std.mem.Allocator, root: []const u8, hub: 
                 try native.io.sleep(.fromMilliseconds(100), .awake);
                 continue;
             };
-            return path;
+            return .{ .directory = path };
         }
         try native.io.sleep(.fromMilliseconds(100), .awake);
     }
@@ -229,7 +243,11 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
             const observed = try forward.identity(native, a, local.executable, local.server, &cancelled);
             same_host = std.mem.eql(u8, remote.value.host_id, observed.value.host_id) and std.mem.eql(u8, remote.value.account, observed.value.account);
         }
-        if (!same_host) worker_path = try workerDirectory(native, a, root, hub, executable, remote.value, o.port, client, cwd, &cancelled);
+        if (!same_host) {
+            const selected_worker = try workerDirectory(native, a, root, hub, executable, remote.value, o.port, client, cwd, &cancelled);
+            if (selected_worker.reuse_client) |saved_client| return worker_client.replace(native, a, saved_client, args);
+            worker_path = selected_worker.directory;
+        }
     }
     const kind: []const u8 = if (worker_path != null) "worker" else "local";
     const endpoint = worker_path orelse port;

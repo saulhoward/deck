@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { createHash } from "node:crypto";
-import { access, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { access, chmod, copyFile, mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { freeHubPort as portPair } from "./hub-port.test.support.js";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { hubCommand } from "./hub-client.js";
 import { validRexUuid, type RexBootstrapRecord } from "./generated/contracts.js";
@@ -49,7 +49,21 @@ for (const remote of [false, true]) test(`API14 isolated ${remote ? "remote-sele
     const status: any = await until(() => hubCommand(port, "status").catch(() => undefined), Boolean);
     const flags = ["--port", String(port), "--rex", rex!, "--server", endpoint(localHome), ...(remote ? ["--hub", endpoint(hubHome)] : ["--local"])];
     const cli = (...extra: string[]) => invoke(deck!, ["agent", ...flags, ...extra]);
-    const launched = await cli(); assert.match(launched, /Task creation Rex session/);
+    // Bind the remote worker to another immutable client path. Later contacts
+    // use the current CLI and must reuse that original client automatically.
+    // An explicit previous Nix package also exercises different native bytes
+    // and a legacy client that has no reuse/handoff support of its own.
+    let original = deck!;
+    if (remote) {
+      if (process.env.DECK_TEST_PREVIOUS_BINARY) original = await realpath(process.env.DECK_TEST_PREVIOUS_BINARY);
+      else {
+        let image = await realpath(deck!);
+        const wrapped = join(dirname(image), ".deck-wrapped");
+        if (await access(wrapped).then(() => true, () => false)) image = wrapped;
+        original = join(root, "original-client"); await copyFile(image, original); await chmod(original, 0o500);
+      }
+    }
+    const launched = await invoke(original, ["agent", ...flags]); assert.match(launched, /Task creation Rex session/);
     const names = (await readdir(join(client, "startups"))).filter(name => name.endsWith(".json") && validRexUuid(name.slice(0, -5)));
     assert.equal(names.length, 1);
     const id = names[0]!.slice(0, -5), recordFile = join(client, "startups", id, "record.json");
@@ -92,7 +106,11 @@ for (const remote of [false, true]) test(`API14 isolated ${remote ? "remote-sele
     assert.match(await cli("--discard", id, "--confirm"), /not stopped\/deleted/);
     await assert.rejects(access(pending), { code: "ENOENT" });
     await access(join(client, "startups", id, "discarded.json"));
+    const connectionBefore = daemon ? await readFile(join(daemon.directory, "rex-connection.json"), "utf8") : undefined;
+    const registryBefore = remote ? await readFile(join(root, "hub", "rex-workers.json"), "utf8") : undefined;
     assert.match(await cli("--list"), new RegExp(task.agentName));
+    if (daemon) assert.equal(await readFile(join(daemon.directory, "rex-connection.json"), "utf8"), connectionBefore);
+    if (remote) assert.equal(await readFile(join(root, "hub", "rex-workers.json"), "utf8"), registryBefore);
     assert.match(await cli("--resume", task.agentName), /reused/); assert.equal((await processState()).child.pid, b.pid);
     if (daemon) assert.equal(JSON.parse(await readFile(join(daemon.directory, "rex-connection.json"), "utf8")).pid, daemon.pid);
     await rexCall(localHome, "send-key", "--session", b.sessionId, "--block", b.blockId, "ctrl+c");

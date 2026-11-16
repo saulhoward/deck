@@ -22,6 +22,14 @@ Two additional Linux enrollment failures were reproduced and repaired:
 
 Validation for this follow-up is separate from the earlier full Nix build above. On Linux, the native suite passed **81 tests with one optional skip**, the two focused native regressions passed in ReleaseSafe as well as Debug, and **45 focused runtime tests passed**. These include isolated API-14 local/remote-selected startup, same-daemon backup/restore reconnect, assigned-worker reads/cancellation, shared contracts, and a default-suite native test holding readiness beyond the existing handshake deadline. Removing the readiness gate reproduces premature disconnection; the old directory handle reproduces the fsync failure. Strict focused TypeScript checking passed. Full-project TypeScript exceeded the constrained 512 MiB heap; a fresh full Nix/package build and macOS/two-machine acceptance were not performed. No live hub or retained operator state was changed.
 
+## Client-update contact follow-up
+
+Automatic startup can now dispatch through the existing worker's verified original client when the invoking client path/build changes. This removes the manual old-Nix-path workaround without changing version-1 pins, receipts, allocations or the worker process. It deliberately retains the old client/UI. Unknown/raw older runtime environments, missing/changed packages, identity drift and unconfirmed session creation still refuse; there is no version-string compatibility assumption, download or metadata repair.
+
+Linux validation passed **87 native tests with one optional skip** and **19 focused runtime tests**, including native verification, the fake-Rex/private-lock refusal regression, and isolated API-14 local/remote create/list/resume. Focused strict TypeScript, contracts and formatting checks passed. The remote test also passed with a real older full Nix package that predates this dispatch code and has a different native digest. The original installed executable fails the new regression with its build/client conflict. This does not establish macOS/two-machine acceptance or a full Nix build for this follow-up. No operator hub, worker or retained state was changed.
+
+**Still unimplemented:** explicit worker protocol/receipt compatibility negotiation and live daemon upgrading. Existing daemons cannot acknowledge a handoff. A future rollout must establish custody of active/accepted/uncertain work, drain admission, preserve identities/allocations/receipts, durably transfer ownership, and fence old connection generations. Failed/unsupported handoff must leave the old worker intact; contact must never replay an effect or overwrite an uncertain receipt. Retaining and dispatching the old client is a safe contact path, not evidence that this protocol exists.
+
 ## Follow-up 1: complete the power-loss durability protocol
 
 **Priority: high. This review does not fix this gap.**

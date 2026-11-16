@@ -486,7 +486,8 @@ pub fn main(init: std.process.Init) void {
                 error.InvalidArguments, error.InvalidHubEndpoint => "deck: invalid agent options or Rex endpoint; use deck agent --help. No fallback used.\n",
                 error.SelectedHubUnavailable => "deck: selected hub/worker unavailable or incompatible; run the matching deck serve on the selected host. No local fallback.\n",
                 error.LocalRexUnavailable => "deck: local Rex unavailable/unsupported; start/update Rex. Task terminals must stay on this machine.\n",
-                error.WorkerConflict => "deck: existing worker identity/build/client differs or session creation is unconfirmed. Inspect it; no worker replaced or state reset.\n",
+                error.WorkerConflict => "deck: existing worker identity differs or session creation is unconfirmed. Inspect it; no worker replaced or state reset.\n",
+                error.WorkerClientUnavailable => "deck: existing worker retained, but its pinned client could not be safely reused. Keep/restore the original immutable package; no worker upgrade, pin rewrite or effect replay.\n",
                 error.WorkerUnavailable => "deck: worker startup/readiness unconfirmed. Any started worker is left intact; no task created and no work replayed.\n",
                 error.BootstrapLaunchUnconfirmed => "deck: task-form terminal creation unconfirmed. Inspect saved startup metadata and Rex; do not blindly launch a duplicate.\n",
                 error.ClientAlreadyStarting => "deck: another launcher is starting this connection; wait for it to finish.\n",
@@ -612,6 +613,7 @@ test {
     _ = @import("rex_forward_test.zig");
     _ = @import("hub_session.zig");
     _ = @import("agent_startup.zig");
+    _ = @import("worker_client.zig");
     _ = @import("agent_form.zig");
     _ = @import("rex_bootstrap.zig");
     _ = @import("worker_test.zig");
