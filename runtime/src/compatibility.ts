@@ -30,6 +30,11 @@ export async function checkCompatibility(storage: Storage, digest: string): Prom
     if (!saved || saved.version !== 1 || typeof saved.value.digest !== "string" || !/^[a-f0-9]{64}$/.test(saved.value.digest)) throw new CompatibilityError(true);
     if (saved.value.digest === digest) return;
   }
+  await requireIdleStorage(storage);
+}
+// Global, canonical drainage check; no selected-chat activity sample or Harness
+// opening (which could normalize/resume work) may stand in for this predicate.
+export async function requireIdleStorage(storage: Storage): Promise<void> {
   for (const status of ["pending", "running", "waiting", "sleeping", "completing"] as const) {
     if ((await storage.scanTasks({ status }, 1, undefined, context)).items.length) throw new CompatibilityError();
   }

@@ -83,6 +83,15 @@ test("automatic enrollment waits for runtime readiness without consuming the reg
     const registry = await readFile(join(state, "rex-workers.json"), "utf8");
     const saved = JSON.parse(registry) as { hubId: string; hosts: RexWorkerRegistration[] };
     assert.equal(saved.hubId, hubId); assert.deepEqual(saved.hosts, [registration]);
+    for (const authority of [{ previousClients: [{ ...registration.rexClient, executable: "/unapproved/deck" }] }, { upgradeId: hubId, upgradeHash: "c".repeat(64) }, { upgradeHash: "c".repeat(64) }]) {
+      const socket = createConnection({ host: "127.0.0.1", port: port + 1 }); sockets.push(socket);
+      await once(socket, "connect");
+      let received = 0; socket.on("data", chunk => { received += chunk.length; });
+      const ended = once(socket, "end", { signal: AbortSignal.timeout(4000) });
+      socket.write(encodeFrame({ ...registration, ...authority }));
+      await ended; assert.equal(received, 0, "worker cannot self-approve predecessor clients or an upgrade"); socket.destroy();
+      assert.equal(await readFile(join(state, "rex-workers.json"), "utf8"), registry);
+    }
     const again = await enroll(registration);
     assert.deepEqual(await again.response, ack); again.socket.destroy();
     assert.equal(await readFile(join(state, "rex-workers.json"), "utf8"), registry);

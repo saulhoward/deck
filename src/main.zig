@@ -24,6 +24,7 @@ const help =
     \\  deck mcp export --config /private/host-profiles.json
     \\  deck mcp probe --config /private/host-profiles.json --profile ID [--workspace ABS]
     \\  deck worker peer|init|identity|run ... (deck worker --help for registration)
+    \\  deck worker upgrade prepare|approve|apply ... (deck worker upgrade --help)
     \\  deck login openai [--directory PATH] [--port 52800]
     \\  deck rex open|reopen|status|inspect --task CHAT_ID [--port 52800]
     \\    [--rex /path/to/rex] [--server unix:///path/to/socket] [--host-id UUID] [--instance-id UUID]
@@ -502,6 +503,13 @@ pub fn main(init: std.process.Init) void {
     if (args.len > 1 and std.mem.eql(u8, args[1], "login")) {
         login(native, allocator, args[2..]) catch |err| {
             std.debug.print("deck: login unavailable ({s}); check initialized --directory and hub --port\n", .{@errorName(err)});
+            std.process.exit(1);
+        };
+        return;
+    }
+    if (args.len > 2 and std.mem.eql(u8, args[1], "worker") and std.mem.eql(u8, args[2], "upgrade")) {
+        @import("worker_upgrade.zig").run(native, args[3..]) catch |err| {
+            std.debug.print("deck: offline worker upgrade refused/unconfirmed ({s}); keep services stopped and retry the same artifact. No process stopped or effect replayed.\n", .{@errorName(err)});
             std.process.exit(1);
         };
         return;

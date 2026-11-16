@@ -149,6 +149,7 @@ fn workerDirectory(native: Native, a: std.mem.Allocator, root: []const u8, hub: 
         error.ClientAlreadyStarting => null,
         else => return err,
     };
+    var launched: ?std.posix.pid_t = null;
     if (writer) |file| {
         file.close(native.io); // Child takes actual exclusion; parent never owns its runtime.
         var env: std.process.Environ.Map = .init(a);
@@ -157,11 +158,13 @@ fn workerDirectory(native: Native, a: std.mem.Allocator, root: []const u8, hub: 
         // Do not set a process group here: the child performs setsid itself.
         var child = try std.process.spawn(native.io, .{ .argv = &.{ client, "worker", "rex", "--detach", "--directory", path, "--hub", hub, "--rex", executable, "--client", client, "--port", try std.fmt.allocPrint(a, "{d}", .{port}) }, .environ_map = &env, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
         Native.closeStreams(native.io, &child);
+        launched = child.id; // Only our child; never a diagnostic PID from disk.
         // Deliberately not killed on timeout/detach: this worker may already
         // own issued effects. Readiness is proven by exclusion plus scoped RPC.
     }
     const start = std.Io.Timestamp.now(native.io, .awake);
     while (start.durationTo(std.Io.Timestamp.now(native.io, .awake)).toMilliseconds() < 30000) {
+        if (launched) |pid| if ((try Native.waitNoHang(pid)).pid != 0) return error.WorkerUnavailable;
         const c = connection(native, a, path) catch |err| switch (err) {
             error.FileNotFound => {
                 try native.io.sleep(.fromMilliseconds(100), .awake);
@@ -176,6 +179,14 @@ fn workerDirectory(native: Native, a: std.mem.Allocator, root: []const u8, hub: 
         };
         if (probe) |file| {
             file.close(native.io);
+            // On a restart, the old record exists before our child has even
+            // authenticated Rex/acquired its writer lock. This is not evidence
+            // of child exit. Wait within the existing readiness budget; never
+            // signal it or mistake an old PID for owned process authority.
+            if (launched != null) {
+                try native.io.sleep(.fromMilliseconds(100), .awake);
+                continue;
+            }
             return error.WorkerUnavailable;
         }
         if (c.hubId != null and !c.pendingSession) {

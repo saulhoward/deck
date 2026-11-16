@@ -62,6 +62,14 @@ pub fn validHello(value: std.json.Value) bool {
 
 pub fn validRexRegistration(value: std.json.Value) bool {
     if (!wire.validRexWorkerRegistration(value) or !validRexClient(value.object.get("rexClient").?) or !ordered(value.object.get("capabilities").?)) return false;
+    if (value.object.contains("upgradeId") != value.object.contains("upgradeHash")) return false;
+    const current = value.object.get("rexClient").?;
+    if (value.object.get("previousClients")) |clients| {
+        for (clients.array.items, 0..) |client, i| {
+            if (!validRexClient(client) or !std.mem.eql(u8, client.object.get("socket").?.string, current.object.get("socket").?.string) or std.mem.eql(u8, client.object.get("executable").?.string, current.object.get("executable").?.string)) return false;
+            for (clients.array.items[0..i]) |other| if (std.mem.eql(u8, other.object.get("executable").?.string, client.object.get("executable").?.string)) return false;
+        }
+    }
     const caps = value.object.get("capabilities").?.array.items;
     if (caps.len != 4 and caps.len != 5) return false;
     if (!std.mem.eql(u8, caps[0].string, "files") or !std.mem.eql(u8, caps[1].string, "bash") or !std.mem.eql(u8, caps[2].string, "rex") or !std.mem.eql(u8, caps[caps.len - 1].string, "launcher")) return false;
@@ -164,6 +172,22 @@ pub const Gate = struct {
 };
 pub fn samePeer(a: wire.TailPeer, b: wire.TailPeer) bool {
     return std.mem.eql(u8, a.nodeId, b.nodeId) and std.mem.eql(u8, a.userId, b.userId);
+}
+
+test "offline upgrade retains predecessor client scopes but never accepts predecessor worker implementations" {
+    const old: wire.WorkerRexClient = .{ .executable = "/old/deck", .socket = "/private/client.sock" };
+    const registration: wire.RexWorkerRegistration = .{ .version = 1, .hubId = "00000000-0000-4000-8000-000000000001", .machineId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .implementation = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", .capabilities = &.{ .files, .bash, .rex, .launcher }, .rexClient = .{ .executable = "/new/deck", .socket = old.socket }, .previousClients = &.{old}, .upgradeId = "00000000-0000-4000-8000-000000000002", .upgradeHash = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" };
+    var gate = Gate.initRex(std.testing.io, registration);
+    const first = try gate.challengeRex(registration.machineId);
+    var hello: wire.RemoteWorkerHello = .{ .version = 1, .hubId = registration.hubId.?, .machineId = registration.machineId, .connectionId = &first.connection, .implementation = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", .capabilities = registration.capabilities, .rexClient = old };
+    try std.testing.expectError(error.IdentityMismatch, gate.acceptRex(first, hello));
+    const second = try gate.challengeRex(registration.machineId);
+    hello.connectionId = &second.connection;
+    hello.implementation = registration.implementation;
+    hello.rexClient = registration.rexClient;
+    try gate.acceptRex(second, hello);
+    try std.testing.expect(!gate.disconnect(first));
+    try std.testing.expect(gate.connected(second));
 }
 
 test "Rex generation gate pins hub/build/client/capabilities without inventing peer attestations" {

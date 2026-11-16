@@ -3,10 +3,12 @@
 import { isAbsolute } from "node:path";
 import { validRexWorkerRegistration, type RexWorkerRegistration } from "./generated/contracts.js";
 export function validRexRegistration(value: unknown): value is RexWorkerRegistration {
-  return validRexWorkerRegistration(value) && validRexClient(value.rexClient) && /^files,bash,rex(,mcp)?,launcher$/.test(value.capabilities.join(","));
+  return validRexWorkerRegistration(value) && validRexClient(value.rexClient) && /^files,bash,rex(,mcp)?,launcher$/.test(value.capabilities.join(",")) &&
+    ((value.upgradeId === undefined) === (value.upgradeHash === undefined)) && (value.previousClients ?? []).every(client => validRexClient(client) && client.socket === value.rexClient.socket && client.executable !== value.rexClient.executable) &&
+    new Set((value.previousClients ?? []).map(client => client.executable)).size === (value.previousClients ?? []).length;
 }
 export function sameRexRegistration(left: RexWorkerRegistration, right: RexWorkerRegistration): boolean {
-  return left.machineId === right.machineId && left.implementation === right.implementation && left.capabilities.join(",") === right.capabilities.join(",") && left.rexClient.executable === right.rexClient.executable && left.rexClient.socket === right.rexClient.socket;
+  return left.machineId === right.machineId && left.implementation === right.implementation && left.capabilities.join(",") === right.capabilities.join(",") && left.rexClient.executable === right.rexClient.executable && left.rexClient.socket === right.rexClient.socket && left.upgradeId === right.upgradeId && left.upgradeHash === right.upgradeHash && JSON.stringify(left.previousClients ?? []) === JSON.stringify(right.previousClients ?? []);
 }
 import { validTaskRelayFrame, type TaskRelayFrame, validWorkerRexClient, type WorkerRexClient, validRemoteRegistry, validRemoteWorkerHello, validTailPeer, type RemoteRegistry, type RemoteWorkerHello, type TailPeer } from "./generated/contracts.js";
 export function validPeer(value: unknown): value is TailPeer {

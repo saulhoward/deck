@@ -75,6 +75,23 @@ test("assigned-host Rex launch pins its approved client/socket; remote commands 
     assert.ok((await f.direct("status", { chatId: f.chatId }, replacement)).ok);
   } finally { await f.close(); }
 });
+test("offline-approved predecessor clients retain only their original allocation authority after a worker upgrade", async () => {
+  const f = await fixture();
+  try {
+    const current = { ...f.client, executable: "/tools/new-deck" };
+    const frame = { connectionId: "a".repeat(64), id: "b".repeat(64), scope: f.scope, body: JSON.stringify({ version: 1, id: randomUUID(), command: "status", args: { chatId: f.chatId }, hubId: f.runtime.hubId }) };
+    const call = async (previous = [f.client], scope = f.scope, assigned = machine) => JSON.parse(await taskClientResponse(f.runtime, assigned, current, { ...frame, scope }, previous));
+    assert.equal((await call([])).ok, false, "new client path alone cannot claim an old allocation");
+    assert.equal((await call()).ok, true);
+    assert.equal((await call([{ ...f.client, socket: "/wrong.sock" }])).ok, false);
+    assert.equal((await call([f.client], { ...f.scope, allocationId: randomUUID() })).ok, false);
+    assert.equal((await call([f.client], f.scope, "c".repeat(32))).ok, false);
+    const count = f.plans.length;
+    await f.open();
+    assert.equal((await call()).ok, false, "explicit reallocation still revokes predecessor scope");
+    assert.equal(f.plans.length, count + 1, "upgrade authority checks themselves never allocate");
+  } finally { await f.close(); }
+});
 test("explicit task targets keep exact host/cwd/title and create once before separate Rex opening", async () => {
   const f = await fixture();
   try {

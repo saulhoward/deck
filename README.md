@@ -90,7 +90,7 @@ deck agent --local             # ignore DECK_HUB_REX_HOST
 
 Selection is `--hub` → `DECK_HUB_REX_HOST` → local. Only authenticated host/account equality permits recognizing a remote spelling as this same host; an unavailable/different remote **never falls back** to a local hub. Rex host access authenticates the forwarding boundary, not knowledge of a URL. There is no direct remote HTTP/Tailscale-socket fallback.
 
-The worker, task terminal and cwd stay on the **invoking machine**. Remote startup registers and reuses a compatible detached native worker automatically. It has receipts and private connection metadata, not inference, a provider store or a Pi database. Closing the launcher/TUI does not stop the worker or task. After a client update, normal commands automatically reuse the worker's verified original full Nix client, including its older UI, and print a notice; you do not need to find/type the old store path. Keep that package installed. Identity conflicts, unconfirmed session creation, missing/changed packages and unsupported wrappers still refuse. This is client reuse, not live worker upgrading or compatibility negotiation; it changes no pins and replaces no daemon. An older pinned client retains its compiled Rex checks, so installing a newer Deck profile alone does not update that client's policy. Automatic enrollment has eight pinned worker slots; it is not automatic worker migration/retirement. Worker-local MCP configuration still uses the explicit advanced setup below; automatic enrollment advertises files/bash/Rex/launcher, not MCP.
+The worker, task terminal and cwd stay on the **invoking machine**. Remote startup registers and reuses a compatible detached native worker automatically. It has receipts and private connection metadata, not inference, a provider store or a Pi database. Closing the launcher/TUI does not stop the worker or task. After a client update, normal commands automatically reuse the worker's verified original full Nix client, including its older UI, and print a notice; you do not need to find/type the old store path. Keep that package installed. Identity conflicts, unconfirmed session creation, missing/changed packages and unsupported wrappers still refuse. This is client reuse, not live worker upgrading or compatibility negotiation; it changes no pins and replaces no daemon. An older pinned client retains its compiled Rex checks, so installing a newer Deck profile alone does not update that client's policy. Use the [checked offline worker transition](#upgrade-an-automatic-worker) to adopt the new worker/client pair, including from a legacy daemon. Automatic enrollment has eight pinned worker slots; it is not automatic worker migration/retirement. Worker-local MCP configuration still uses the explicit advanced setup below; automatic enrollment advertises files/bash/Rex/launcher, not MCP.
 
 The form shows the cwd and requires a nonblank **Problem** (2,048 UTF-8 bytes maximum). **Description** is optional (8,192 bytes); omitted and explicitly empty are distinct. Enter moves between fields/buttons; Shift-Enter or Insert-mode Ctrl-J inserts a newline. Ctrl-E toggles description presence. Choose **Create & start**, or press Ctrl-S, to authorize creation and initial input. Paste is literal. The problem is saved exactly as the brief and initial input; the display title is derived separately.
 
@@ -450,6 +450,35 @@ deck restore --from /path/to/new-backup --directory /path/to/new-state
 Destination paths must not exist; their parents must exist. These commands do not stop or resume work. Backup includes Pi state, config, published native receipts and the hub's automatic-worker registration pins (`rex-workers.json`). It excludes the workspace, runtime, client drafts/startup metadata, detached/remote worker state and Rex objects. Keep worker configuration/receipts and client recovery files separately; the hub archive cannot replace them. Stored credentials are excluded unless you add `--include-credentials`; environment-only keys are never copied.
 
 Restore keeps identities and workspace bindings. Do not run source and restored copies as separate hubs. An old backup can forget later effects without undoing them. Reconcile that difference before serving or retrying drafts. See [recovery and backup details](docs/DEVELOPER.md#recovery-and-backup).
+
+### Upgrade an automatic worker
+
+`deck worker upgrade` provides a **checked offline transition**, not a live rolling upgrade. It supports the automatic files/bash/Rex/launcher worker, including legacy daemons without a handoff endpoint. Normal `agent` commands still reuse a pinned client; they never silently replace its worker.
+
+1. Finish or cancel unsubmitted task-creation forms, drain **all hub work**, stop the hub and affected worker through their actual service/process owners, and back up both recovery domains. This transition does not migrate unclaimed form/bootstrap intents. Do not signal a PID merely because it appears in connection metadata. Keep both services stopped throughout the following steps; the commands acquire the actual local writer lock but do not remotely stop or lease either service.
+2. On the worker, use the **new full Deck package** to prepare a private plan:
+   ```sh
+   deck worker upgrade prepare --directory /absolute/worker-state \
+     --output /private/transfer/plan.json
+   ```
+   This is the existing `client/workers/<scope-hash>` directory containing `config.json`, `rex-connection.json` and `operations`, **not** the hub state or the client root. Nothing is initialized or reset. The replacement executable must be canonical and not group/other-writable.
+3. Copy the plan through your trusted channel to the hub. With the new full Deck package installed there, approve it while the hub is offline:
+   ```sh
+   deck worker upgrade approve --directory /absolute/hub-state \
+     --from /private/transfer/plan.json --output /private/transfer/approval.json --confirm
+   ```
+   Approval checks canonical hub identity and **all** pending tasks/submissions through a disposable SQLite snapshot. It does not open a Harness, migrate the original Pi store, or resume anything. It commits the exact new registration before publishing the approval.
+4. Copy the approval back and apply using the **same replacement package** that prepared the plan:
+   ```sh
+   deck worker upgrade apply --directory /absolute/worker-state \
+     --from /private/transfer/approval.json --confirm
+   ```
+   Apply rechecks identity, original connection metadata and exact receipt inventory. Only the implementation/client pins change; machine ID, hub/account/port, transport session, socket and receipts remain. Accepted-without-result receipts stay uncertain.
+5. After successful apply, restart the hub with the upgraded package, then run your usual `deck agent --hub ... --list` on the worker (or restart its service with the approved client). New task forms use the new client. Existing allocated terminals retain their original scope and UI; keep their original packages available.
+
+Transfer directories must already exist, be canonical and owner-only (`0700`); artifacts are private (`0600`) and must remain outside service state. They contain private connection metadata, not a remote attestation or permission to skip an operator's review. No package downloads, Rex installation, process kills, automatic rollback, receipt edits or effect replay occur.
+
+After a lost acknowledgement or partial failure, keep services stopped and retry the **same plan/approval**. Hub approval and worker apply are individually durable/idempotent, not a distributed atomic transaction. Do not delete metadata to “start over.” Changes since preparation, an uncertain session, unfinished hub work, unsupported formats or more than eight distinct predecessor client paths refuse. Old hub binaries may reject the new registration metadata: restart the upgraded hub, not an uncoordinated rollback. Explicit live drain/handoff and automatic rolling replacement remain future work.
 
 ## Register a files/bash worker
 

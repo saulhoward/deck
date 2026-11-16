@@ -1,5 +1,7 @@
 {
   "bases": {
+    "RexWorkerRegistration": { "version": 1, "machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "implementation": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "capabilities": ["files", "bash", "rex", "launcher"], "rexClient": { "executable": "/tools/new-deck", "socket": "/private/worker.sock" }, "previousClients": [{ "executable": "/tools/old-deck", "socket": "/private/worker.sock" }], "upgradeId": "00000000-0000-4000-8000-000000000001", "upgradeHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+    "RexWorkerUpgrade": { "version": 1, "kind": "prepared", "id": "00000000-0000-4000-8000-000000000001", "machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "configHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "receiptsHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "before": { "version": 1, "server": "https://hub.example", "hostId": "00000000-0000-4000-8000-000000000001", "account": "test", "executable": "/tools/rex", "hubId": "00000000-0000-4000-8000-000000000001", "hubPort": 52800, "sessionId": "session:00000000-0000-4000-8000-000000000001", "pid": 42, "pendingSession": false, "rexClient": { "executable": "/tools/old-deck", "socket": "/private/worker.sock" }, "implementation": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "implementation": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "client": { "executable": "/tools/new-deck", "socket": "/private/worker.sock" } },
     "RexRuntimeReady": { "kind": "ready", "hubId": "00000000-0000-4000-8000-000000000001" },
     "McpGrantArgs": {"chatId":"1","expectedRevision":0,"profiles":[]},
     "McpCallPlan": {"version":1,"profileId":"counter","revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tool":"counter","schemaHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","conversationId":"1","taskMachineId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","grantRevision":1,"argumentsJSON":"{}"},
@@ -135,6 +137,16 @@
     }
   },
   "cases": [
+    { "name": "offline worker upgrade plan", "schema": "RexWorkerUpgrade", "valid": true },
+    { "name": "offline worker upgrade approval", "schema": "RexWorkerUpgrade", "set": { "kind": "approved" }, "valid": true },
+    { "name": "upgrade requires receipt evidence", "schema": "RexWorkerUpgrade", "remove": ["receiptsHash"], "valid": false },
+    { "name": "upgrade requires expected connection", "schema": "RexWorkerUpgrade", "remove": ["before"], "valid": false },
+    { "name": "upgrade requires transition identity", "schema": "RexWorkerUpgrade", "set": { "id": "label" }, "valid": false },
+    { "name": "upgrade has no force option", "schema": "RexWorkerUpgrade", "set": { "force": true }, "valid": false },
+    { "name": "unknown upgrade protocol refuses", "schema": "RexWorkerUpgrade", "set": { "version": 2 }, "valid": false },
+    { "name": "registered historical client bounds", "schema": "RexWorkerRegistration", "valid": true },
+    { "name": "legacy registration remains valid", "schema": "RexWorkerRegistration", "remove": ["previousClients", "upgradeId", "upgradeHash"], "valid": true },
+    { "name": "historical clients are bounded", "schema": "RexWorkerRegistration", "repeatField": "previousClients", "repeatItems": 9, "valid": false },
     { "name": "automatic runtime ready", "schema": "RexRuntimeReady", "valid": true },
     { "name": "runtime ready needs kind", "schema": "RexRuntimeReady", "remove": ["kind"], "valid": false },
     { "name": "registration ack is not readiness", "schema": "RexRuntimeReady", "set": { "kind": "registered" }, "valid": false },

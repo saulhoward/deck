@@ -17,7 +17,7 @@ import { responseFrame } from "./responses.js";
 const allowed = new Set(["status", "history", "activity", "progress", "instruction_status", "model_settings", "set_model_settings", "rex_status", "rex_inspect", "rex_startup", "admit", "stop", "import_instructions"]);
 // rex_open is deliberately hub-controlled: replacement revokes the old client's
 // allocation. A terminal cannot manufacture another terminal's authority.
-export async function taskClientResponse(runtime: DeckRuntime, machineId: string, client: WorkerRexClient, frame: TaskRelayFrame): Promise<string> {
+export async function taskClientResponse(runtime: DeckRuntime, machineId: string, client: WorkerRexClient, frame: TaskRelayFrame, previousClients: readonly WorkerRexClient[] = []): Promise<string> {
   if (!validWorkerFrame(frame) || !frame.scope || frame.launcher) throw new Error("Invalid task authority");
   const request: unknown = JSON.parse(frame.body);
   if (!validClientRequest(request)) throw new Error("Invalid task command");
@@ -35,7 +35,7 @@ export async function taskClientResponse(runtime: DeckRuntime, machineId: string
           !doc || doc.allocationId !== scope.allocationId || task?.kind !== REX_KIND || task.conversationId !== chat.id ||
           input?.binding.machineId !== machineId || input.binding.cwd !== binding.cwd || !validRexAllocationPlan(input.plan) ||
           input.plan.hubId !== scope.hubId || input.plan.chatId !== scope.chatId || input.plan.allocationId !== scope.allocationId ||
-          input.plan.client !== client.executable || input.plan.workerSocket !== client.socket ||
+          ![client, ...previousClients].some(approved => input.plan.client === approved.executable && input.plan.workerSocket === approved.socket) ||
           (doc.binding && doc.binding.blockId !== scope.blockId) || (doc.startup && doc.startup.blockId !== scope.blockId)) refuse();
       if (request.command === "rex_startup" && (args.allocationId !== scope.allocationId || args.blockId !== scope.blockId)) refuse();
       if (!["status", "history", "rex_startup"].includes(request.command) && doc?.startup?.blockId !== scope.blockId) refuse();
@@ -46,7 +46,7 @@ export async function taskClientResponse(runtime: DeckRuntime, machineId: string
   catch (error) { response = { version: 1, id: request.id, ok: false, error: { code: error instanceof DeckError ? error.code : "runtime_failed", message: error instanceof DeckError ? error.message : "Task command failed; outcome unconfirmed" } }; }
   return responseFrame(response, request).subarray(4).toString("utf8");
 }
-type ClientTarget = { machineId: string; client: WorkerRexClient; launcher: boolean };
+type ClientTarget = { machineId: string; client: WorkerRexClient; launcher: boolean; previousClients?: readonly WorkerRexClient[] };
 export function serveWorkerClients(runtime: DeckRuntime, machineId: string, client: WorkerRexClient, readFd: number, writeFd: number, launcher = false) {
   return serveClients(runtime, readFd, writeFd, { machineId, client, launcher });
 }
@@ -72,16 +72,16 @@ function serveClients(runtime: DeckRuntime, readFd: number, writeFd: number, tar
         if (!target) {
           if (!register || !validRexRegistrationFrame(raw) || !validRexRegistration(raw.registration) || raw.registration.hubId !== undefined && raw.registration.hubId !== runtime.hubId) throw new Error("Invalid native registration");
           register({ ...raw.registration, hubId: runtime.hubId });
-          target = { machineId: raw.registration.machineId, client: raw.registration.rexClient, launcher: true };
+          target = { machineId: raw.registration.machineId, client: raw.registration.rexClient, launcher: true, previousClients: raw.registration.previousClients ?? [] };
           await new Promise<void>((resolve, reject) => writer.write(encodeFrame({ kind: "registered", hubId: runtime.hubId }), error => error ? reject(error) : resolve()));
           continue;
         }
-        const { machineId, client, launcher } = target;
+        const { machineId, client, launcher, previousClients } = target;
         if (!validWorkerFrame(raw) || pending.size >= 8) throw new Error();
         const key = `${raw.connectionId}:${raw.id}`; if (pending.has(key)) throw new Error(); pending.add(key);
         void (async () => {
           try {
-            const body = raw.launcher ? await launcherResponse(runtime, machineId, launcher, raw) : await taskClientResponse(runtime, machineId, client, raw);
+            const body = raw.launcher ? await launcherResponse(runtime, machineId, launcher, raw) : await taskClientResponse(runtime, machineId, client, raw, previousClients);
             if (closed) return;
             let frame: Buffer;
             try { frame = encodeFrame({ ...raw, body }); }

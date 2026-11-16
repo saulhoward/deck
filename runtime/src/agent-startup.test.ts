@@ -7,6 +7,7 @@ import { freeHubPort as portPair } from "./hub-port.test.support.js";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { hubCommand } from "./hub-client.js";
+import { taskCommand, taskScope } from "./task-client.js";
 import { validRexUuid, type RexBootstrapRecord } from "./generated/contracts.js";
 const deck = process.env.DECK_TEST_BINARY, rex = process.env.DECK_TEST_REX_FORWARD;
 async function until<T>(read: () => Promise<T>, check: (value: T) => boolean): Promise<T> {
@@ -20,7 +21,7 @@ async function stop(child: ChildProcess | undefined) {
   const closed = once(child, "close"); child.kill("SIGTERM"); const timer = setTimeout(() => child.kill("SIGKILL"), 6000);
   try { await closed; } finally { clearTimeout(timer); }
 }
-for (const remote of [false, true]) test(`API14+ isolated ${remote ? "remote-selected" : "local"} agent: same-block create/start, exact brief, detach/list/resume${remote ? " and detached worker reuse" : ""}`, { skip: !deck || !rex, timeout: 100000 }, async () => {
+for (const { remote, upgrading } of [{ remote: false, upgrading: false }, { remote: true, upgrading: false }, { remote: true, upgrading: true }]) test(`API14+ isolated ${upgrading ? "remote-upgrade" : remote ? "remote-selected" : "local"} agent: same-block create/start, exact brief, detach/list/resume${remote ? " and detached worker reuse" : ""}`, { skip: !deck || !rex, timeout: 100000 }, async () => {
   const root = await realpath(await mkdtemp("/tmp/deck-agent-"));
   const work = join(root, "worker-work"), hubWork = join(root, "hub-work"), client = join(root, "client"), localHome = join(root, "local"), hubHome = remote ? join(root, "remote") : localHome;
   for (const path of new Set([work, hubWork, localHome, hubHome, join(root, "bin")])) await mkdir(path);
@@ -48,7 +49,8 @@ for (const remote of [false, true]) test(`API14+ isolated ${remote ? "remote-sel
     hub.stdout!.resume(); hub.stderr!.on("data", b => { errors = (errors + String(b)).slice(-8192); });
     const status: any = await until(() => hubCommand(port, "status").catch(() => undefined), Boolean);
     const flags = ["--port", String(port), "--rex", rex!, "--server", endpoint(localHome), ...(remote ? ["--hub", endpoint(hubHome)] : ["--local"])];
-    const cli = (...extra: string[]) => invoke(deck!, ["agent", ...flags, ...extra]);
+    let activeClient = deck!;
+    const cli = (...extra: string[]) => invoke(activeClient, ["agent", ...flags, ...extra]);
     // Bind the remote worker to another immutable client path. Later contacts
     // use the current CLI and must reuse that original client automatically.
     // An explicit previous Nix package also exercises different native bytes
@@ -97,6 +99,8 @@ for (const remote of [false, true]) test(`API14+ isolated ${remote ? "remote-sel
     assert.equal(allocated.status, "allocated"); assert.equal(allocated.binding.blockId, b.blockId); assert.equal(allocated.binding.sessionId, b.sessionId);
     assert.equal((await rexJson(localHome, "session", "ls", "--json", "--short=false")).sessions.length, 1, "adoption did not create a second session");
     await until(() => access(join(client, "startups", `${id}.json`)).then(() => true, () => false), exists => !exists);
+    let reopened: any = allocated;
+    if (!upgrading) {
     // Inject the crash boundary where the form completed and removed its index
     // but the original launcher never cleared its durable creation fence.
     const scope = createHash("sha256").update(JSON.stringify({ hubId: record.hubId, machineId: record.machineId })).digest("hex");
@@ -116,14 +120,63 @@ for (const remote of [false, true]) test(`API14+ isolated ${remote ? "remote-sel
     await rexCall(localHome, "send-key", "--session", b.sessionId, "--block", b.blockId, "ctrl+c");
     await until(processState, p => !p.child && !!p.last_exit);
     assert.match(await cli("--resume", task.agentName), /admitted/);
-    const reopened: any = await until(() => hubCommand(port, "rex_status", { chatId: task.chatId }, status.hubId), (s: any) => s.status === "allocated" && s.binding.blockId !== b.blockId);
+    reopened = await until(() => hubCommand(port, "rex_status", { chatId: task.chatId }, status.hubId), (s: any) => s.status === "allocated" && s.binding.blockId !== b.blockId);
     assert.equal(reopened.binding.sessionId, b.sessionId);
     await new Promise(r => setTimeout(r, 500));
     assert.equal((await hubCommand(port, "list_chats", {}, status.hubId) as any).items.length, 2);
     assert.equal((await hubCommand(port, "history", { chatId: task.chatId }, status.hubId) as any).items.filter((entry: any) => entry.kind === "deck.input").length, 1, "resume never replays initial input");
+    }
     if (daemon) {
       assert.equal(JSON.parse(await readFile(join(daemon.directory, "rex-connection.json"), "utf8")).pid, daemon.pid);
       const hosts: any = await hubCommand(port, "list_hosts", {}, status.hubId); assert.equal(hosts.items.find((h: any) => h.machineId === record.machineId).connection, "connected");
+      if (upgrading) {
+      // A legacy daemon cannot acknowledge a handoff. Exercise the explicit
+      // offline transition only on these test-owned services, after work settles.
+      for (const chatId of [String(status.chatId), task.chatId]) if (chatId !== "undefined") await until(() => hubCommand(port, "activity", { chatId }, status.hubId), (a: any) => !a.busy && a.queued === 0);
+      await stop(hub); hub = undefined;
+      const command = await invoke("/bin/ps", ["-p", String(daemon.pid), "-o", "command="]);
+      assert.ok(command.includes(daemon.directory) && command.includes("worker rex --detach"));
+      process.kill(daemon.pid, "SIGTERM");
+      await until(() => invoke("/bin/ps", ["-p", String(daemon!.pid), "-o", "stat="]).catch(() => ""), state => !state.trim() || state.trim().startsWith("Z"));
+      const connectionFile = join(daemon.directory, "rex-connection.json"), beforeUpgrade = JSON.parse(await readFile(connectionFile, "utf8"));
+      const workerIdentity = await readFile(join(daemon.directory, "config.json"), "utf8");
+      const operations = join(daemon.directory, "operations");
+      await writeFile(join(operations, "900000000.json"), JSON.stringify({ hash: "a".repeat(64), result: null }), { mode: 0o600 });
+      const retained = await Promise.all((await readdir(operations)).sort().map(async name => [name, await readFile(join(operations, name), "utf8")] as const));
+      // Checkout outputs may be group-writable under the builder's umask.
+      // Approve only an immutable private copy, not a weakened executable check.
+      let replacement = await realpath(deck!);
+      if (!replacement.startsWith("/nix/store/")) {
+        replacement = join(root, "replacement-client"); await copyFile(deck!, replacement); await chmod(replacement, 0o500);
+      }
+      const plan = join(root, "upgrade-plan.json"), approval = join(root, "upgrade-approval.json");
+      await invoke(replacement, ["worker", "upgrade", "prepare", "--directory", daemon.directory, "--output", plan]);
+      await invoke(deck!, ["worker", "upgrade", "approve", "--directory", join(root, "hub"), "--from", plan, "--output", approval, "--confirm"], work, hubEnv);
+      await invoke(replacement, ["worker", "upgrade", "apply", "--directory", daemon.directory, "--from", approval, "--confirm"]);
+      activeClient = replacement;
+      const applied = JSON.parse(await readFile(connectionFile, "utf8"));
+      assert.equal(applied.rexClient.executable, replacement); assert.equal(applied.sessionId, beforeUpgrade.sessionId); assert.equal(applied.hubId, beforeUpgrade.hubId);
+      assert.equal(await readFile(join(daemon.directory, "config.json"), "utf8"), workerIdentity);
+      const approved = JSON.parse(await readFile(join(root, "hub", "rex-workers.json"), "utf8")).hosts[0];
+      assert.deepEqual(approved.previousClients, [beforeUpgrade.rexClient]);
+      hub = spawn(deck!, ["serve", "--mock", "--directory", join(root, "hub"), "--port", String(port)], { env: hubEnv, cwd: hubWork });
+      hub.stdout!.resume(); hub.stderr!.on("data", b => { errors = (errors + String(b)).slice(-8192); });
+      await until(() => hubCommand(port, "status").catch(() => undefined), Boolean);
+      assert.match(await cli("--list"), new RegExp(task.agentName));
+      const restarted = JSON.parse(await readFile(connectionFile, "utf8")); assert.notEqual(restarted.pid, daemon.pid); daemon.pid = restarted.pid;
+      assert.equal(restarted.sessionId, beforeUpgrade.sessionId);
+      assert.match(await cli("--resume", task.agentName), /reused/, "upgrade does not replace the old allocated terminal");
+      assert.deepEqual((await hubCommand(port, "rex_status", { chatId: task.chatId }, status.hubId) as any).binding, reopened.binding);
+      const claimed = JSON.parse(await readFile(recordFile, "utf8")) as RexBootstrapRecord;
+      const oldScope = taskScope(record.hubId, task.chatId, claimed.claim!.allocationId, b.blockId);
+      assert.deepEqual((await taskCommand(daemon.socket, oldScope, "status", { chatId: task.chatId }, record.hubId) as any).binding, taskStatus.binding, "old allocated terminal retains its exact task authority");
+      for (const [name, bytes] of retained) assert.equal(await readFile(join(operations, name), "utf8"), bytes, name);
+      assert.match(await cli(), /Task creation Rex session/);
+      const freshId = (await readdir(join(client, "startups"))).find(name => name.endsWith(".json") && validRexUuid(name.slice(0, -5)))!.slice(0, -5);
+      const fresh = JSON.parse(await readFile(join(client, "startups", freshId, "record.json"), "utf8")) as RexBootstrapRecord;
+      assert.equal(fresh.client, replacement); assert.equal(fresh.machineId, record.machineId);
+      assert.equal((await hubCommand(port, "history", { chatId: task.chatId }, status.hubId) as any).items.filter((entry: any) => entry.kind === "deck.input").length, 1);
+      }
     }
   } catch (error) {
     let screen = "";
@@ -140,6 +193,8 @@ for (const remote of [false, true]) test(`API14+ isolated ${remote ? "remote-sel
       }
     }
     if (daemon) {
+      const latest = JSON.parse(await readFile(join(daemon.directory, "rex-connection.json"), "utf8").catch(() => "null"));
+      if (latest?.pid && latest.rexClient?.socket === daemon.socket) daemon.pid = latest.pid;
       const command = await invoke("/bin/ps", ["-p", String(daemon.pid), "-o", "command="], work).catch(() => "");
       if (command.includes(daemon.directory) && command.includes("worker rex --detach")) { process.kill(daemon.pid, "SIGTERM"); await new Promise(r => setTimeout(r, 1000)); }
     }

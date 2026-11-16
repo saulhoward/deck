@@ -85,7 +85,7 @@
     "RexWorkerRegistration": {
       "description": "Automatic registration over a Rex-authenticated loopback tunnel. Identity is internal; no caller-supplied Tailscale attestation. Capabilities/client configuration are pinned exactly.",
       "type": "object", "additionalProperties": false,
-      "properties": { "version": { "const": 1 }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "implementation": { "$ref": "#/$defs/Sha256" }, "capabilities": { "$ref": "#/$defs/WorkerCapabilities" }, "rexClient": { "$ref": "#/$defs/WorkerRexClient" }, "hubId": { "$ref": "#/$defs/RexUuid" } },
+      "properties": { "version": { "const": 1 }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "implementation": { "$ref": "#/$defs/Sha256" }, "capabilities": { "$ref": "#/$defs/WorkerCapabilities" }, "rexClient": { "$ref": "#/$defs/WorkerRexClient" }, "hubId": { "$ref": "#/$defs/RexUuid" }, "previousClients": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/WorkerRexClient" } }, "upgradeId": { "$ref": "#/$defs/RexUuid" }, "upgradeHash": { "$ref": "#/$defs/Sha256" } },
       "required": ["version", "machineId", "implementation", "capabilities", "rexClient"]
     },
     "RexWorkerRegistry": {
@@ -95,6 +95,12 @@
     "RexWorkerConnection": {
       "type": "object", "additionalProperties": false,
       "properties": { "version": { "const": 1 }, "server": { "type": "string", "minLength": 1, "maxLength": 4096 }, "hostId": { "$ref": "#/$defs/RexUuid" }, "account": { "type": "string", "minLength": 1, "maxLength": 200 }, "executable": { "type": "string", "minLength": 1, "maxLength": 4096 }, "hubId": { "$ref": "#/$defs/RexUuid" }, "hubPort": { "type": "integer", "minimum": 1, "maximum": 65535 }, "sessionId": { "$ref": "#/$defs/RexSessionId" }, "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 }, "pendingSession": { "type": "boolean" }, "rexClient": { "$ref": "#/$defs/WorkerRexClient" }, "implementation": { "$ref": "#/$defs/Sha256" } }, "required": ["version", "server", "hostId", "account", "executable", "hubPort", "pendingSession", "rexClient", "implementation", "pid"]
+    },
+    "RexWorkerUpgrade": {
+      "description": "Explicit offline operator transfer, not a live handoff or remote attestation. Only implementation/client pins change; retained identity and receipts stay in place.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "version": { "const": 1 }, "kind": { "enum": ["prepared", "approved"] }, "id": { "$ref": "#/$defs/RexUuid" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "configHash": { "$ref": "#/$defs/Sha256" }, "receiptsHash": { "$ref": "#/$defs/Sha256" }, "before": { "$ref": "#/$defs/RexWorkerConnection" }, "implementation": { "$ref": "#/$defs/Sha256" }, "client": { "$ref": "#/$defs/WorkerRexClient" } },
+      "required": ["version", "kind", "id", "machineId", "configHash", "receiptsHash", "before", "implementation", "client"]
     },
     "RexEnrollmentAck": {
       "type": "object", "additionalProperties": false,

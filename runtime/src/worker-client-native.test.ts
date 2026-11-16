@@ -69,6 +69,16 @@ test("new client reuses the verified original client without changing worker ide
     assert.equal(await readFile(join(worker, "operations", "1.json"), "utf8"), uncertain);
     assert.equal(holder.exitCode, null); assert.equal(holder.signalCode, null);
     const count = commands.length;
+    // Upgrade commands take the actual writer lock before parsing artifacts,
+    // hashing receipts or considering pins. A metadata PID is never signalled.
+    for (const mode of ["prepare", "approve", "apply"]) {
+      const args = ["worker", "upgrade", mode, "--directory", worker, ...(mode !== "prepare" ? ["--from", join(root, "missing-plan.json"), "--confirm"] : []), ...(mode !== "apply" ? ["--output", join(root, "new-plan.json")] : [])];
+      const refused = await new Promise<{ ok: boolean; stderr: string }>(done => execFile(native, args, { env, timeout: 5000 }, (error, _stdout, stderr) => done({ ok: !error, stderr })));
+      assert.equal(refused.ok, false); assert.match(refused.stderr, /WorkerUpgradeRequiresOffline/);
+      assert.equal(await readFile(connectionFile, "utf8"), JSON.stringify(connection));
+      assert.equal(holder.exitCode, null); assert.equal(holder.signalCode, null);
+      await assert.rejects(access(join(root, "new-plan.json")), { code: "ENOENT" });
+    }
     // Revision checks still precede dispatch or a launcher request. Malformed
     // versions do not become proof of support for an older API.
     for (const revision of [0, 13, -1, 16.5, "16", null]) {

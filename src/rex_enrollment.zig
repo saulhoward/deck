@@ -188,13 +188,17 @@ pub const Hub = struct {
         const temp = temporary.allocator();
         const raw = (try std.json.parseFromSlice(std.json.Value, temp, bytes, .{})).value;
         if (!trust.validRexRegistration(raw)) return error.InvalidWorkerRegistration;
-        const incoming = (try wire.parseRexWorkerRegistration(temp, bytes)).value;
+        var incoming = (try wire.parseRexWorkerRegistration(temp, bytes)).value;
+        // Historical client authority is installed only by the offline hub
+        // operator. A connecting worker may never extend its own allowlist.
+        if (incoming.previousClients != null or incoming.upgradeId != null or incoming.upgradeHash != null) return error.InvalidWorkerRegistration;
         if (std.mem.eql(u8, incoming.machineId, self.local_machine)) return error.InvalidWorkerRegistration;
         if (incoming.hubId) |expected| if (self.hub_id) |actual| if (!std.mem.eql(u8, expected, actual)) return error.HubIdentityChanged;
         var selected: ?*Slot = null;
         for (self.slots.items) |*slot| if (slot.registration) |registered| {
             if (std.mem.eql(u8, registered.machineId, incoming.machineId)) {
                 if (!trust.sameRexRegistration(registered, incoming)) return error.RegistrationMismatch;
+                incoming = registered;
                 selected = slot;
                 break;
             }
@@ -227,7 +231,7 @@ pub const Hub = struct {
             const alloc = self.arena.allocator();
             // Generated parsers may borrow string slices from the encoded body.
             // The connection buffer is freed below; retain an owned copy first.
-            const retained = try alloc.dupe(u8, bytes);
+            const retained = try std.json.Stringify.valueAlloc(alloc, incoming, .{});
             var registration = (try wire.parseRexWorkerRegistration(alloc, retained)).value;
             registration.hubId = try alloc.dupe(u8, ack.hubId);
             self.hub_id = registration.hubId;
