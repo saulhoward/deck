@@ -87,6 +87,18 @@ test("TUI view budget preserves newest answers and follow-ups after large tool r
   } finally { await f.close(); }
 });
 
+test("TUI displays reported thinking counts without exposing reasoning or changing history", async () => {
+  const f = await fixture(1);
+  try {
+    f.retained.at(-1)!.model = [{ role: "assistant", content: [{ type: "thinking", thinking: "PRIVATE_REASONING", thinkingSignature: "PRIVATE_SIGNATURE", redacted: true }, { type: "text", text: answer }], usage: { reasoning: 27, output: 50 }, stopReason: "stop" }];
+    const original = JSON.stringify(f.retained), page = await f.act("poll");
+    bounded(page);
+    assert.match(page.entries.at(-1)!.text, /\[thinking: 27 tokens\]/);
+    assert.doesNotMatch(JSON.stringify(page), /PRIVATE_REASONING|PRIVATE_SIGNATURE/);
+    assert.equal(JSON.stringify(f.retained), original);
+  } finally { await f.close(); }
+});
+
 test("TUI view budget cannot hide a retained generation failure", async () => {
   const f = await fixture();
   try {
@@ -138,7 +150,7 @@ test("real PTY: large retained tool output cannot hide the latest answer or a ne
     child = spawn("python3", [driver, resolve(binary!), "agent", "--tui", "--port", String(f.port)], { env: { ...f.local.env, DECK_NODE: process.execPath } });
     closed = once(child, "close"); let output = "", errors = "";
     child.stdout!.on("data", chunk => { output += String(chunk); }); child.stderr!.on("data", chunk => { errors += String(chunk); });
-    child.stdin!.end(JSON.stringify([{ wait: answer }, { keys: "What happened?" }, { keys: "\r" }, { wait: "Input admitted" }, { wait: followup }, { keys: "\x1b" }, { keys: ":q\r" }]));
+    child.stdin!.end(JSON.stringify([{ wait: answer }, { wait: "output truncated after 8 lines" }, { keys: "What happened?" }, { keys: "\r" }, { wait: "Input admitted" }, { wait: followup }, { keys: "\x1b" }, { keys: ":q\r" }]));
     assert.equal((await closed)[0], 0, errors);
     const result = JSON.parse(output); assert.equal(result.restored, true);
     const terminal = Buffer.from(result.output, "base64").toString(); assert.doesNotMatch(terminal, /\[view budget\]|DO_NOT_RENDER/);

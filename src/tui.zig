@@ -11,6 +11,7 @@ const wire = @import("generated/contracts.zig");
 const TerminalStatus = @import("tui_status.zig");
 const Theme = @import("tui_theme.zig");
 const Markdown = @import("tui_markdown.zig");
+const Filter = @import("tui_filter.zig");
 const Action = @FieldType(wire.TuiRequest, "action");
 var stopping: std.atomic.Value(bool) = .init(false);
 fn signal(_: std.posix.SIG) callconv(.c) void {
@@ -22,7 +23,9 @@ const help =
     \\Tab or Ctrl-W w       switch chat / prompt (Normal mode)
     \\Ctrl-W k / j          focus chat / prompt
     \\Chat j/k, gg/G        scroll / oldest loaded / latest
-    \\Ctrl-U/D, Ctrl-B/F    half / full page; mouse wheel scrolls
+    \\Ctrl-U/D, Ctrl-B/F    half / full page (Normal mode)
+    \\Mouse drag           terminal selection; use terminal Copy/Paste
+    \\:mouse-toggle        opt into wheel reporting (Shift-drag to select)
     \\:older, :latest       bounded canonical history pages
     \\
     \\Prompt i a I A o O    enter Insert mode; Esc returns to Normal
@@ -47,7 +50,8 @@ const help =
     \\Task clients are Rex-bound and locked; use :rex open to participate.
     \\:rex                  selected task Rex status; i inspect, o open
     \\:rex open             explicit best-effort open; no automatic retry
-    \\:model                hub model picker; j/k/arrows, Enter, Esc
+    \\:model                type to filter; arrows/Ctrl-N/P, Enter, Esc
+    \\Picker Ctrl-U         clear query; task Ctrl-F/R next/first page
     \\Shift-Tab             cycle supported thinking levels (idle chat)
     \\Ctrl-S or :send       explicitly submit (steer); save before send
     \\:retry / :discard     resolve saved input; no automatic replay
@@ -61,14 +65,14 @@ const help =
     \\:q protects unsent text; editor failure preserves it.
     \\Switching refuses unsent text or unresolved requests; nothing is lost.
     \\Markdown chat, bounded task pages, 16 KiB prompt, 32 undo steps.
-    \\No macros, dot-repeat, search, text objects or system clipboard.
+    \\No macros, dot-repeat, text objects or clipboard reads.
 ;
 const base = Theme.base;
 const dim = Theme.dim;
 const accent = Theme.green;
 const bar = Theme.dim;
 const hub_bar = bar;
-pub const Row = struct { text: []const u8 = "", style: vaxis.Style = base, offset: usize = 0, cells: ?Markdown.Line = null, speaker: ?[]const u8 = null, speaker_style: vaxis.Style = dim };
+pub const Row = struct { text: []const u8 = "", style: vaxis.Style = base, offset: usize = 0, cells: ?Markdown.Line = null, speaker: ?[]const u8 = null, speaker_style: vaxis.Style = dim, user: bool = false };
 
 const TransportStatus = enum {
     quiet,
@@ -120,26 +124,35 @@ pub fn displayWidth(ctx: fw.DrawContext, text: []const u8) usize {
     return width;
 }
 pub fn rows(ctx: fw.DrawContext, list: *std.ArrayList(Row), text: []const u8, width: u16, style: vaxis.Style) !void {
-    var it = vaxis.unicode.graphemeIterator(text);
+    // Soft-wrap at whitespace without inserting/removing a single source byte.
+    // Keep byte offsets, including trailing spaces, for cursor/visual selection.
     var start: usize = 0;
-    var col: usize = 0;
-    while (it.next()) |g| {
-        const chunk = g.bytes(text);
-        if (std.mem.eql(u8, chunk, "\n")) {
-            try list.append(ctx.arena, .{ .text = text[start..g.start], .style = style, .offset = start });
-            start = g.start + g.len;
-            col = 0;
-            continue;
+    while (true) {
+        var it = vaxis.unicode.graphemeIterator(text[start..]);
+        var col: usize = 0;
+        var boundary: ?usize = null;
+        var end = text.len;
+        var next: ?usize = null;
+        while (it.next()) |g| {
+            const chunk = g.bytes(text[start..]);
+            const at = start + g.start;
+            if (std.mem.eql(u8, chunk, "\n")) {
+                end = at;
+                next = at + g.len;
+                break;
+            }
+            const columns = glyph(ctx, chunk).width;
+            if (col + columns > width and col > 0) {
+                end = boundary orelse at;
+                next = end;
+                break;
+            }
+            col += columns;
+            if (std.mem.eql(u8, chunk, " ") or std.mem.eql(u8, chunk, "\t")) boundary = at + g.len;
         }
-        const w = glyph(ctx, chunk).width;
-        if (col + w > width and col > 0) {
-            try list.append(ctx.arena, .{ .text = text[start..g.start], .style = style, .offset = start });
-            start = g.start;
-            col = 0;
-        }
-        col += w;
+        try list.append(ctx.arena, .{ .text = text[start..end], .style = style, .offset = start });
+        start = next orelse break;
     }
-    try list.append(ctx.arena, .{ .text = text[start..], .style = style, .offset = start });
 }
 pub fn line(ctx: fw.DrawContext, surface: fw.Surface, x: u16, y: u16, text: []const u8, style: vaxis.Style, selection_range: ?[2]usize, offset: usize) void {
     lineLimit(ctx, surface, x, y, text, style, selection_range, offset, surface.size.width);
@@ -159,6 +172,33 @@ fn lineLimit(ctx: fw.DrawContext, surface: fw.Surface, x: u16, y: u16, text: []c
         surface.writeCell(col, y, .{ .char = .{ .grapheme = chunk, .width = width }, .style = s });
         col += width;
     }
+}
+fn toolRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), text: []const u8, width: u16) !void {
+    const split = std.mem.indexOfScalar(u8, text, '\n') orelse text.len;
+    try list.append(ctx.arena, .{ .text = text[0..split], .style = dim });
+    if (split == text.len) return;
+    var output: std.ArrayList(Row) = .empty;
+    try rows(ctx, &output, text[split + 1 ..], width, dim);
+    // A terminal newline ends the last output line, not a ninth blank line.
+    if (output.items.len > 1 and output.items[output.items.len - 1].text.len == 0) _ = output.pop();
+    try list.appendSlice(ctx.arena, output.items[0..@min(8, output.items.len)]);
+    if (output.items.len > 8) try rows(ctx, list, "[output truncated after 8 lines; full output retained in history]", width, dim);
+}
+fn shortDirectory(a: std.mem.Allocator, directory: []const u8, home: ?[]const u8) ![]const u8 {
+    if (home) |prefix| if (prefix.len > 0 and std.mem.startsWith(u8, directory, prefix) and (directory.len == prefix.len or directory[prefix.len] == '/')) return std.fmt.allocPrint(a, "~{s}", .{directory[prefix.len..]});
+    return directory;
+}
+fn tailColumns(ctx: fw.DrawContext, text: []const u8, width: u16) ![]const u8 {
+    var remaining = displayWidth(ctx, text);
+    if (remaining <= width) return text;
+    var it = vaxis.unicode.graphemeIterator(text);
+    var start: usize = 0;
+    while (remaining + 1 > width) {
+        const g = it.next() orelse break;
+        start = g.start + g.len;
+        remaining -= glyph(ctx, g.bytes(text)).width;
+    }
+    return std.fmt.allocPrint(ctx.arena, "…{s}", .{text[start..]});
 }
 // Presentation order only. Wire pages/cursors retain canonical ascending IDs.
 fn taskRoot(page: wire.TuiTasks, index: usize) u64 {
@@ -209,6 +249,9 @@ const Model = struct {
     external_edit: bool = false,
     model_picker: bool = false,
     model_index: usize = 0,
+    filter: Filter = .{},
+    mouse_tracking: bool = false,
+    home: ?[]const u8 = null,
     task_picker: bool = false,
     task_index: usize = 0,
     hosts_view: bool = false,
@@ -218,6 +261,7 @@ const Model = struct {
     rex_view: bool = false,
     settings_uncertain: bool = false,
     paste_mode: bool = false,
+    filter_paste: bool = false,
     reject_paste: bool = false,
     paste_overflow: bool = false,
     paste_buffer: std.ArrayList(u8) = .empty,
@@ -297,6 +341,31 @@ const Model = struct {
     }
     fn settings(self: *Model) ?wire.ModelSettingsSnapshot {
         return if (self.state()) |s| s.modelSettings else null;
+    }
+    fn matches(self: *Model) Filter.Matches {
+        var result: Filter.Matches = .{};
+        const s = self.state() orelse return result;
+        var buffer: [8192]u8 = undefined;
+        if (self.task_picker) {
+            if (s.tasks) |page| for (taskOrder(page)[0..page.items.len]) |index| {
+                const item = page.items[index];
+                const label = std.fmt.bufPrint(&buffer, "{s} {s} {s} {s} {s}", .{ item.agentName orelse "", item.title, item.chatId, item.machineId, item.cwd }) catch continue;
+                result.add(self.filter, label, index);
+            };
+        } else if (self.hosts_view) {
+            if (s.hosts) |hosts| for (hosts.items, 0..) |item, index| {
+                const label = std.fmt.bufPrint(&buffer, "{s} {s} {s}", .{ item.machineId, @tagName(item.kind), @tagName(item.connection) }) catch continue;
+                result.add(self.filter, label, index);
+            };
+        } else if (self.settings()) |settings_value| for (settings_value.models, 0..) |item, index| {
+            const label = std.fmt.bufPrint(&buffer, "{s}/{s} {s}", .{ item.provider, item.modelId, item.name }) catch continue;
+            result.add(self.filter, label, index);
+        };
+        return result;
+    }
+    fn filterKey(self: *Model, key: vaxis.Key, index: *usize) void {
+        const count = self.matches().len;
+        if (key.matches(vaxis.Key.down, .{}) or key.matches('n', .{ .ctrl = true })) index.* = @min(count -| 1, index.* + 1) else if (key.matches(vaxis.Key.up, .{}) or key.matches('p', .{ .ctrl = true })) index.* -|= 1 else if (self.filter.key(key)) index.* = 0;
     }
     fn configure(self: *Model, selection: wire.ModelSelection) !void {
         if (!self.canWrite()) return;
@@ -469,6 +538,10 @@ const Model = struct {
                 self.task_form = false;
                 self.note("Unsubmitted task form cleared; no task requested.");
             }
+        } else if (std.mem.eql(u8, cmd, "mouse-toggle")) {
+            self.mouse_tracking = !self.mouse_tracking;
+            if (self.terminal_status) |status| try status.vx.setMouseMode(status.writer, self.mouse_tracking);
+            self.note(if (self.mouse_tracking) "Mouse wheel reporting enabled; use terminal selection override (usually Shift-drag) to copy." else "Terminal mouse selection enabled; drag and use your terminal's Copy action. Ctrl-U/D scrolls history.");
         } else if (std.mem.eql(u8, cmd, "tasks")) try self.taskPage(null) else if (std.mem.startsWith(u8, cmd, "task-at ")) try self.createAt(cmd[8..]) else if (std.mem.startsWith(u8, cmd, "task ")) try self.createTask(std.mem.trim(u8, cmd[5..], " "), null) else if (std.mem.startsWith(u8, cmd, "select ")) {
             const id = std.mem.trim(u8, cmd[7..], " ");
             const n = std.fmt.parseInt(u64, id, 10) catch 0;
@@ -486,7 +559,9 @@ const Model = struct {
         if (self.paste_mode) {
             if (!self.reject_paste and !self.paste_overflow) {
                 const text = if (key.matches(vaxis.Key.enter, .{})) "\r" else if (key.matches('j', .{ .ctrl = true })) "\n" else if (key.matches(vaxis.Key.tab, .{})) "    " else key.text orelse "";
-                if (self.paste_buffer.items.len + text.len + self.editor.text.items.len > Editor.limit) self.paste_overflow = true else try self.paste_buffer.appendSlice(self.a, text);
+                const existing = if (self.filter_paste) self.filter.len else self.editor.text.items.len;
+                const limit: usize = if (self.filter_paste) 256 else Editor.limit;
+                if (self.paste_buffer.items.len + text.len + existing > limit) self.paste_overflow = true else try self.paste_buffer.appendSlice(self.a, text);
             }
             return;
         }
@@ -499,27 +574,27 @@ const Model = struct {
             return;
         }
         if (self.hosts_view) {
-            if (key.matches(vaxis.Key.escape, .{}) or key.matches('q', .{})) {
+            if (key.matches(vaxis.Key.escape, .{})) {
                 self.hosts_view = false;
                 return;
             }
             const hosts = if (self.state()) |s| s.hosts orelse return else return;
-            if (key.matches('r', .{})) try self.issue(.hosts) else if (hosts.items.len > 0) {
-                if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) self.host_index = @min(hosts.items.len - 1, self.host_index + 1) else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) self.host_index -|= 1 else if (key.matches(vaxis.Key.enter, .{})) try self.beginTaskForm(hosts.items[self.host_index].machineId);
-            }
+            if (key.matches('r', .{ .ctrl = true })) try self.issue(.hosts) else if (key.matches(vaxis.Key.enter, .{})) {
+                if (self.matches().raw(self.host_index)) |raw| try self.beginTaskForm(hosts.items[raw].machineId);
+            } else self.filterKey(key, &self.host_index);
             return;
         }
         if (self.task_picker) {
-            if (key.matches(vaxis.Key.escape, .{}) or key.matches('q', .{})) {
+            if (key.matches(vaxis.Key.escape, .{})) {
                 self.task_picker = false;
                 return;
             }
             const page = if (self.state()) |s| s.tasks orelse return else return;
-            if (key.matches('n', .{})) {
+            if (key.matches('f', .{ .ctrl = true })) {
                 if (page.next) |next| try self.taskPage(next);
-            } else if (key.matches('g', .{})) try self.taskPage(null) else if (page.items.len > 0) {
-                if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) self.task_index = @min(page.items.len - 1, self.task_index + 1) else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) self.task_index -|= 1 else if (key.matches(vaxis.Key.enter, .{})) try self.selectChat(page.items[taskOrder(page)[self.task_index]].chatId);
-            }
+            } else if (key.matches('r', .{ .ctrl = true })) try self.taskPage(null) else if (key.matches(vaxis.Key.enter, .{})) {
+                if (self.matches().raw(self.task_index)) |raw| try self.selectChat(page.items[raw].chatId);
+            } else self.filterKey(key, &self.task_index);
             return;
         }
         if (self.rex_view) {
@@ -527,21 +602,21 @@ const Model = struct {
             return;
         }
         if (self.model_picker) {
-            if (key.matches(vaxis.Key.escape, .{}) or key.matches('q', .{})) {
+            if (key.matches(vaxis.Key.escape, .{})) {
                 self.model_picker = false;
                 return;
             }
             const current = self.settings() orelse return;
-            if (current.models.len == 0) return;
-            if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) self.model_index = @min(current.models.len - 1, self.model_index + 1) else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) self.model_index -|= 1 else if (key.matches(vaxis.Key.enter, .{})) {
-                const model = current.models[self.model_index];
+            if (key.matches(vaxis.Key.enter, .{})) {
+                const raw = self.matches().raw(self.model_index) orelse return;
+                const model = current.models[raw];
                 var level = model.defaultThinkingLevel;
                 for (model.thinkingLevels) |supported| if (supported == current.selection.thinkingLevel) {
                     level = supported;
                     break;
                 };
                 try self.configure(.{ .provider = model.provider, .modelId = model.modelId, .thinkingLevel = level });
-            }
+            } else self.filterKey(key, &self.model_index);
             return;
         }
         if (key.matches(vaxis.Key.tab, .{ .shift = true })) {
@@ -663,6 +738,9 @@ const Model = struct {
         };
         switch (ev) {
             .init => {
+                // vxfw enables tracking during startup. Release it by default
+                // so the terminal owns drag selection and its normal Copy action.
+                if (self.terminal_status) |status| try status.vx.setMouseMode(status.writer, self.mouse_tracking);
                 try ctx.requestFocus(self.widget());
                 try self.issue(.poll);
                 try ctx.tick(50, self.widget());
@@ -720,6 +798,7 @@ const Model = struct {
                             try self.editor.set(if (s.draft) |draft| draft.text else "");
                             if (self.terminal_status) |status| status.presentation = .{};
                         }
+                        if (action == .tasks or action == .hosts or action == .models) self.filter.clear();
                         if (action == .tasks) {
                             self.task_picker = true;
                             self.task_index = 0;
@@ -789,13 +868,20 @@ const Model = struct {
                 if (self.terminal_status) |status| status.presentation.acknowledge();
                 self.paste_mode = true;
                 self.leader = false;
-                self.reject_paste = self.command_mode or self.help_visible or self.model_picker or self.task_picker or self.hosts_view or self.brief_view or self.rex_view or self.locked() or self.readOnly();
+                self.filter_paste = self.model_picker or self.task_picker or self.hosts_view;
+                self.reject_paste = self.command_mode or self.help_visible or self.brief_view or self.rex_view or (!self.filter_paste and (self.locked() or self.readOnly()));
                 self.paste_overflow = false;
                 self.paste_buffer.clearRetainingCapacity();
             },
             .paste_end => {
                 self.ticks = 0;
-                if (self.paste_overflow) self.note("Paste exceeds 16 KiB; entire paste refused, prompt unchanged.") else if (!self.reject_paste and !self.locked() and !self.readOnly()) {
+                if (self.paste_overflow) self.note(if (self.filter_paste) "Search limit: 256 bytes; paste refused." else "Paste exceeds 16 KiB; entire paste refused, prompt unchanged.") else if (!self.reject_paste and self.filter_paste) {
+                    if (self.filter.key(.{ .codepoint = 0, .text = self.paste_buffer.items })) {
+                        self.model_index = 0;
+                        self.task_index = 0;
+                        self.host_index = 0;
+                    }
+                } else if (!self.reject_paste and !self.locked() and !self.readOnly()) {
                     self.editor.paste(self.paste_buffer.items) catch |err| {
                         if (err == error.PromptTooLarge or err == error.InvalidUtf8) self.note("Invalid or oversized paste refused in full; prompt unchanged.") else return err;
                     };
@@ -833,13 +919,14 @@ const Model = struct {
         for (0..w) |x| surface.writeCell(@intCast(x), 0, .{ .style = status_bar });
         line(ctx, surface, 0, 0, title, status_bar, null, 0);
         if (self.task_picker) {
-            line(ctx, surface, 1, 2, "TASKS · grouped within page · samples are not task lifecycle", accent, null, 0);
+            line(ctx, surface, 1, 1, "TASKS · filter this page · samples are not task lifecycle", accent, null, 0);
+            line(ctx, surface, 1, 2, try std.fmt.allocPrint(ctx.arena, "Search: {s}", .{self.filter.query()}), base, null, 0);
             if (s) |snap| if (snap.tasks) |page| {
                 const count = @as(usize, (h - 6) / 3);
                 const start = (self.task_index + 1) -| count;
-                const order = taskOrder(page);
-                for (order[start..@min(page.items.len, start + count)], start..) |raw, index| {
-                    const task = page.items[raw];
+                const found = self.matches();
+                for (found.items[start..@min(found.len, start + count)], start..) |item, index| {
+                    const task = page.items[item.index];
                     const parent = if (task.parentChatId) |id| try std.fmt.allocPrint(ctx.arena, " child of {s}", .{id}) else "";
                     const text = try std.fmt.allocPrint(ctx.arena, "{s} {s} [{s}]{s} {s} · {s}", .{ if (index == self.task_index) ">" else " ", task.chatId, if (task.kind == .main) "hub" else @tagName(task.kind), parent, task.agentName orelse "unnamed", task.title });
                     const detail = try std.fmt.allocPrint(ctx.arena, "  saved {s}:{s}", .{ task.machineId, task.cwd });
@@ -850,19 +937,23 @@ const Model = struct {
                     line(ctx, surface, 1, @intCast(4 + 3 * (index - start)), detail, dim, null, 0);
                     line(ctx, surface, 1, @intCast(5 + 3 * (index - start)), sample, dim, null, 0);
                 }
-                if (page.items.len == 0) line(ctx, surface, 1, 3, "Empty scanned page; n continues when a cursor is available.", dim, null, 0);
-                line(ctx, surface, 1, h - 3, if (page.next != null) "More pages: n · first page: g" else "Last page · first page: g", dim, null, 0);
+                if (found.len == 0) line(ctx, surface, 1, 3, "No matches on this page. Ctrl-U clears search.", dim, null, 0);
+                line(ctx, surface, 1, h - 3, if (page.next != null) "More pages: Ctrl-F · first page: Ctrl-R" else "Last page · first page: Ctrl-R", dim, null, 0);
             };
             line(ctx, surface, 1, h - 2, self.notice[0..self.notice_len], dim, null, 0);
-            line(ctx, surface, 1, h - 1, "j/k · Enter inspect · Esc cancel · :task TITLE creates + opens Rex", accent, null, 0);
+            line(ctx, surface, 1, h - 1, "Type to filter · arrows/Ctrl-N/P · Enter inspect · Esc close", accent, null, 0);
             return surface;
         }
         if (self.hosts_view) {
-            line(ctx, surface, 1, 2, "HOSTS · explicit registration; sampled connection is not readiness", accent, null, 0);
+            line(ctx, surface, 1, 1, "HOSTS · sampled connection is not readiness", accent, null, 0);
+            line(ctx, surface, 1, 2, try std.fmt.allocPrint(ctx.arena, "Search: {s}", .{self.filter.query()}), base, null, 0);
             if (s) |snap| if (snap.hosts) |hosts| {
                 const count = @as(usize, h - 7);
                 const start = (self.host_index + 1) -| count;
-                for (hosts.items[start..@min(hosts.items.len, start + count)], start..) |host, index| {
+                const found = self.matches();
+                if (found.len == 0) line(ctx, surface, 1, 3, "No matches. Ctrl-U clears search.", dim, null, 0);
+                for (found.items[start..@min(found.len, start + count)], start..) |item, index| {
+                    const host = hosts.items[item.index];
                     const text = try std.fmt.allocPrint(ctx.arena, "{s} {s} · {s} · {s} · Rex {s}", .{ if (index == self.host_index) ">" else " ", host.machineId, @tagName(host.kind), @tagName(host.connection), if (host.rex) "approved" else "not approved" });
                     var style = base;
                     style.reverse = index == self.host_index;
@@ -871,7 +962,7 @@ const Model = struct {
             };
             line(ctx, surface, 1, h - 3, "Sample only; offline tasks stay bound. No fallback or enrollment.", dim, null, 0);
             line(ctx, surface, 1, h - 2, self.notice[0..self.notice_len], dim, null, 0);
-            line(ctx, surface, 1, h - 1, "j/k · Enter new task on host (explicit cwd) · r refresh · Esc close", accent, null, 0);
+            line(ctx, surface, 1, h - 1, "Type to filter · arrows/Ctrl-N/P · Enter choose · Ctrl-R refresh · Esc", accent, null, 0);
             return surface;
         }
         if (self.brief_view) {
@@ -909,11 +1000,15 @@ const Model = struct {
             return surface;
         }
         if (self.model_picker) {
-            line(ctx, surface, 1, 2, "MODELS · hub catalog (account access not guaranteed)", accent, null, 0);
+            line(ctx, surface, 1, 1, "MODELS · hub catalog (account access not guaranteed)", accent, null, 0);
+            line(ctx, surface, 1, 2, try std.fmt.allocPrint(ctx.arena, "Search: {s}", .{self.filter.query()}), base, null, 0);
             if (self.settings()) |settings_value| {
                 const count = @as(usize, h - 6);
                 const start = (self.model_index + 1) -| count;
-                for (settings_value.models[start..@min(settings_value.models.len, start + count)], start..) |model, index| {
+                const found = self.matches();
+                if (found.len == 0) line(ctx, surface, 1, 3, "No matches. Ctrl-U clears search.", dim, null, 0);
+                for (found.items[start..@min(found.len, start + count)], start..) |item, index| {
+                    const model = settings_value.models[item.index];
                     const current = std.mem.eql(u8, model.provider, settings_value.selection.provider) and std.mem.eql(u8, model.modelId, settings_value.selection.modelId);
                     const default_model = std.mem.eql(u8, model.provider, settings_value.defaultModel.provider) and std.mem.eql(u8, model.modelId, settings_value.defaultModel.modelId);
                     const text = try std.fmt.allocPrint(ctx.arena, "{s} {s}/{s} · {s}{s}{s}", .{ if (index == self.model_index) ">" else " ", model.provider, model.modelId, model.name, if (current) " [selected]" else "", if (default_model) " [hub default]" else "" });
@@ -923,7 +1018,7 @@ const Model = struct {
                 }
             }
             line(ctx, surface, 1, h - 2, self.notice[0..self.notice_len], dim, null, 0);
-            line(ctx, surface, 1, h - 1, if (self.readOnly()) "Read-only settings · Esc close · :rex open to participate" else "j/k or arrows · Enter select · Esc cancel · idle chats only", accent, null, 0);
+            line(ctx, surface, 1, h - 1, if (self.readOnly()) "Read-only settings · Esc close · :rex open to participate" else "Type to filter · arrows/Ctrl-N/P · Enter select · Esc · idle chats only", accent, null, 0);
             return surface;
         }
         if (self.help_visible) {
@@ -952,24 +1047,30 @@ const Model = struct {
         var chat: std.ArrayList(Row) = .empty;
         if (s) |snap| for (snap.entries) |entry| {
             const label = if (entry.role == .assistant) rune(snap) else if (entry.role == .user) "•" else "·";
+            if (entry.role == .user) try chat.append(ctx.arena, .{ .user = true });
             const first_row = chat.items.len;
             if (entry.role == .assistant or entry.role == .user) {
-                for (try Markdown.render(ctx, entry.text, layout.body, base)) |cells| try chat.append(ctx.arena, .{ .cells = cells });
-            } else try rows(ctx, &chat, entry.text, layout.body, dim);
-            if (chat.items.len == first_row) try chat.append(ctx.arena, .{});
+                for (try Markdown.render(ctx, entry.text, layout.body, base)) |cells| try chat.append(ctx.arena, .{ .cells = cells, .user = entry.role == .user });
+            } else if (entry.role == .tool) try toolRows(ctx, &chat, entry.text, layout.body) else try rows(ctx, &chat, entry.text, layout.body, dim);
+            if (chat.items.len == first_row) try chat.append(ctx.arena, .{ .user = entry.role == .user });
             chat.items[first_row].speaker = label;
             chat.items[first_row].speaker_style = if (entry.role == .user) accent else dim;
-            try chat.append(ctx.arena, .{});
+            try chat.append(ctx.arena, .{ .user = entry.role == .user });
         };
         if (chat.items.len == 0) try rows(ctx, &chat, if (s == null) "Connecting to the local hub…" else if (self.readOnly()) "Read-only inspection · :rex open to participate" else "Enter to send · Esc for Normal mode · :help", layout.body, dim);
         self.scroll_max = chat.items.len -| chat_h;
         self.scroll = @min(self.scroll, self.scroll_max);
         const first = self.scroll_max - self.scroll;
         for (chat.items[first..@min(chat.items.len, first + chat_h)], 0..) |row, y| {
-            if (row.speaker) |speaker| lineLimit(ctx, surface, layout.x -| 2, @intCast(y), speaker, row.speaker_style, null, 0, layout.x);
+            if (row.user) for (0..layout.main) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = Theme.user });
+            var speaker_style = row.speaker_style;
+            if (row.user) speaker_style.bg = Theme.user.bg;
+            if (row.speaker) |speaker| lineLimit(ctx, surface, layout.x -| 2, @intCast(y), speaker, speaker_style, null, 0, layout.x);
             if (row.cells) |cells| {
                 var x = layout.x;
-                for (cells) |cell| {
+                for (cells) |original| {
+                    var cell = original;
+                    if (row.user) cell.style.bg = Theme.user.bg;
                     if (x + cell.char.width > layout.x + layout.body) break;
                     surface.writeCell(x, @intCast(y), cell);
                     x += cell.char.width;
@@ -1014,16 +1115,16 @@ const Model = struct {
             lineLimit(ctx, surface, identity_x, 2, identity, Theme.orange, null, 0, w - 1);
             lineLimit(ctx, surface, role_x, 4, role, dim, null, 0, w - 1);
         }
-        const identity_width: u16 = @intCast(@min(displayWidth(ctx, identity), layout.main / 2));
-        const status_right = if (layout.sidebar == 0) layout.main - identity_width - 2 else right;
         const directory = if (s) |snap| snap.cwd orelse "directory unavailable" else "connecting";
         const branch = if (s) |snap| snap.gitBranch orelse "branch —" else "branch —";
-        const branch_width = @min(displayWidth(ctx, branch), status_right / 2);
-        const branch_x: u16 = @intCast(status_right - branch_width);
-        lineLimit(ctx, surface, 1, h - 2, directory, dim, null, 0, branch_x -| 3);
-        lineLimit(ctx, surface, branch_x -| 2, h - 2, "·", Theme.rule, null, 0, status_right);
-        lineLimit(ctx, surface, branch_x, h - 2, branch, dim, null, 0, status_right);
-        if (layout.sidebar == 0) lineLimit(ctx, surface, layout.main - identity_width - 1, h - 2, identity, Theme.orange, null, 0, right);
+        const location = try std.fmt.allocPrint(ctx.arena, "{s} ({s})", .{ try shortDirectory(ctx.arena, directory, self.home), branch });
+        const shown_location = try tailColumns(ctx, location, (layout.main * 2) / 3);
+        const location_x: u16 = @intCast(right - displayWidth(ctx, shown_location));
+        const problem = if (is_hub) "hub" else if (s) |snap| (if (snap.brief) |brief| brief.problem orelse snap.title else snap.title) else "connecting";
+        const problem_line = problem[0 .. std.mem.indexOfScalar(u8, problem, '\n') orelse problem.len];
+        const task_label = try std.fmt.allocPrint(ctx.arena, "{s} {s}", .{ if (s) |snap| rune(snap) else "·", problem_line });
+        lineLimit(ctx, surface, 1, h - 2, task_label, Theme.orange, null, 0, location_x -| 1);
+        lineLimit(ctx, surface, location_x, h - 2, shown_location, dim, null, 0, right);
         const status = try std.fmt.allocPrint(ctx.arena, "{s} [{s}]", .{ if (s) |snap| snap.model else "model —", if (self.settings()) |settings_value| @tagName(settings_value.selection.thinkingLevel) else "thinking —" });
         // Reserve room for uncertainty even with long model names.
         const warning = if (!self.online) try std.fmt.allocPrint(ctx.arena, "STALE · {s}", .{self.shown_transport.text()}) else if (self.command_mode or self.shown_transport == .waiting or self.shown_transport == .fenced) self.shown_transport.text() else "";
@@ -1126,6 +1227,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     if (chat_id) |id| bridge.chat_id = try init.gpa.dupe(u8, id);
     var model: Model = .{ .a = init.gpa, .bridge = &bridge, .editor = Editor.init(init.gpa) };
     model.editor.mode = .insert;
+    model.home = init.environ_map.get("HOME");
     defer model.deinit();
     stopping.store(false, .monotonic);
     const signals = [_]std.posix.SIG{ .TERM, .HUP, .INT };
@@ -1400,6 +1502,123 @@ test "TTY selection preserves plain mode and literal flag-looking message bytes"
     try std.testing.expect(!try selected(&.{ "--message", "--tui" }, true));
     try std.testing.expect(try selected(&.{ "--hub-id", "--no-tui" }, true));
     try std.testing.expectError(error.ConflictingClientModes, selected(&.{ "--tui", "--no-tui" }, true));
+}
+
+test "soft wrapping preserves exact bytes, Unicode clusters and cursor offsets" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    fw.DrawContext.init(.unicode);
+    const ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{ .width = 8, .height = 16 } };
+    var result: std.ArrayList(Row) = .empty;
+    try rows(ctx, &result, "alpha beta gamma", 12, base);
+    try std.testing.expectEqual(@as(usize, 2), result.items.len);
+    try std.testing.expectEqualStrings("alpha beta ", result.items[0].text);
+    try std.testing.expectEqualStrings("gamma", result.items[1].text);
+    try std.testing.expectEqual(@as(usize, 11), result.items[1].offset);
+    result.clearRetainingCapacity();
+    try rows(ctx, &result, "界界 é\n\nend\n", 5, base);
+    try std.testing.expectEqualStrings("界界 ", result.items[0].text);
+    try std.testing.expectEqualStrings("é", result.items[1].text);
+    try std.testing.expectEqual(@as(usize, 7), result.items[1].offset);
+    try std.testing.expectEqualStrings("", result.items[result.items.len - 1].text);
+    result.clearRetainingCapacity();
+    try rows(ctx, &result, "12345678", 3, base);
+    try std.testing.expectEqualStrings("123", result.items[0].text);
+    try std.testing.expectEqualStrings("456", result.items[1].text);
+    try std.testing.expectEqualStrings("78", result.items[2].text);
+}
+
+test "tool display caps eight visual output lines and marks truncation without changing input" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    fw.DrawContext.init(.unicode);
+    const ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 80, .height = 24 }, .cell_size = .{ .width = 8, .height = 16 } };
+    var result: std.ArrayList(Row) = .empty;
+    const original = "bash\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
+    try toolRows(ctx, &result, original, 80);
+    try std.testing.expectEqual(@as(usize, 10), result.items.len);
+    try std.testing.expectEqualStrings("8", result.items[8].text);
+    try std.testing.expect(std.mem.startsWith(u8, result.items[9].text, "[output truncated after 8 lines"));
+    result.clearRetainingCapacity();
+    try toolRows(ctx, &result, "bash\n1\n2\n3\n4\n5\n6\n7\n8\n", 80);
+    try std.testing.expectEqual(@as(usize, 9), result.items.len);
+    const wide: [100]u8 = @splat('x');
+    result.clearRetainingCapacity();
+    try toolRows(ctx, &result, try std.fmt.allocPrint(ctx.arena, "read\n{s}", .{wide}), 10);
+    try std.testing.expect(std.mem.startsWith(u8, result.items[9].text, "[output"));
+    try std.testing.expectEqualStrings("~", try shortDirectory(ctx.arena, "/home/me", "/home/me"));
+    try std.testing.expectEqualStrings("~/src", try shortDirectory(ctx.arena, "/home/me/src", "/home/me"));
+    try std.testing.expectEqualStrings("/home/me-too/src", try shortDirectory(ctx.arena, "/home/me-too/src", "/home/me"));
+}
+
+test "user panels pad full chat width, task footer uses brief, and filters cannot select absent rows" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    const owned = try a.create(std.heap.ArenaAllocator);
+    owned.* = .init(a);
+    var model: Model = .{ .a = a, .bridge = &bridge, .editor = Editor.init(a), .home = "/home/me", .snapshot = .{
+        .arena = owned,
+        .value = .{ .case0 = .{ .version = 1, .id = "1", .ok = true, .snapshot = .{
+            .hubId = "hub",
+            .chatId = "2",
+            .hubChatId = "1",
+            .clientMode = .task,
+            .title = "Short title",
+            .agentRune = "ᚦ",
+            .agentName = "wintermute",
+            .model = "mock",
+            .tools = "offline",
+            .cwd = "/home/me/project",
+            .gitBranch = "feature/demo",
+            .brief = .{ .problem = "Fix the actual task problem" },
+            .activityKnown = false,
+            .busy = false,
+            .queued = 0,
+            .entries = &.{ .{ .id = 1, .role = .user, .text = "**Hello**" }, .{ .id = 2, .role = .assistant, .text = "Answer" } },
+            .hasOlder = false,
+            .historical = false,
+            .preview = "",
+            .notice = "",
+            .draft = null,
+            .modelSettings = .{ .hubId = "hub", .chatId = "2", .selection = .{ .provider = "mock", .modelId = "zeta", .thinkingLevel = .off }, .defaultModel = .{ .provider = "mock", .modelId = "zeta" }, .models = &.{
+                .{ .provider = "mock", .modelId = "zeta", .name = "Zeta", .thinkingLevels = &.{.off}, .defaultThinkingLevel = .off },
+                .{ .provider = "mock", .modelId = "gpt-fast", .name = "GPT Fast", .thinkingLevels = &.{.off}, .defaultThinkingLevel = .off },
+            } },
+        } } },
+    } };
+    defer model.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    fw.DrawContext.init(.unicode);
+    const draw_ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
+    const surface = try Model.draw(&model, draw_ctx);
+    for (0..3) |y| for (0..112) |x| try std.testing.expectEqualDeep(Theme.user.bg, surface.buffer[y * 140 + x].style.bg);
+    try std.testing.expectEqualDeep(base.bg, surface.buffer[3 * 140].style.bg);
+    try std.testing.expectEqualDeep(base.bg, surface.buffer[113].style.bg);
+    var footer: std.ArrayList(u8) = .empty;
+    defer footer.deinit(a);
+    for (surface.buffer[38 * 140 .. 38 * 140 + 112]) |cell| try footer.appendSlice(a, cell.char.grapheme);
+    try std.testing.expect(std.mem.indexOf(u8, footer.items, "ᚦ Fix the actual task problem") != null);
+    try std.testing.expect(std.mem.endsWith(u8, footer.items, "~/project (feature/demo) "));
+    try std.testing.expect(!model.mouse_tracking);
+    var event_ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
+    defer event_ctx.cmds.deinit(a);
+    model.model_picker = true;
+    try model.press(&event_ctx, .{ .codepoint = 'g', .text = "gpt" });
+    try std.testing.expectEqual(@as(?usize, 1), model.matches().raw(model.model_index));
+    try model.press(&event_ctx, .{ .codepoint = 'q', .text = "q" });
+    try std.testing.expect(model.model_picker and model.matches().len == 0);
+    try model.press(&event_ctx, .{ .codepoint = vaxis.Key.enter });
+    try std.testing.expect(bridge.pending == null);
+    try model.press(&event_ctx, .{ .codepoint = 'u', .mods = .{ .ctrl = true } });
+    try Model.event(&model, &event_ctx, .paste_start);
+    try model.press(&event_ctx, .{ .codepoint = 0, .text = "gpt" });
+    try Model.event(&model, &event_ctx, .paste_end);
+    try std.testing.expectEqualStrings("gpt", model.filter.query());
+    try std.testing.expectEqualStrings("", model.editor.text.items);
+    try std.testing.expect(bridge.pending == null);
+    const filtered = try Model.draw(&model, draw_ctx);
+    try std.testing.expectEqual(@as(u16, 140), filtered.size.width);
 }
 
 test "untrusted terminal and bidi controls never reach cells" {

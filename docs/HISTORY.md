@@ -4,6 +4,21 @@ This is the consolidated change and decision record. It replaces the progress re
 
 Test counts below are **recorded evidence for the named implementation stage**. Earlier counts do not describe a new run of the current tree. No count is a release guarantee or proof of deployment.
 
+## TUI wrapping, readability and searchable pickers
+
+**Implemented after `8f1f84e`.** Prompt rows now wrap at word boundaries while retaining exact bytes and grapheme-safe cursor offsets; long tokens still wrap safely. Tool results display their header plus eight visual output lines and an explicit truncation notice, without altering canonical output or the newest-first history budget. Completed assistant messages show validated provider-reported thinking-token counts when available; hidden reasoning/signatures remain unrendered. User messages have full-chat-width muted blue `#182030` backgrounds with one padding row above/below. The first status row now places rune/problem (title fallback, `Δ hub` for main) on the left and abbreviated directory plus parenthesized branch on the right.
+
+Model/task/host pickers accept bounded local fuzzy queries, with arrows/Ctrl-N/P navigation, Ctrl-U clear, literal bounded paste and no-match refusal. Original indices/IDs and all mutation/scope/draft guards remain authoritative; task filtering is page-local. Plain `j/k/q` become query text, and task pagination moves to Ctrl-F/R. Mouse reporting is disabled by default for terminal-native drag/Copy/Paste; `:mouse-toggle` explicitly restores wheel reporting and requires the terminal's selection override. No clipboard-reading/writing escape bridge was introduced.
+
+Validation: focused runtime/PTY **71/71**; full source native **86/86**, runtime/generator **580 total / 579 passed / one installed-package-only skip** (`/tmp/deck-tui-ux-full.log`). Nix full/worker builds passed **569 runtime/generator tests / 564 passed / five opt-in skips**, plus installcheck **1/1** (`/tmp/deck-tui-ux-package.log`). Installed wrapper-mode validation passed **575/575**, plus separate raw-native recovery fixtures **5/5** (`/tmp/deck-tui-ux-installed.log`). ReleaseSafe native full/worker cross-builds passed for aarch64-linux, x86_64-linux and x86_64-macos; this is not Intel macOS Nix package/runtime acceptance. All advertised flake platforms evaluated. Tests cover wrapping/resize with exact admission, full-width styles/padding, eight-line output, hidden-reasoning exclusion, fuzzy identity mapping/empty results, authority guards and terminal mode sequences. Actual terminal GUI clipboard behavior and live-provider token accounting were not exercised.
+
+Built with `--no-link`, leaving deployed links, live state, hub and operator Rex untouched:
+
+```text
+/nix/store/pfrdiggpjc32wwa5iiiv4gpajnkwk8xw-deck-0.1.0-dev
+/nix/store/7sbgr8v6482w0ln5az5vvv6aw087mcqa-deck-worker-0.1.0-dev
+```
+
 ## GitHub profile installation
 
 The existing `packages.<system>.default` already supports `nix profile add github:saulhoward/deck`; no package alias or custom installer was needed. Checking every advertised default derivation exposed that pinned Nixpkgs 26.11 rejects `x86_64-darwin`. The flake now advertises only `aarch64-darwin`, `aarch64-linux` and `x86_64-linux`, rather than an unevaluable Intel macOS package. Earlier native cross-build evidence does not imply that the full Nix dependency closure is supported. The README now documents direct installation, prerequisites, default-branch versus pinned-revision behavior, controlled upgrades and the worker-only alternative. CI adds a disposable-profile installation of the checked-out default package on its Linux/macOS runners, then invokes both executables and the existing outside-checkout package fixture through the profile path.

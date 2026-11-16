@@ -63,6 +63,13 @@ export function validReply(value: unknown, id: string, hubId?: string, chatId?: 
   if (s.modelSettings && (!validModelSettingsSnapshot(s.modelSettings) || s.modelSettings.hubId !== s.hubId || s.modelSettings.chatId !== s.chatId)) return false;
   return s.entries.every((item, i) => i === 0 || item.id > s.entries[i - 1]!.id);
 }
+// Only a provider-reported count, never reasoning text, signatures or an estimate.
+export function thinkingUsage(usage: unknown): string {
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) return "";
+  const { reasoning, output } = usage as { reasoning?: unknown; output?: unknown };
+  return typeof reasoning === "number" && Number.isSafeInteger(reasoning) && reasoning >= 0 && typeof output === "number" && Number.isSafeInteger(output) && reasoning <= output
+    ? `\n[thinking: ${reasoning} tokens]` : "";
+}
 type Command = (name: string, args: Record<string, unknown>, hubId?: string) => Promise<any>;
 export class TuiSession {
   private hubId?: string;
@@ -169,7 +176,7 @@ export class TuiSession {
         role = entry.kind === "pi.assistant" ? "assistant" : "tool";
         text = entry.model.map((message: any) => {
           const parts = (message.content ?? []).map((part: any) => part.type === "text" ? part.text : part.type === "toolCall" ? `[tool requested: ${part.name}]` : "[non-text content]").join("\n");
-          return (role === "tool" ? `${message.toolName}${message.isError ? " (error)" : ""}\n` : "") + parts + (message.stopReason === "error" || message.stopReason === "aborted" ? `\n[${message.stopReason}]` : "");
+          return (role === "tool" ? `${message.toolName}${message.isError ? " (error)" : ""}\n` : "") + parts + (role === "assistant" ? thinkingUsage(message.usage) : "") + (message.stopReason === "error" || message.stopReason === "aborted" ? `\n[${message.stopReason}]` : "");
         }).join("\n");
       } else text = `[${entry.kind}: retained entry, not rendered]`;
       text = displayText(text, 8192);

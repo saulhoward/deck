@@ -10,7 +10,7 @@ import test from "node:test";
 import { clientEnv } from "./client.test.env.js";
 import { DraftStore } from "./drafts.js";
 import { hubCommand } from "./hub-client.js";
-import { displayText, TuiSession, validRequest, validReply } from "./tui-session.js";
+import { displayText, thinkingUsage, TuiSession, validRequest, validReply } from "./tui-session.js";
 import type { ActivitySnapshot, ModelSettingsChange, ModelSettingsSnapshot, TuiRequest } from "./generated/contracts.js";
 
 async function fixture(withSettings = false, withProgramStatus = false, withStyle = false) {
@@ -160,6 +160,12 @@ test("TUI closed requests and display projection reject controls without changin
   assert.ok(Buffer.byteLength(displayText("👩".repeat(8192), 4096)) <= 4096);
 });
 
+test("thinking usage shows only validated provider counts, not hidden reasoning", () => {
+  assert.equal(thinkingUsage({ reasoning: 27, output: 50 }), "\n[thinking: 27 tokens]");
+  assert.equal(thinkingUsage({ reasoning: 0, output: 50 }), "\n[thinking: 0 tokens]");
+  for (const usage of [undefined, null, {}, [], { reasoning: 3 }, { reasoning: "3", output: 50 }, { reasoning: -1, output: 50 }, { reasoning: 1.5, output: 50 }, { reasoning: 51, output: 50 }, { reasoning: Infinity, output: Infinity }]) assert.equal(thinkingUsage(usage), "");
+});
+
 const testBinary = process.env.DECK_TEST_BINARY;
 test("real PTY: :model and Shift-Tab change settings without losing the prompt or submitting input", { skip: !testBinary, timeout: 20_000 }, async () => {
   const f = await fixture(true);
@@ -167,7 +173,8 @@ test("real PTY: :model and Shift-Tab change settings without losing the prompt o
     await pty(f.port, f.local.env, [
       { wait: "mock/echo [medium]" }, { keys: "keep me" }, { keys: "\x1b" },
       { keys: ":model" }, { wait: ":model" }, { wait: "client idle" }, { keys: "\r" }, { wait: "MODELS" },
-      { keys: "j\r" }, { wait: "settings applied" },
+      { keys: "qqq" }, { wait: "No matches" }, { keys: "\r" },
+      { keys: "\x15zt" }, { wait: "Search: zt" }, { keys: "\r" }, { wait: "settings applied" },
       { keys: "\x1b[Z" }, { wait: "mock/zeta [high]" },
       { keys: "\x1b[Z" }, { wait: "mock/zeta [off]" },
       { keys: "\x1b[Z" }, { wait: "mock/zeta [low]" },
@@ -284,7 +291,7 @@ test("real PTY: real isolated mock hub retains input and answer after TUI detach
     await pty(port, local.env, [
       { wait: `${status.model.provider}/${status.model.modelId}` }, { wait: "Δ hub" }, { keys: "\x1b" },
       { keys: ":task TUI created task" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Rex open unconfirmed" },
-      { keys: ":tasks" }, { wait: "client idle" }, { keys: "\r" }, { wait: "TASKS" }, { keys: "j\r" },
+      { keys: ":tasks" }, { wait: "client idle" }, { keys: "\r" }, { wait: "TASKS" }, { keys: "\x1b[B\r" },
       { wait: "Read-only task inspection" }, { wait: `[${settings.selection.thinkingLevel}]` }, { wait: "READ ONLY" },
       { keys: "itask-only input" }, { keys: "\x1b" }, { keys: ":send" }, { wait: "client idle" }, { keys: "\r" },
       { wait: "Read-only task inspection" }, { wait: "0/16384 bytes" }, { keys: ":q\r" },
@@ -340,6 +347,42 @@ test("real PTY: Vesper sidebar, centered Markdown/table, expanding prompt and En
     assert.equal(admits.length, 1); assert.equal(admits[0].args.text, "hello\nsecond\nthird");
     assert.match(output, /38[:;]2[:;]255[:;]199[:;]153/);
     assert.match(output, /48[:;]2[:;]16[:;]16[:;]16/);
+    assert.match(output, /48[:;]2[:;]24[:;]32[:;]48/);
+    assert.match(wide[38]!, /Δ hub.*\(.*\)/);
+  } finally { await f.close(); }
+});
+
+test("real PTY: prompt word-wrap survives resize without changing admitted bytes", { skip: !testBinary, timeout: 20000 }, async () => {
+  const f = await fixture(); const screens: Record<string, string> = {};
+  const text = "alpha beta ".repeat(12) + "tail";
+  try {
+    await pty(f.port, f.local.env, [
+      { wait: "mock/echo" }, { resize: [20, 32] }, { keys: text }, { wait: "tail" }, { capture: "wrapped" },
+      { resize: [20, 24] }, { wait: "tail" }, { capture: "narrow" },
+      { keys: "\r" }, { wait: "Input admitted" }, { keys: "\x1b" }, { keys: ":q\r" },
+    ], screens);
+    for (const screen of Object.values(screens)) {
+      const lines = screen.split("\n"), rules = lines.flatMap((row, i) => row.startsWith("─") ? [i] : []);
+      const prompt = lines.slice(rules[0]! + 1, rules[1]);
+      assert.ok(prompt.length > 2);
+      assert.ok(prompt.every(row => /^(?:(?:alpha|beta|tail)| )*$/.test(row)), prompt.join("\n"));
+    }
+    assert.equal(f.requests.filter(r => r.command === "admit").length, 1);
+    assert.equal(f.requests.find(r => r.command === "admit").args.text, text);
+  } finally { await f.close(); }
+});
+
+test("real PTY: native mouse selection is default and wheel reporting is explicitly toggled", { skip: !testBinary, timeout: 15000 }, async () => {
+  const f = await fixture();
+  try {
+    const output = await pty(f.port, f.local.env, [
+      { wait: "mock/echo" }, { keys: "\x1b" }, { keys: ":mouse-toggle\r" }, { wait: "Mouse wheel reporting enabled" },
+      { keys: ":mouse-toggle\r" }, { wait: "Terminal mouse selection enabled" }, { keys: ":q\r" },
+    ]);
+    const enable = "\x1b[?1002;1003;1004;1006h", disable = "\x1b[?1002;1003;1004;1006;1016l";
+    assert.ok(output.indexOf(enable) >= 0 && output.indexOf(disable) > output.indexOf(enable));
+    assert.ok(output.indexOf(enable, output.indexOf(enable) + 1) > output.indexOf(disable));
+    assert.ok(!f.requests.some(r => ["admit", "stop", "create_task"].includes(r.command)));
   } finally { await f.close(); }
 });
 

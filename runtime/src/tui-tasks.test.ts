@@ -260,7 +260,7 @@ for (const lose of [false, true]) test(`real PTY: deck hub brief composer, host 
     const child = spawn("python3", [resolve("scripts/tui-pty-test.py"), binary!, "hub", "--tui", "--port", String(f.port)], { env: f.local.env, stdio: ["pipe", "pipe", "pipe"] });
     let out = "", errors = ""; child.stdout.on("data", c => out += String(c)); child.stderr.on("data", c => errors += String(c));
     const steps: any[] = [
-      { wait: "history for 1" }, { keys: "\x1b" }, { keys: ":hosts" }, { wait: "client idle" }, { keys: "\r" }, { wait: "HOSTS" }, { wait: "offline" }, { keys: "j\r" }, { wait: "TASK BRIEF" },
+      { wait: "history for 1" }, { keys: "\x1b" }, { keys: ":hosts" }, { wait: "client idle" }, { keys: "\r" }, { wait: "HOSTS" }, { wait: "offline" }, { keys: "off" }, { wait: "Search: off" }, { keys: "\r" }, { wait: "TASK BRIEF" },
       { keys: ":cancel\r" }, { wait: "Unsubmitted task form cleared" }, { keys: ":new" }, { wait: "client idle" }, { keys: "\r" }, { wait: "TASK BRIEF" },
       { keys: "\x1b[200~" + JSON.stringify(form) + "\x1b[201~" }, { wait: "END_BRIEF" }, { keys: "\x1b" }, { keys: ":send" }, { wait: "client idle" }, { keys: "\r" },
     ];
@@ -339,8 +339,8 @@ test("real PTY: hub inspection is read-only, creation opens Rex, and :hub return
     const command = (text: string) => [{ keys: text }, { wait: text }, { wait: "client idle" }, { keys: "\r" }];
     const steps = [
       { wait: "history for 1" }, { keys: "keep this" }, { keys: "\x1b" }, ...command(":tasks"), { wait: "TASKS" },
-      { keys: "j\r" }, { wait: "Unsent prompt preserved" }, { keys: "\x1b" }, { wait: "keep this" }, { keys: "dd" }, { wait: "0/16384 bytes" },
-      ...command(":task New task 🧪"), { wait: "Task 3 created" }, ...command(":tasks"), { wait: "New task" }, { keys: "jj\r" },
+      { keys: "\x1b[B\r" }, { wait: "Unsent prompt preserved" }, { keys: "\x1b" }, { wait: "keep this" }, { keys: "dd" }, { wait: "0/16384 bytes" },
+      ...command(":task New task 🧪"), { wait: "Task 3 created" }, ...command(":tasks"), { wait: "New task" }, { keys: "New task" }, { wait: "Search: New task" }, { keys: "\r" },
       { wait: "history for 3" }, { wait: "READ ONLY" }, { keys: "imust not edit" }, { keys: "\x1b[200~pasted input\x1b[201~" }, { keys: "\x13" }, { wait: "Read-only task inspection" }, { wait: "0/16384 bytes" }, ...command(":rex"), { wait: "Allocation: unallocated" }, { keys: "i" }, { wait: "Presence: unbound" },
       { keys: "o" }, { wait: "Rex attempt admitted" }, { keys: "\x1b" }, ...command(":hub"), { wait: "history for 1" }, { keys: ":q\r" },
     ];

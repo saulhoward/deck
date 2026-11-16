@@ -2,6 +2,8 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 pub const base: vaxis.Style = .{ .fg = .{ .rgb = .{ 255, 255, 255 } }, .bg = .{ .rgb = .{ 16, 16, 16 } } };
+// Muted dark-blue message panel, keeping Vesper's near-black contrast.
+pub const user: vaxis.Style = .{ .fg = base.fg, .bg = .{ .rgb = .{ 24, 32, 48 } } };
 pub const dim: vaxis.Style = .{ .fg = .{ .rgb = .{ 160, 160, 160 } }, .bg = base.bg };
 pub const rule: vaxis.Style = .{ .fg = .{ .rgb = .{ 80, 80, 80 } }, .bg = base.bg };
 pub const green: vaxis.Style = .{ .fg = .{ .rgb = .{ 153, 255, 228 } }, .bg = base.bg };
