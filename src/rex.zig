@@ -5,14 +5,58 @@ const Result = process.Result;
 const contracts = @import("generated/contracts.zig");
 const endpoint = @import("rex_endpoint.zig");
 pub const Plan = contracts.RexAllocationPlan;
-// Only revisions exercised by isolated installed-CLI contract tests. This is
-// not a minimum-version check; future/intermediate revisions remain refused.
+// Rex revision N supports APIs 0..N. Gate on the oldest API needed by each
+// surface, not an allowlist of releases. Keep the reported revision in the
+// same unsigned-32-bit domain used by discovery/identity JSON decoding.
+pub const allocation_api_minimum = 8;
+pub const automatic_api_minimum = 14;
+// std.json's ordinary integer decoder also accepts numeric strings. A claimed
+// API maximum must be an actual integer, not a coerced/malformed status field.
+pub const ApiRevision = struct {
+    value: u32,
+    pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !@This() {
+        const value = try std.json.Value.jsonParse(allocator, source, options);
+        if (value != .integer or value.integer < 0 or value.integer > std.math.maxInt(u32)) return error.InvalidNumber;
+        return .{ .value = @intCast(value.integer) };
+    }
+    pub fn jsonStringify(self: @This(), writer: anytype) !void {
+        try writer.write(self.value);
+    }
+};
 pub fn supportedApi(revision: i64) bool {
-    return revision == 8 or revision == 10 or revision == 14;
+    return revision >= allocation_api_minimum and revision <= std.math.maxInt(u32);
 }
-test "Rex API support is an explicit tested set, not a version range" {
-    try std.testing.expect(supportedApi(8) and supportedApi(10) and supportedApi(14));
-    for ([_]i64{ -1, 0, 7, 9, 11, 12, 13, 15, 9007199254740991 }) |revision| try std.testing.expect(!supportedApi(revision));
+pub fn supportedAutomaticApi(revision: i64) bool {
+    return supportedApi(revision) and revision >= automatic_api_minimum;
+}
+test "Rex backwards compatibility uses feature minimums, not release allowlists" {
+    for ([_]i64{ 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 99, std.math.maxInt(u32) }) |revision| {
+        try std.testing.expect(supportedApi(revision));
+        try std.testing.expectEqual(revision >= automatic_api_minimum, supportedAutomaticApi(revision));
+    }
+    for ([_]i64{ -1, 0, 7, @as(i64, std.math.maxInt(u32)) + 1, 9007199254740991 }) |revision| {
+        try std.testing.expect(!supportedApi(revision));
+        try std.testing.expect(!supportedAutomaticApi(revision));
+    }
+}
+test "Rex API revision requires an unsigned JSON integer without coercion" {
+    const Status = struct { api_revision: ApiRevision };
+    for ([_][]const u8{ "0", "8", "14", "16", "99", "4294967295" }) |number| {
+        const bytes = try std.fmt.allocPrint(std.testing.allocator, "{{\"api_revision\":{s}}}", .{number});
+        defer std.testing.allocator.free(bytes);
+        const parsed = try std.json.parseFromSlice(Status, std.testing.allocator, bytes, .{});
+        defer parsed.deinit();
+        try std.testing.expectEqual(try std.fmt.parseInt(u32, number, 10), parsed.value.api_revision.value);
+        const encoded = try std.json.Stringify.valueAlloc(std.testing.allocator, parsed.value, .{});
+        defer std.testing.allocator.free(encoded);
+        try std.testing.expectEqualStrings(bytes, encoded);
+    }
+    for ([_][]const u8{ "{}", "{\"api_revision\":\"16\"}", "{\"api_revision\":-1}", "{\"api_revision\":16.5}", "{\"api_revision\":4294967296}", "{\"api_revision\":null}", "{\"api_revision\":true}", "{\"api_revision\":{}}" }) |bytes| {
+        if (std.json.parseFromSlice(Status, std.testing.allocator, bytes, .{})) |parsed| {
+            parsed.deinit();
+            return error.TestExpectedInvalidRevision;
+        } else |_| {}
+    }
 }
 fn refuse(code: []const u8) Result {
     // Never expose CLI stderr, session contents or authentication diagnostics.
@@ -33,9 +77,9 @@ fn cli(native: Native, allocator: std.mem.Allocator, cwd: []const u8, plan: Plan
 fn sameServer(native: Native, allocator: std.mem.Allocator, cwd: []const u8, plan: Plan, cancelled: *std.atomic.Value(bool)) !bool {
     const result = try cli(native, allocator, cwd, plan, &.{ "server", "status", "--json" }, cancelled);
     if (!result.ok) return false;
-    const Status = struct { endpoint: []const u8, host_id: []const u8, instance_id: []const u8, api_revision: u32 };
+    const Status = struct { endpoint: []const u8, host_id: []const u8, instance_id: []const u8, api_revision: ApiRevision };
     const parsed = std.json.parseFromSlice(Status, allocator, result.output, .{ .ignore_unknown_fields = true }) catch return false;
-    return supportedApi(parsed.value.api_revision) and endpoint.same(parsed.value.endpoint, plan.server) and std.mem.eql(u8, parsed.value.host_id, plan.hostId) and std.mem.eql(u8, parsed.value.instance_id, plan.instanceId);
+    return supportedApi(parsed.value.api_revision.value) and endpoint.same(parsed.value.endpoint, plan.server) and std.mem.eql(u8, parsed.value.host_id, plan.hostId) and std.mem.eql(u8, parsed.value.instance_id, plan.instanceId);
 }
 
 pub fn clientPath(native: Native, allocator: std.mem.Allocator) ![]const u8 {

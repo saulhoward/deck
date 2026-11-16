@@ -20,7 +20,7 @@ async function stop(child: ChildProcess | undefined) {
   const closed = once(child, "close"); child.kill("SIGTERM"); const timer = setTimeout(() => child.kill("SIGKILL"), 6000);
   try { await closed; } finally { clearTimeout(timer); }
 }
-for (const remote of [false, true]) test(`API14 isolated ${remote ? "remote-selected" : "local"} agent: same-block create/start, exact brief, detach/list/resume${remote ? " and detached worker reuse" : ""}`, { skip: !deck || !rex, timeout: 100000 }, async () => {
+for (const remote of [false, true]) test(`API14+ isolated ${remote ? "remote-selected" : "local"} agent: same-block create/start, exact brief, detach/list/resume${remote ? " and detached worker reuse" : ""}`, { skip: !deck || !rex, timeout: 100000 }, async () => {
   const root = await realpath(await mkdtemp("/tmp/deck-agent-"));
   const work = join(root, "worker-work"), hubWork = join(root, "hub-work"), client = join(root, "client"), localHome = join(root, "local"), hubHome = remote ? join(root, "remote") : localHome;
   for (const path of new Set([work, hubWork, localHome, hubHome, join(root, "bin")])) await mkdir(path);

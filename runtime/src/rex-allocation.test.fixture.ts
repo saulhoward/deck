@@ -7,7 +7,7 @@ import { DeckRuntime } from "./deck.js";
 import { PipeFiles } from "./host-files.js";
 import { type RexResult, type RexTarget } from "./rex-allocation.js";
 import { IMPLEMENTATION, model, provider, checkpoint } from "./instructions.test.support.js";
-import { REX_UUID } from "./rex-allocation.test.support.js";
+import { REX_UUID, REX_COMPATIBLE_API_MODES, REX_REJECTED_API_MODES } from "./rex-allocation.test.support.js";
 const args = process.argv.slice(2); const directory = dirname(args[0]!); const mode = process.env.DECK_REX_MODE;
 const point = process.env.DECK_REX_POINT;
 const files = new PipeFiles(Number(args[6]), Number(args[7]), Number(args[8]));
@@ -44,7 +44,7 @@ try {
   const settled = await runtime.harness.waitForTask(task, context);
   assert.equal(settled.state.outcome.status, "completed"); if (settled.state.outcome.status !== "completed") throw new Error("No result");
   const result: RexResult = settled.state.outcome.result;
-  const expected = mode === "cancel" ? "aborted" : ["offline", "api_mismatch", "wrong_server", "bad_client"].includes(mode ?? "") ? "not_allocated" : mode && mode !== "api10" ? "uncertain" : "allocated";
+  const expected = mode === "cancel" ? "aborted" : ["offline", ...REX_REJECTED_API_MODES, "wrong_server", "bad_client"].includes(mode ?? "") ? "not_allocated" : mode && !REX_COMPATIBLE_API_MODES.includes(mode) ? "uncertain" : "allocated";
   assert.equal(result.status, expected); assert.doesNotMatch(JSON.stringify(result), /PRIVATE_/);
   if (result.status === "allocated") { assert.equal(result.binding.readiness, "not_checked"); assert.deepEqual(await runtime.terminalBinding(id), result.binding); }
   else assert.equal(await runtime.terminalBinding(id), undefined);

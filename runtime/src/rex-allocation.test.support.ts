@@ -1,12 +1,16 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 export const REX_UUID = "12345678-1234-1234-1234-123456789abc";
+export const REX_COMPATIBLE_API_MODES = ["api9", "api10", "api14", "api16", "api99"];
+export const REX_REJECTED_API_MODES = ["api_mismatch", "api_invalid", "api_missing", "api_string"];
 export async function fakeRex(directory: string, mode = "", server = "unix:///tmp/deck-rex-fake.sock", defaults = false) {
   await writeFile(join(directory, "mode"), mode);
   const path = join(directory, "fake-rex");
   await writeFile(path, `#!${process.execPath}
 const fs=require('node:fs'), assert=require('node:assert/strict');
 const root=${JSON.stringify(directory)}, uuid=${JSON.stringify(REX_UUID)}, server=${JSON.stringify(server)}, mode=fs.readFileSync(root+'/mode','utf8');
+const version=/^(?:inspect-)?api(\\d+)$/.exec(mode);
+const apiRevision=mode==='inspect-api-string'||mode==='api_string'?'16':mode==='inspect-api-mismatch'||mode==='api_mismatch'?7:mode==='inspect-api-invalid'||mode==='api_invalid'?16.5:mode==='inspect-api-missing'||mode==='api_missing'?undefined:version?Number(version[1]):8;
 const args=process.argv.slice(2); assert.deepEqual(args.slice(0,3),['--autostart=false','--timeout','2s']);
 const explicit=args[3]==='--server';
 if(explicit) assert.equal(decodeURIComponent(args[4]),decodeURIComponent(server)); else {assert.equal(${defaults},true);assert.deepEqual(args.slice(3),['server','status','--json']);}
@@ -16,7 +20,7 @@ fs.appendFileSync(root+'/calls',JSON.stringify(args)+'\\n');
 const command=args.slice(explicit?5:3), created=fs.existsSync(root+'/created');
 if(command[0]==='server') {
  if(mode==='resolve-malformed') {console.log('PRIVATE_STATUS');process.exit(0);}
- console.log(JSON.stringify({endpoint:mode==='resolve-remote'?'https://wrong.example':server,you:{transport:mode==='resolve-tcp'?'tcp':'unix'},private:'PRIVATE_STATUS',host_id:mode==='wrong_server'?'00000000-0000-0000-0000-000000000000':uuid,instance_id:(mode==='changed_server'&&created)||mode==='inspect-identity'||(mode==='inspect-identity-after'&&fs.existsSync(root+'/inspected'))?'00000000-0000-0000-0000-000000000000':uuid,api_revision:mode==='inspect-api-mismatch'||mode==='api_mismatch'?9:mode==='api10'||mode==='inspect-api10'?10:8}));
+ console.log(JSON.stringify({endpoint:mode==='resolve-remote'?'https://wrong.example':server,you:{transport:mode==='resolve-tcp'?'tcp':'unix'},private:'PRIVATE_STATUS',host_id:mode==='wrong_server'?'00000000-0000-0000-0000-000000000000':uuid,instance_id:(mode==='changed_server'&&created)||mode==='inspect-identity'||(mode==='inspect-identity-after'&&fs.existsSync(root+'/inspected'))?'00000000-0000-0000-0000-000000000000':uuid,api_revision:apiRevision}));
 } else if(command[0]==='new'||command[0]==='run') {
  if(command[0]==='run') {assert.equal(command[command.indexOf('--session')+1],'session:'+uuid); assert.ok(command.includes('--focus=false'));}
  fs.appendFileSync(root+'/created','create\\n');

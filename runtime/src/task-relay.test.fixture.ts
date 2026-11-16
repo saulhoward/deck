@@ -44,7 +44,7 @@ else {
   server.stderr!.resume(); const sessions = new Set<string>();
   try {
     await until(() => access(`${rexRoot}/server.sock`).then(() => true, () => false), Boolean);
-    const status = await json("server", "status", "--json"); assert.ok([8, 10, 14].includes(status.api_revision));
+    const status = await json("server", "status", "--json"); assert.ok(Number.isInteger(status.api_revision) && status.api_revision >= 8 && status.api_revision <= 0xffff_ffff);
     process.stderr.write(`deck test: isolated Rex API ${status.api_revision}; no tailnet\n`);
     assert.equal(status.you.transport, "unix"); assert.equal(status.tailscale.state, "disabled"); assert.equal(status.session_count, 0);
     const host = routes!.hosts[0]!;

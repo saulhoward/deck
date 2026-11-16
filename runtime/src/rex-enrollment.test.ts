@@ -24,7 +24,7 @@ async function stop(child: ChildProcess | undefined) {
   const timer = setTimeout(() => child.kill("SIGKILL"), 8000);
   try { await closed; } finally { clearTimeout(timer); }
 }
-test("API14 isolated Rex: automatic registration, assigned-worker reads/cancellation, same daemon reconnect and central history", { skip: !deck || !rex, timeout: 75_000 }, async () => {
+test("API14+ isolated Rex: automatic registration, assigned-worker reads/cancellation, same daemon reconnect and central history", { skip: !deck || !rex, timeout: 75_000 }, async () => {
   const root = await realpath(await mkdtemp("/tmp/deck-auto-"));
   const hubState = join(root, "hub"), workerState = join(root, "worker"), hubWork = join(root, "hub-work"), workerWork = join(root, "worker-work"), runtime = join(root, "rex");
   for (const dir of [hubWork, workerWork, runtime, join(root, "bin")]) await mkdir(dir);

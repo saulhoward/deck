@@ -19,7 +19,7 @@ const help =
     \\deck agent [same connection options] --recover STARTUP_ID --confirm
     \\
     \\Selection: --hub, then DECK_HUB_REX_HOST, otherwise local; --local ignores env.
-    \\Rex API 14 is required for automatic startup. --rex ABS / --server UNIX_URL
+    \\Rex API 14 or newer is required for automatic startup. --rex ABS / --server UNIX_URL
     \\override the local Rex executable/server. No install, endpoint or host fallback.
     \\Worker and task terminal stay on this machine. Workspace is the invoking cwd.
     \\New tasks open a form in Rex: required problem, optional description, then

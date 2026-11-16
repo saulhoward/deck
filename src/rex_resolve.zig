@@ -47,11 +47,11 @@ pub fn resolve(native: Native, allocator: std.mem.Allocator, cwd: []const u8, en
     // no --server Rex uses its per-account local Unix socket, not a host label.
     const result = shell.runArgvCaptured(native, allocator, cwd, argv.items, 4, cancelled) catch return refused("rex_unavailable");
     if (!result.result.ok or result.result.truncated or cancelled.load(.acquire)) return refused("rex_unavailable");
-    const Status = struct { endpoint: []const u8, host_id: []const u8, instance_id: []const u8, api_revision: u32, you: struct { transport: []const u8 } };
+    const Status = struct { endpoint: []const u8, host_id: []const u8, instance_id: []const u8, api_revision: @import("rex.zig").ApiRevision, you: struct { transport: []const u8 } };
     const status = std.json.parseFromSlice(Status, allocator, result.stdout, .{ .ignore_unknown_fields = true }) catch return refused("rex_unavailable");
     defer status.deinit();
     const value = status.value;
-    if (!@import("rex.zig").supportedApi(value.api_revision) or !std.mem.eql(u8, value.you.transport, "unix") or !endpoint.valid(value.endpoint)) return refused("rex_unavailable");
+    if (!@import("rex.zig").supportedApi(value.api_revision.value) or !std.mem.eql(u8, value.you.transport, "unix") or !endpoint.valid(value.endpoint)) return refused("rex_unavailable");
     if (options.server) |server| {
         if (!endpoint.same(server, value.endpoint)) return refused("rex_unavailable");
     }

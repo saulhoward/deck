@@ -244,12 +244,12 @@ pub fn run(native: Native, args: []const []const u8) !void {
         try std.Io.File.stdout().writeStreamingAll(native.io,
             \\deck-worker (also available as deck worker):
             \\  rex --directory ABSOLUTE_DIRECTORY --hub REX_HOST --client ABSOLUTE_DECK [--rex ABSOLUTE_REX] [--port 52800]
-            \\    Rex API 14 transport and automatic registration; foreground native worker.
+            \\    Rex API 14+ transport and automatic registration; foreground native worker.
             \\  peer --tailscale ABSOLUTE_EXECUTABLE
             \\  init --directory NEW_ABSOLUTE_DIRECTORY --hub-id HUB_ID --hub-address TAILSCALE_IP:PORT --hub-node STABLE_NODE_ID --hub-user DECIMAL_USER_ID [--client /absolute/deck] [--mcp /private/profiles.json] [--launcher]
             \\  identity|run --directory ABSOLUTE_DIRECTORY --tailscale ABSOLUTE_EXECUTABLE
             \\Explicit peer/implementation approval is required. Default: files/bash only.
-            \\--client opts into Rex (local Unix, API 8/10/14) and a private task relay socket.
+            \\--client opts into Rex (local Unix, API 8+) and a private task relay socket.
             \\Approve its exact client path/socket and files,bash,rex capabilities on the hub.
             \\--mcp opts into native stdio MCP; approve files,bash,mcp (or files,bash,rex,mcp).
             \\--launcher requires --client; explicitly approve launcher as the final capability.

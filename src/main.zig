@@ -49,7 +49,7 @@ const help =
     \\serve initializes fresh/default state under its writer lock; init is optional.
     \\An existing store without its identity refuses; never remove writer.lock.
     \\The chat API binds only 127.0.0.1. --stdio selects private framed IPC instead.
-    \\Automatic workers use authenticated Rex API-14 forwarding and pinned enrollment.
+    \\Automatic workers use authenticated Rex API-14+ forwarding and pinned enrollment.
     \\Enrollment uses loopback port+1 (65534 for port 65535), with eight worker slots.
     \\No automatic Rex installation, worker replacement or remote-to-local fallback.
     \\--workers enables pinned Tailscale links; Rex/task relay needs explicit worker opt-in.
@@ -97,7 +97,7 @@ const help =
     \\Remote task clients reuse the verified worker link; no extra login or exposed HTTP.
     \\Approved remote launcher: deck agent --launch-from ABS_WORKER_DIRECTORY [--help].
     \\Launcher list/create/open/inspect is separate from task input and hub authority.
-    \\Terminal allocation uses local Unix endpoints (API 8/10/14); forwarding requires 14.
+    \\Terminal allocation uses local Unix endpoints (API 8+); forwarding requires 14+.
     \\Jobs/child terminals remain future.
     \\
 ;
@@ -482,7 +482,7 @@ pub fn main(init: std.process.Init) void {
     if (args.len > 1 and std.mem.eql(u8, args[1], "agent") and @import("agent_startup.zig").managed(args[2..])) {
         @import("agent_startup.zig").run(init, args[2..]) catch |err| {
             const message = switch (err) {
-                error.RexForwardRequiresApi14 => "deck: automatic startup requires Rex API 14 (preview.19); update the selected Rex client/server explicitly. Nothing installed and no fallback used.\n",
+                error.RexForwardRequiresApi14 => "deck: automatic startup requires Rex API 14 or newer; update the selected Rex client/server explicitly. Nothing installed and no fallback used.\n",
                 error.InvalidArguments, error.InvalidHubEndpoint => "deck: invalid agent options or Rex endpoint; use deck agent --help. No fallback used.\n",
                 error.SelectedHubUnavailable => "deck: selected hub/worker unavailable or incompatible; run the matching deck serve on the selected host. No local fallback.\n",
                 error.LocalRexUnavailable => "deck: local Rex unavailable/unsupported; start/update Rex. Task terminals must stay on this machine.\n",

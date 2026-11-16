@@ -2,7 +2,7 @@
 
 Deck is a personal coding-agent tool. It has a Zig hub, command-line client, and terminal user interface (TUI). One TypeScript runtime uses Pi to store conversations and run agents. Zig runs local file and shell tools. Rex can keep task terminals open.
 
-**Deck is a prototype.** Automatic state setup, managed hub sessions, and local/remote task startup through Rex are implemented. The new flow requires **Rex API 14** (preview.19) and has isolated Darwin tests; actual HTTPS/two-machine acceptance is still outstanding. Earlier [two-machine acceptance](docs/HISTORY.md#phase-0-two-machine-acceptance) covers the separate manually registered API-10 workflow, not the new transport. Tools run with your user permissions; the workspace is not a sandbox.
+**Deck is a prototype.** Automatic state setup, managed hub sessions, and local/remote task startup through Rex are implemented. The new flow requires **Rex API 14 or newer** and has isolated Darwin tests; actual HTTPS/two-machine acceptance is still outstanding. Earlier [two-machine acceptance](docs/HISTORY.md#phase-0-two-machine-acceptance) covers the separate manually registered API-10 workflow, not the new transport. Tools run with your user permissions; the workspace is not a sandbox.
 
 ## Documentation
 
@@ -23,7 +23,7 @@ deck --help
 
 No checkout, global Node or npm installation is needed. The default package installs **`deck` and `deck-worker`**, including Deck's private Node/runtime and Bash. Make sure your Nix profile's `bin` directory is on `PATH` (normally configured by the Nix installer). If Nix reports disabled experimental features, enable `experimental-features = nix-command flakes` in your Nix configuration. The first install may compile Deck and run its build checks; no Deck-specific binary cache is required or configured.
 
-Installation does **not** start a hub, create its state, configure model credentials or install/upgrade Rex. Follow the [current workflow](#current-workflow) and [provider setup](#connect-a-provider) on the coordinator. Automatic task startup needs separately installed **Rex API 14** on the execution machine and remote coordinator.
+Installation does **not** start a hub, create its state, configure model credentials or install/upgrade Rex. Follow the [current workflow](#current-workflow) and [provider setup](#connect-a-provider) on the coordinator. Automatic task startup needs separately installed **Rex API 14+** on the execution machine and remote coordinator.
 
 To upgrade an existing installation, first follow the [stop, drain and backup procedure](#stop-upgrade-and-back-up), then:
 
@@ -69,7 +69,7 @@ Pi stores each chat separately. Task answers do not automatically become new inp
 
 ## Automatic task startup
 
-Install the full Deck client and run a compatible Rex CLI/server on the invoking machine. A remote coordinator also needs Rex API 14 and a running `deck serve`. Deck does not install/upgrade Rex or start the hub for you.
+Install the full Deck client and run a compatible Rex CLI/server on the invoking machine. A remote coordinator also needs Rex API 14+ and a running `deck serve`. Rex revision N supports APIs 0 through N, so Deck uses minimum-version checks: API 8+ for terminal allocation/inspection and API 14+ for automatic startup/forwarding, including API 16. Required response fields and identity checks still apply. Deck does not install/upgrade Rex or start the hub for you.
 
 ```sh
 # Coordinator (real runs require configured model authentication):
@@ -90,7 +90,7 @@ deck agent --local             # ignore DECK_HUB_REX_HOST
 
 Selection is `--hub` → `DECK_HUB_REX_HOST` → local. Only authenticated host/account equality permits recognizing a remote spelling as this same host; an unavailable/different remote **never falls back** to a local hub. Rex host access authenticates the forwarding boundary, not knowledge of a URL. There is no direct remote HTTP/Tailscale-socket fallback.
 
-The worker, task terminal and cwd stay on the **invoking machine**. Remote startup registers and reuses a compatible detached native worker automatically. It has receipts and private connection metadata, not inference, a provider store or a Pi database. Closing the launcher/TUI does not stop the worker or task. After a client update, normal commands automatically reuse the worker's verified original full Nix client, including its older UI, and print a notice; you do not need to find/type the old store path. Keep that package installed. Identity conflicts, unconfirmed session creation, missing/changed packages and unsupported wrappers still refuse. This is client reuse, not live worker upgrading or compatibility negotiation; it changes no pins and replaces no daemon. Automatic enrollment has eight pinned worker slots; it is not automatic worker migration/retirement. Worker-local MCP configuration still uses the explicit advanced setup below; automatic enrollment advertises files/bash/Rex/launcher, not MCP.
+The worker, task terminal and cwd stay on the **invoking machine**. Remote startup registers and reuses a compatible detached native worker automatically. It has receipts and private connection metadata, not inference, a provider store or a Pi database. Closing the launcher/TUI does not stop the worker or task. After a client update, normal commands automatically reuse the worker's verified original full Nix client, including its older UI, and print a notice; you do not need to find/type the old store path. Keep that package installed. Identity conflicts, unconfirmed session creation, missing/changed packages and unsupported wrappers still refuse. This is client reuse, not live worker upgrading or compatibility negotiation; it changes no pins and replaces no daemon. An older pinned client retains its compiled Rex checks, so installing a newer Deck profile alone does not update that client's policy. Automatic enrollment has eight pinned worker slots; it is not automatic worker migration/retirement. Worker-local MCP configuration still uses the explicit advanced setup below; automatic enrollment advertises files/bash/Rex/launcher, not MCP.
 
 The form shows the cwd and requires a nonblank **Problem** (2,048 UTF-8 bytes maximum). **Description** is optional (8,192 bytes); omitted and explicitly empty are distinct. Enter moves between fields/buttons; Shift-Enter or Insert-mode Ctrl-J inserts a newline. Ctrl-E toggles description presence. Choose **Create & start**, or press Ctrl-S, to authorize creation and initial input. Paste is literal. The problem is saved exactly as the brief and initial input; the display title is derived separately.
 
@@ -507,7 +507,7 @@ Existing saved bindings use the worker through the native adapter. Files/bash-on
 
 Rex over Tailscale provides terminal access; Deck adds **no second user login**. A remote task TUI connects to a private Unix socket on its worker. Its task commands travel on a separate bounded channel of the same verified worker link, not through a remotely exposed hub HTTP API. Pi, inference, history, and scheduling remain on the hub.
 
-1. Install the full Deck client and a supported Rex CLI/server on the execution host. Run Rex and the worker as the same OS user so its terminals can access the private client socket. The native-only worker package does not contain the TUI or Node; installing the client separately does not make the worker daemon a Pi runtime. Rex must be reachable through a **worker-local Unix endpoint**, with API **8, 10 or 14**. HTTPS terminal-allocation targets and unlisted revisions are refused; remote coordinator forwarding is a separate API-14 surface.
+1. Install the full Deck client and a supported Rex CLI/server on the execution host. Run Rex and the worker as the same OS user so its terminals can access the private client socket. The native-only worker package does not contain the TUI or Node; installing the client separately does not make the worker daemon a Pi runtime. Rex must be reachable through a **worker-local Unix endpoint**, with API **8 or newer**. HTTPS terminal-allocation targets and revisions below 8 are refused; remote coordinator forwarding separately requires API 14+.
 2. For a **new** worker, add `--client /absolute/path/to/deck` to `deck-worker init`. The worker saves that client path and a derived `client.sock` path inside its private state directory (socket path at most 100 UTF-8 bytes). `identity` now emits ordered `files,bash,rex` capabilities plus:
    ```json
    {
@@ -531,7 +531,7 @@ The client must register its exact hub/task/allocation and native `REX_BLOCK` be
 
 All three sockets (effects, control, clients) independently verify their actual Tailscale peer and bind one fresh generation. Revocation, replacement, or config drift cannot silently attach an old client to another task. Changing an approved client path requires explicitly closing/reopening affected terminals; retain the old immutable build and settle work first. No live hub or remote machine is upgraded by building this feature.
 
-Validation includes isolated sockets/FIFOs with injected peer verification and a separate [real two-machine run](docs/HISTORY.md#phase-0-two-machine-acceptance) with production Tailscale peer verification. The latter exercised managed startup, central task input/history, same-PID reconnect, lost-ACK draft recovery, native effect faults and explicit same-conversation reopen. It used a private Rex API 10/Unix server; the existing API 9 service was used only for operator access and remains unsupported for Deck allocation. No live provider or desktop GUI acceptance is implied.
+Validation includes isolated sockets/FIFOs with injected peer verification and a separate [real two-machine run](docs/HISTORY.md#phase-0-two-machine-acceptance) with production Tailscale peer verification. The latter exercised managed startup, central task input/history, same-PID reconnect, lost-ACK draft recovery, native effect faults and explicit same-conversation reopen. It used a private Rex API 10/Unix server; the existing API 9 service was used only for operator access, not allocation acceptance. The current minimum-version policy accepts API 9 for advanced allocation, but that does not expand the historical test evidence. No live provider or desktop GUI acceptance is implied.
 
 ## Enable the remote launcher
 
@@ -556,7 +556,7 @@ deck agent --launch-from /private/worker-state --open 11 --confirm
 deck agent --launch-from /private/worker-state --inspect 11
 ```
 
-Listing scans at most 25 conversations; follow the returned `next` cursor even if the filtered page is empty. IDs above are examples, not task selection by labels or paths. The launcher cannot select a Rex executable/endpoint: configure a supported local Rex default on the worker. An existing allocation retains its target. Rex API 8/10/14 over a worker-local Unix socket is the supported allocation surface.
+Listing scans at most 25 conversations; follow the returned `next` cursor even if the filtered page is empty. IDs above are examples, not task selection by labels or paths. The launcher cannot select a Rex executable/endpoint: configure a supported local Rex default on the worker. An existing allocation retains its target. Rex API 8+ over a worker-local Unix socket is the supported allocation surface.
 
 Creation follows **save exact private draft → create → validate ACK → clear that draft → separate best-effort Rex open**. Creation starts no generation and grants no MCP profiles. Existing selections remain unchanged; only trusted-local hub controls can grant profiles. An open ACK means admission, not terminal readiness. The assigned worker launches the approved TUI, which must complete pinned hub/task/allocation/block startup before accepting input. Opening does not promise GUI focus or attach the invoking shell.
 

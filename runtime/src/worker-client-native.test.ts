@@ -27,8 +27,9 @@ test("new client reuses the verified original client without changing worker ide
   await mkdir(join(worker, "operations"), { mode: 0o700 });
   const uncertain = JSON.stringify({ hash: "a".repeat(64), result: null });
   await writeFile(join(worker, "operations", "1.json"), uncertain, { mode: 0o600 });
-  const fakeRex = join(root, "rex");
-  await writeFile(fakeRex, `#!${process.execPath}\nif (process.argv.includes("whoami")) console.log(JSON.stringify(${JSON.stringify({ host_id: hostId, instance_id: hubId, account, api_revision: 14 })})); else process.exitCode=1;\n`, { mode: 0o700 });
+  const fakeRex = join(root, "rex"), revisionFile = join(root, "api-revision.json");
+  await writeFile(revisionFile, "16"); // A newer maximum still supports the API-14 launcher contract.
+  await writeFile(fakeRex, `#!${process.execPath}\nif (process.argv.includes("whoami")) console.log(JSON.stringify({...${JSON.stringify({ host_id: hostId, instance_id: hubId, account })},api_revision:JSON.parse(require('node:fs').readFileSync(${JSON.stringify(revisionFile)},'utf8'))})); else process.exitCode=1;\n`, { mode: 0o700 });
   const holderEntry = join(root, "holder.mjs");
   await writeFile(holderEntry, 'process.stdin.resume(); process.stdin.on("end",()=>process.exit(0)); process.stdout.write("held\\n");');
   const env = { HOME: root, PATH: "/usr/bin:/bin", DECK_NODE: process.execPath, DECK_RUNTIME_ROOT: resolve("."), DECK_CLIENT_STATE_DIRECTORY: clientRoot };
@@ -68,6 +69,16 @@ test("new client reuses the verified original client without changing worker ide
     assert.equal(await readFile(join(worker, "operations", "1.json"), "utf8"), uncertain);
     assert.equal(holder.exitCode, null); assert.equal(holder.signalCode, null);
     const count = commands.length;
+    // Revision checks still precede dispatch or a launcher request. Malformed
+    // versions do not become proof of support for an older API.
+    for (const revision of [0, 13, -1, 16.5, "16", null]) {
+      await writeFile(revisionFile, JSON.stringify(revision));
+      const refused = await invoke(); assert.equal(refused.ok, false);
+      if (revision === 0 || revision === 13) assert.match(refused.stderr, /requires Rex API 14 or newer/);
+      assert.equal(await readFile(connectionFile, "utf8"), JSON.stringify(connection));
+      assert.equal(commands.length, count);
+    }
+    await writeFile(revisionFile, "16");
     for (const change of [{ pendingSession: true }, { hostId: hubId }, { account: "different" }, { hubPort: 52801 }]) {
       const changed = { ...connection, ...change }; await save(changed);
       const refused = await invoke(); assert.equal(refused.ok, false); assert.match(refused.stderr, /identity differs or session creation is unconfirmed/);

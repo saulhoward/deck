@@ -1,4 +1,4 @@
-//! Rex API 14 TCP transport. Rex, not Deck, authenticates remote access. Never
+//! Rex API 14+ TCP transport. Rex, not Deck, authenticates remote access. Never
 //! forward a public bind, autostart a server, select a default session, or replay
 //! a broken TCP stream. The caller supplies an explicitly owned tunnel session.
 const std = @import("std");
@@ -30,7 +30,7 @@ pub fn remoteEndpoint(value: []const u8) bool {
 fn endpoint(value: []const u8) bool {
     return remoteEndpoint(value) or @import("rex_endpoint.zig").valid(value);
 }
-pub const Identity = struct { host_id: []const u8, instance_id: []const u8, account: []const u8, api_revision: u32 };
+pub const Identity = struct { host_id: []const u8, instance_id: []const u8, account: []const u8, api_revision: @import("rex.zig").ApiRevision };
 pub fn identity(native: Native, allocator: std.mem.Allocator, executable: []const u8, server: []const u8, cancelled: *std.atomic.Value(bool)) !std.json.Parsed(Identity) {
     if (!@import("mcp_profiles.zig").absolute(executable) or !endpoint(server)) return error.InvalidRexForward;
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -41,8 +41,9 @@ pub fn identity(native: Native, allocator: std.mem.Allocator, executable: []cons
     const parsed = try std.json.parseFromSlice(Identity, allocator, result.stdout, .{ .allocate = .alloc_always, .ignore_unknown_fields = true });
     errdefer parsed.deinit();
     if (!wire.validRexUuid(.{ .string = parsed.value.host_id }) or !wire.validRexUuid(.{ .string = parsed.value.instance_id }) or parsed.value.account.len == 0 or parsed.value.account.len > 200 or std.mem.indexOfAny(u8, parsed.value.account, "\x00\r\n") != null) return error.InvalidRexIdentity;
-    // Explicit revision, not a minimum. Older/newer contracts must be tested.
-    if (parsed.value.api_revision != 14) return error.RexForwardRequiresApi14;
+    // Rex advertises its maximum backwards-compatible API. Forwarding and
+    // automatic startup need API 14; a newer maximum still supports it.
+    if (!@import("rex.zig").supportedAutomaticApi(parsed.value.api_revision.value)) return error.RexForwardRequiresApi14;
     return parsed;
 }
 fn forwardedPort(line: []const u8) !u16 {

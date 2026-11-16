@@ -30,6 +30,12 @@ Linux validation passed **87 native tests with one optional skip** and **19 focu
 
 **Still unimplemented:** explicit worker protocol/receipt compatibility negotiation and live daemon upgrading. Existing daemons cannot acknowledge a handoff. A future rollout must establish custody of active/accepted/uncertain work, drain admission, preserve identities/allocations/receipts, durably transfer ownership, and fence old connection generations. Failed/unsupported handoff must leave the old worker intact; contact must never replay an effect or overwrite an uncertain receipt. Retaining and dispatching the old client is a safe contact path, not evidence that this protocol exists.
 
+## Rex backwards-compatibility policy
+
+Rex revision N supports APIs 0 through N. Deck now uses feature minimums instead of release allowlists: API 8+ for terminal discovery/allocation/inspection and API 14+ for automatic startup/forwarding. Required identity, endpoint, ownership and response-shape checks remain in place. API revisions are validated as unsigned JSON integers (numeric strings are not coerced). There is no new idempotency assumption, effect replay, metadata rewrite or worker replacement. Pinned older clients/daemons keep their compiled checks; a new profile alone does not update them.
+
+Linux validation passed **88 native tests with one optional skip** and **54 focused runtime/integration tests** in the final combined run. Fake-CLI cases cover API 9, 16 and a future revision, too-old/missing/malformed/string revisions, scoped launcher contact, retained receipts, cancellation and crash recovery without repeated creation. The API-16 allocation regression fails against the prior executable. Real isolated Rex tests used the available **API-14** binary, including forwarding, local/remote startup, task TUI/adoption, same-daemon reconnect and managed hub clients. Focused strict TypeScript, contracts and formatting checks passed. Two earlier cold runs timed out on the public fixture's initial status request before any Rex operation; its isolated rerun and final combined run passed with the original deadlines. Full-project TypeScript/emission at a 256 MiB heap exceeded memory; focused checking passed at 512 MiB. No fresh full Nix build, real API-16/macOS acceptance or operator service upgrade was performed.
+
 ## Follow-up 1: complete the power-loss durability protocol
 
 **Priority: high. This review does not fix this gap.**

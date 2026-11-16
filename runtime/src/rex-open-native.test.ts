@@ -6,7 +6,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { fakeRex, REX_UUID } from "./rex-allocation.test.support.js";
+import { fakeRex, REX_UUID, REX_REJECTED_API_MODES } from "./rex-allocation.test.support.js";
 import { freeHubPort } from "./hub-port.test.support.js";
 const binary = process.env.DECK_TEST_BINARY;
 async function until<T>(read: () => Promise<T>, accept: (value: T) => boolean, failure = () => new Error("Rex open condition not observed")): Promise<T> {
@@ -78,7 +78,7 @@ test("public Rex CLI/HTTP uses packaged native effects for new, reuse, replaceme
     assert.match(cli("status"), /unallocated/);
     assert.match(cli("open", [], chatId, false), /Local Rex unavailable/); // Missing PATH executable, no task admitted.
     await symlink(rex, join(bin, "rex"));
-    for (const mode of ["api_mismatch", "wrong_server", "inspect-identity", "resolve-remote", "resolve-tcp", "resolve-malformed"]) {
+    for (const mode of [...REX_REJECTED_API_MODES, "wrong_server", "inspect-identity", "resolve-remote", "resolve-tcp", "resolve-malformed"]) {
       await writeFile(join(root, "mode"), mode);
       // Wrong-host protection is an optional override, not guessed authority.
       const overrides = mode === "wrong_server" ? ["--host-id", REX_UUID] : mode === "inspect-identity" ? ["--instance-id", REX_UUID] : [];
@@ -87,10 +87,11 @@ test("public Rex CLI/HTTP uses packaged native effects for new, reuse, replaceme
     }
     await assert.rejects(readFile(join(root, "created")), { code: "ENOENT" });
     assert.deepEqual(await readdir(join(root, "worker/operations")), []);
-    await writeFile(join(root, "mode"), "api10");
+    await writeFile(join(root, "mode"), "api16");
     assert.match(cli("open"), /admitted/);
     const settled = () => until(() => command("rex_status", { chatId }), (value) => value.status !== "pending");
     let state = await settled(); assert.equal(state.status, "allocated"); assert.equal(state.binding.server, server); const first = state.taskId;
+    await writeFile(join(root, "mode"), "api9"); // Intermediate revisions also retain API 8.
     assert.match(cli("open"), /reused/); assert.equal((await readFile(join(root, "created"), "utf8")).trim().split("\n").length, 1);
     assert.match(cli("inspect"), /running/);
     for (const mode of ["inspect-exited", "inspect-missing-terminal", "inspect-missing-session"]) {
@@ -113,7 +114,7 @@ test("public Rex CLI/HTTP uses packaged native effects for new, reuse, replaceme
     const uncertain = await command("rex_open", args);
     const unknown = await until(() => command("rex_status", { chatId: other }), (value) => value.status !== "pending"); assert.equal(unknown.status, "uncertain");
     assert.deepEqual(await command("rex_open", args), uncertain);
-    await writeFile(join(root, "mode"), "api10");
+    await writeFile(join(root, "mode"), "api99"); // No hard-coded ceiling for later compatible APIs.
     const retry = await command("rex_open", { chatId: other, port, requestId: "00000000-0000-4000-8000-000000000002" }); assert.notEqual(retry.taskId, uncertain.taskId);
     const retried = await until(() => command("rex_status", { chatId: other }), (value) => value.status !== "pending");
     assert.equal(retried.status, "allocated"); assert.equal(retried.binding.server, target.server);

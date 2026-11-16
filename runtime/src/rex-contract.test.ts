@@ -88,22 +88,21 @@ test("installed Rex contract: isolated local server, argv, stable IDs, ambiguous
   };
   try {
     await until(async () => { try { await access(socket); return true; } catch { return false; } }, Boolean);
-    await t.test("explicit Unix endpoint has no sessions/tailnet and caller schemas advertise no idempotency key", async () => {
+    await t.test("explicit Unix endpoint has no sessions/tailnet and schemas retain required legacy arguments", async () => {
       const status = await json<{ endpoint: string; session_count: number; tailscale: { state: string }; you: { transport: string }; api_revision: number; rex_version: string }>("server", "status", "--json");
       assert.equal(status.endpoint, endpoint); assert.equal(status.session_count, 0); assert.equal(status.tailscale.state, "disabled"); assert.equal(status.you.transport, "unix");
       assert.equal((await stat(socket)).mode & 0o077, 0);
-      assert.ok([8, 10, 14].includes(status.api_revision), `Unvalidated Rex API ${status.api_revision}`);
+      assert.ok(Number.isInteger(status.api_revision) && status.api_revision >= 8 && status.api_revision <= 0xffff_ffff, `Rex API ${status.api_revision} does not support the API-8 contract`);
       await assert.rejects(rex("api", "call", "session.view", JSON.stringify({ session_id: "session:00000000-0000-4000-8000-000000000001" })), /status=404 code=session_not_found/);
       t.diagnostic(`Rex ${status.rex_version}; API revision ${status.api_revision}; isolated Unix server`);
       const schema = await json<{ input_schema: { properties: Record<string, unknown>; additionalProperties: boolean } }>("api", "describe", "session.create", "--json");
-      assert.deepEqual(Object.keys(schema.input_schema.properties).sort(), ["initial_windows", "label"]);
-      assert.equal(schema.input_schema.additionalProperties, false);
+      for (const key of ["initial_windows", "label"]) assert.ok(Object.hasOwn(schema.input_schema.properties, key));
       const window = await json<{ input_schema: { properties: Record<string, unknown>; additionalProperties: boolean } }>("api", "describe", "session.new_window", "--json");
-      assert.deepEqual(Object.keys(window.input_schema.properties).sort(), ["focus", "layout", "session_id", "window_label"]);
-      assert.equal(window.input_schema.additionalProperties, false); // No expected revision/process guard or idempotency key.
+      for (const key of ["focus", "layout", "session_id", "window_label"]) assert.ok(Object.hasOwn(window.input_schema.properties, key));
       const close = await json<{ input_schema: { properties: Record<string, unknown>; additionalProperties: boolean } }>("api", "describe", "block.close", "--json");
-      assert.deepEqual(Object.keys(close.input_schema.properties).sort(), ["block_id", "keep_last", "session_id", "window_id"]);
-      assert.equal(close.input_schema.additionalProperties, false);
+      for (const key of ["block_id", "keep_last", "session_id", "window_id"]) assert.ok(Object.hasOwn(close.input_schema.properties, key));
+      // Later backwards-compatible APIs may add optional arguments. Their
+      // presence does not grant Deck idempotency or permit mutation replay.
       // API 10 advertises additionalProperties:false but ignores invented guard
       // fields on this call! Repeated identical "idempotency" arguments still
       // create distinct sessions. Metadata is not runtime guard enforcement.

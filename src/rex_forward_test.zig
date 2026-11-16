@@ -3,7 +3,7 @@ const Native = @import("native.zig");
 const forward = @import("rex_forward.zig");
 const tcp = @import("remote_io.zig");
 
-test "opt-in API 14 Rex forwarding preserves binary TCP and owns only its tunnel" {
+test "opt-in API 14+ Rex forwarding preserves binary TCP and owns only its tunnel" {
     const source = Native.testing();
     const executable = source.environ.getPosix("DECK_TEST_REX_FORWARD") orelse return error.SkipZigTest;
     const io = source.io;
