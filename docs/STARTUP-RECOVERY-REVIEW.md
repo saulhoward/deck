@@ -13,6 +13,15 @@ On the x86_64-linux machine that reported the failures, the full sandboxed `nix 
 
 These results do not establish the power-loss guarantees or stalled-writer behavior proposed below, or substitute for the opt-in real Rex/two-machine acceptance gates.
 
+## Enrollment follow-up
+
+Two additional Linux enrollment failures were reproduced and repaired:
+
+- The registry directory used Zig's default `O_PATH` handle. File creation/rename succeeded, but the required parent-directory fsync failed with `BADF`, before the enrollment acknowledgement and link startup. Enrollment now opens a readable directory handle. The registry format and durability ordering are unchanged.
+- A reconnecting worker could reach enrollment before the runtime finished cold startup. The five-second private registration handshake then expired and permanently fenced its slot. Each automatic-client pipe now sends a schema-validated `RexRuntimeReady` record after runtime opening. Native validates all eight records and their hub identity before accepting enrollment. Registration/frame deadlines are unchanged; this is not a general startup timeout or IPC supervision redesign.
+
+Validation for this follow-up is separate from the earlier full Nix build above. On Linux, the native suite passed **81 tests with one optional skip**, the two focused native regressions passed in ReleaseSafe as well as Debug, and **45 focused runtime tests passed**. These include isolated API-14 local/remote-selected startup, same-daemon backup/restore reconnect, assigned-worker reads/cancellation, shared contracts, and a default-suite native test holding readiness beyond the existing handshake deadline. Removing the readiness gate reproduces premature disconnection; the old directory handle reproduces the fsync failure. Strict focused TypeScript checking passed. Full-project TypeScript exceeded the constrained 512 MiB heap; a fresh full Nix/package build and macOS/two-machine acceptance were not performed. No live hub or retained operator state was changed.
+
 ## Follow-up 1: complete the power-loss durability protocol
 
 **Priority: high. This review does not fix this gap.**

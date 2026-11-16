@@ -440,6 +440,8 @@ export type ModelSettingsSnapshot = { hubId: TransportId; chatId: PiId; selectio
 export const validModelSettingsSnapshot = (x: unknown): x is ModelSettingsSnapshot => v1032(x);
 export type ModelSettingsAck = { hubId: TransportId; chatId: PiId; selection: ModelSelection };
 export const validModelSettingsAck = (x: unknown): x is ModelSettingsAck => v1084(x);
+export type RexRuntimeReady = { kind: "ready"; hubId: RexUuid };
+export const validRexRuntimeReady = (x: unknown): x is RexRuntimeReady => v1088(x);
 function v0(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "version") && v1(x.version)) && (Object.hasOwn(x, "id") && v2(x.id)) && (Object.hasOwn(x, "command") && v4(x.command)) && (!Object.hasOwn(x, "args") || v5(x.args)) && (!Object.hasOwn(x, "hubId") || v6(x.hubId)); }
 function v1(x: unknown): boolean { return x === 1; }
 function v2(x: unknown): boolean { return v3(x); }
@@ -1528,3 +1530,6 @@ function v1084(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "hub
 function v1085(x: unknown): boolean { return v3(x); }
 function v1086(x: unknown): boolean { return v31(x); }
 function v1087(x: unknown): boolean { return v975(x); }
+function v1088(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "kind") && v1089(x.kind)) && (Object.hasOwn(x, "hubId") && v1090(x.hubId)) && Object.keys(x).every((key) => ["kind","hubId"].includes(key)); }
+function v1089(x: unknown): boolean { return x === "ready"; }
+function v1090(x: unknown): boolean { return v29(x); }

@@ -1,5 +1,6 @@
 {
   "bases": {
+    "RexRuntimeReady": { "kind": "ready", "hubId": "00000000-0000-4000-8000-000000000001" },
     "McpGrantArgs": {"chatId":"1","expectedRevision":0,"profiles":[]},
     "McpCallPlan": {"version":1,"profileId":"counter","revision":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","tool":"counter","schemaHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","conversationId":"1","taskMachineId":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","grantRevision":1,"argumentsJSON":"{}"},
     "AgentStatus": { "state": "done", "taskId": "2" },
@@ -134,6 +135,12 @@
     }
   },
   "cases": [
+    { "name": "automatic runtime ready", "schema": "RexRuntimeReady", "valid": true },
+    { "name": "runtime ready needs kind", "schema": "RexRuntimeReady", "remove": ["kind"], "valid": false },
+    { "name": "registration ack is not readiness", "schema": "RexRuntimeReady", "set": { "kind": "registered" }, "valid": false },
+    { "name": "runtime ready needs hub identity", "schema": "RexRuntimeReady", "remove": ["hubId"], "valid": false },
+    { "name": "runtime ready requires hub UUID", "schema": "RexRuntimeReady", "set": { "hubId": "other" }, "valid": false },
+    { "name": "runtime ready rejects extension", "schema": "RexRuntimeReady", "set": { "worker": true }, "valid": false },
     { "name": "activity status opt in", "schema": "LiveViewArgs", "set": { "includeAgentStatus": true }, "valid": true },
     { "name": "history status opt in requires boolean", "schema": "HistoryArgs", "set": { "includeAgentStatus": "yes" }, "valid": false },
     { "name": "agent status", "schema": "AgentStatus", "valid": true },

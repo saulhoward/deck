@@ -675,6 +675,10 @@
     "ModelSettingsChange": { "type": "object", "additionalProperties": false, "properties": { "expected": { "$ref": "#/$defs/ModelSelection" }, "selection": { "$ref": "#/$defs/ModelSelection" } }, "required": ["expected", "selection"] },
     "SetModelSettingsArgs": { "type": "object", "additionalProperties": false, "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "expected": { "$ref": "#/$defs/ModelSelection" }, "selection": { "$ref": "#/$defs/ModelSelection" } }, "required": ["chatId", "expected", "selection"] },
     "ModelSettingsSnapshot": { "type": "object", "additionalProperties": false, "properties": { "hubId": { "$ref": "#/$defs/TransportId" }, "chatId": { "$ref": "#/$defs/PiId" }, "selection": { "$ref": "#/$defs/ModelSelection" }, "defaultModel": { "$ref": "#/$defs/ModelRef" }, "models": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/ModelOption" } } }, "required": ["hubId", "chatId", "selection", "defaultModel", "models"] },
-    "ModelSettingsAck": { "type": "object", "additionalProperties": false, "properties": { "hubId": { "$ref": "#/$defs/TransportId" }, "chatId": { "$ref": "#/$defs/PiId" }, "selection": { "$ref": "#/$defs/ModelSelection" } }, "required": ["hubId", "chatId", "selection"] }
+    "ModelSettingsAck": { "type": "object", "additionalProperties": false, "properties": { "hubId": { "$ref": "#/$defs/TransportId" }, "chatId": { "$ref": "#/$defs/PiId" }, "selection": { "$ref": "#/$defs/ModelSelection" } }, "required": ["hubId", "chatId", "selection"] },
+    "RexRuntimeReady": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "kind": { "const": "ready" }, "hubId": { "$ref": "#/$defs/RexUuid" } }, "required": ["kind", "hubId"]
+    }
   }
 }

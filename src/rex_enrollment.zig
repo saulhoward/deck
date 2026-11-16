@@ -9,6 +9,11 @@ const trust = @import("remote_contracts.zig");
 const storage = @import("private_store.zig");
 const Link = @import("remote_link.zig").Link;
 const a = std.heap.page_allocator;
+fn registryDirectory(native: Native, path: []const u8) !std.Io.Dir {
+    // Registry publication fsyncs this handle. Zig's default Linux directory
+    // handle is O_PATH, which can rename files but cannot be synced.
+    return std.Io.Dir.cwd().openDir(native.io, path, .{ .iterate = true });
+}
 pub fn enrollmentPort(hub_port: u16) u16 {
     return if (hub_port == 65535) 65534 else hub_port + 1;
 }
@@ -70,7 +75,7 @@ pub const Hub = struct {
     stopping: std.atomic.Value(bool) = .init(false),
     pub fn init(native: Native, state_path: []const u8, local_machine: []const u8, port: u16) !*Hub {
         const self = try a.create(Hub);
-        self.* = .{ .native = native, .arena = .init(a), .directory = try std.Io.Dir.cwd().openDir(native.io, state_path, .{}), .local_machine = local_machine };
+        self.* = .{ .native = native, .arena = .init(a), .directory = try registryDirectory(native, state_path), .local_machine = local_machine };
         errdefer self.deinit();
         tcp.ignorePipe();
         const alloc = self.arena.allocator();
@@ -126,7 +131,33 @@ pub const Hub = struct {
         self.arena.deinit();
         a.destroy(self);
     }
+    fn awaitRuntime(self: *Hub) !void {
+        for (self.slots.items) |slot| {
+            // Wait for the private runtime's readiness record, not a worker's
+            // registration. Cold startup must not consume/fence a worker slot.
+            while (true) {
+                if (self.stopping.load(.acquire)) return error.Cancelled;
+                var polls = [_]std.posix.pollfd{.{ .fd = slot.client_replies[0], .events = std.posix.POLL.IN, .revents = 0 }};
+                if (try std.posix.poll(&polls, 100) != 0) break;
+            }
+            var header: [4]u8 = undefined;
+            try self.readPipe(slot.client_replies[0], &header);
+            const length = std.mem.readInt(u32, &header, .big);
+            if (length == 0 or length > 4096) return error.RegistrationUnavailable;
+            var body: [4096]u8 = undefined;
+            try self.readPipe(slot.client_replies[0], body[0..length]);
+            const ready = try wire.parseRexRuntimeReady(a, body[0..length]);
+            defer ready.deinit();
+            if (self.hub_id) |expected| {
+                if (!std.mem.eql(u8, expected, ready.value.hubId)) return error.HubIdentityChanged;
+            } else self.hub_id = try self.arena.allocator().dupe(u8, ready.value.hubId);
+        }
+    }
     fn serve(self: *Hub) void {
+        self.awaitRuntime() catch |err| {
+            if (!self.stopping.load(.acquire)) std.debug.print("deck: worker enrollment unavailable ({s}); runtime readiness unconfirmed\n", .{@errorName(err)});
+            return;
+        };
         while (!self.stopping.load(.acquire)) {
             var polls = [_]std.posix.pollfd{.{ .fd = self.listener.?.socket.handle, .events = std.posix.POLL.IN, .revents = 0 }};
             if ((std.posix.poll(&polls, 100) catch return) == 0) continue;
@@ -216,3 +247,68 @@ pub const Hub = struct {
         try tcp.send(native.io, fd, wire.RexEnrollmentAck{ .version = 1, .hubId = self.hub_id.?, .machineId = incoming.machineId, .port = slot.link.?.listener.socket.address.getPort() });
     }
 };
+
+test "automatic worker registry publication syncs its state directory" {
+    const native: Native = .{ .io = std.testing.io, .environ = .empty };
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(native.io, ".", allocator);
+    defer allocator.free(path);
+    var directory = try registryDirectory(native, path);
+    defer directory.close(native.io);
+    const registry: wire.RexWorkerRegistry = .{ .version = 1, .hubId = "00000000-0000-4000-8000-000000000001", .hosts = &.{} };
+    // A readable record alone is not success: save must also fsync the parent
+    // before enrollment can acknowledge the worker and start its link listener.
+    try storage.save(native, allocator, directory, "rex-workers.json", registry);
+    const bytes = try directory.readFileAlloc(native.io, "rex-workers.json", allocator, .limited(4096));
+    defer allocator.free(bytes);
+    const saved = try wire.parseRexWorkerRegistry(allocator, bytes);
+    defer saved.deinit();
+    try std.testing.expectEqualStrings(registry.hubId.?, saved.value.hubId.?);
+    try std.testing.expectEqual(@as(usize, 0), saved.value.hosts.len);
+}
+
+test "automatic enrollment requires matching runtime readiness on every slot" {
+    const native: Native = .{ .io = std.testing.io, .environ = .empty };
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try tmp.dir.realPathFileAlloc(native.io, ".", allocator);
+    defer allocator.free(path);
+    const hub_id = "00000000-0000-4000-8000-000000000001";
+    const other = "00000000-0000-4000-8000-000000000002";
+    const Case = enum { ready, wrong_kind, wrong_hub, mixed_hubs, closed, cancelled };
+    for (std.enums.values(Case)) |case| {
+        const manager = try a.create(Hub);
+        manager.* = .{ .native = native, .arena = .init(a), .directory = try registryDirectory(native, path), .local_machine = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .hub_id = if (case == .wrong_hub) hub_id else null };
+        defer manager.deinit();
+        try manager.slots.ensureTotalCapacity(a, 8);
+        for (0..8) |_| manager.slots.appendAssumeCapacity(try Slot.init());
+        if (case == .closed) manager.slots.items[0].closeChildEnds() else if (case == .cancelled) manager.stopping.store(true, .release) else {
+            for (manager.slots.items, 0..) |slot, i| {
+                const body = try std.json.Stringify.valueAlloc(allocator, .{ .kind = if (case == .wrong_kind) "registered" else "ready", .hubId = if (case == .wrong_hub or (case == .mixed_hubs and i == 7)) other else hub_id }, .{});
+                defer allocator.free(body);
+                var header: [4]u8 = undefined;
+                std.mem.writeInt(u32, &header, @intCast(body.len), .big);
+                try tcp.writeAll(native.io, slot.client_replies[1], &header);
+                try tcp.writeAll(native.io, slot.client_replies[1], body);
+            }
+        }
+        switch (case) {
+            .ready => {
+                try manager.awaitRuntime();
+                try std.testing.expectEqualStrings(hub_id, manager.hub_id.?);
+            },
+            .wrong_kind => try std.testing.expectError(error.InvalidContract, manager.awaitRuntime()),
+            .wrong_hub, .mixed_hubs => try std.testing.expectError(error.HubIdentityChanged, manager.awaitRuntime()),
+            .closed => try std.testing.expectError(error.RegistrationUnavailable, manager.awaitRuntime()),
+            .cancelled => try std.testing.expectError(error.Cancelled, manager.awaitRuntime()),
+        }
+        for (manager.slots.items) |slot| {
+            try std.testing.expect(!slot.failed);
+            try std.testing.expect(slot.registration == null);
+        }
+        try std.testing.expectError(error.FileNotFound, manager.directory.access(native.io, "rex-workers.json", .{}));
+    }
+}

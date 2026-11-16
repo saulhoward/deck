@@ -8,7 +8,7 @@ import { RexDoc, REX_KIND, type RexInput } from "./rex-allocation.js";
 import { dispatch } from "./ipc.js";
 import { launcherResponse } from "./launcher-hub.js";
 import { validWorkerFrame, validRexRegistration } from "./remote-contracts.js";
-import { validRexRegistrationFrame, type RexWorkerRegistration } from "./generated/contracts.js";
+import { validRexRegistrationFrame, type RexWorkerRegistration, type RexRuntimeReady } from "./generated/contracts.js";
 import { validClientRequest } from "./command-contracts.js";
 import { validSafePiId } from "./mutation-contracts.js";
 import { validRexAllocationPlan, type TaskRelayFrame, type WorkerRexClient, type ResponseEnvelope } from "./generated/contracts.js";
@@ -51,9 +51,9 @@ export function serveWorkerClients(runtime: DeckRuntime, machineId: string, clie
   return serveClients(runtime, readFd, writeFd, { machineId, client, launcher });
 }
 export function serveAutomaticWorkerClients(runtime: DeckRuntime, readFd: number, writeFd: number, register: (registration: RexWorkerRegistration) => void) {
-  return serveClients(runtime, readFd, writeFd, undefined, register);
+  return serveClients(runtime, readFd, writeFd, undefined, register, true);
 }
-function serveClients(runtime: DeckRuntime, readFd: number, writeFd: number, target?: ClientTarget, register?: (registration: RexWorkerRegistration) => void) {
+function serveClients(runtime: DeckRuntime, readFd: number, writeFd: number, target?: ClientTarget, register?: (registration: RexWorkerRegistration) => void, announceReady = false) {
   const reader = new Socket({ fd: readFd, readable: true, writable: false });
   let writer: Socket;
   try { writer = new Socket({ fd: writeFd, readable: false, writable: true }); }
@@ -62,6 +62,10 @@ function serveClients(runtime: DeckRuntime, readFd: number, writeFd: number, tar
   const pending = new Set<string>(); let writes = Promise.resolve();
   const close = () => { if (!closed) { closed = true; reader.destroy(); writer.destroy(); decoder.destroy(); } };
   reader.on("error", close); writer.on("error", close); decoder.on("error", close);
+  // Automatic clients are installed only after DeckRuntime.open completes.
+  // Native must not spend a registration's handshake deadline on startup or
+  // permanently fence a slot while compatibility/recovery is still running.
+  if (announceReady) writer.write(encodeFrame({ kind: "ready", hubId: runtime.hubId } satisfies RexRuntimeReady), error => { if (error) close(); });
   void (async () => {
     try {
       for await (const raw of decoder) {

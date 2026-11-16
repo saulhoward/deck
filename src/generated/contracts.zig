@@ -5027,6 +5027,19 @@ pub fn parseModelSettingsAck(allocator: std.mem.Allocator, encoded: []const u8) 
     if (!validModelSettingsAck(raw.value)) return error.InvalidContract;
     return std.json.parseFromSlice(ModelSettingsAck, allocator, encoded, .{ .ignore_unknown_fields = true });
 }
+pub const RexRuntimeReady = struct {
+    kind: []const u8,
+    hubId: RexUuid,
+};
+pub fn validRexRuntimeReady(x: std.json.Value) bool {
+    return v1088(x);
+}
+pub fn parseRexRuntimeReady(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(RexRuntimeReady) {
+    const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
+    defer raw.deinit();
+    if (!validRexRuntimeReady(raw.value)) return error.InvalidContract;
+    return std.json.parseFromSlice(RexRuntimeReady, allocator, encoded, .{ .ignore_unknown_fields = true });
+}
 fn v0(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("version")) |value| {
@@ -11765,4 +11778,23 @@ fn v1086(x: std.json.Value) bool {
 }
 fn v1087(x: std.json.Value) bool {
     return v975(x);
+}
+fn v1088(x: std.json.Value) bool {
+    if (x != .object) return false;
+    if (x.object.get("kind")) |value| {
+        if (!v1089(value)) return false;
+    } else return false;
+    if (x.object.get("hubId")) |value| {
+        if (!v1090(value)) return false;
+    } else return false;
+    for (x.object.keys()) |key| {
+        if (!(std.mem.eql(u8, key, "kind") or std.mem.eql(u8, key, "hubId"))) return false;
+    }
+    return true;
+}
+fn v1089(x: std.json.Value) bool {
+    return x == .string and std.mem.eql(u8, x.string, "ready");
+}
+fn v1090(x: std.json.Value) bool {
+    return v29(x);
 }
