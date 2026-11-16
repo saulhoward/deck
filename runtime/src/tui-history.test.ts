@@ -93,9 +93,28 @@ test("TUI displays reported thinking counts without exposing reasoning or changi
     f.retained.at(-1)!.model = [{ role: "assistant", content: [{ type: "thinking", thinking: "PRIVATE_REASONING", thinkingSignature: "PRIVATE_SIGNATURE", redacted: true }, { type: "text", text: answer }], usage: { reasoning: 27, output: 50 }, stopReason: "stop" }];
     const original = JSON.stringify(f.retained), page = await f.act("poll");
     bounded(page);
-    assert.match(page.entries.at(-1)!.text, /\[thinking: 27 tokens\]/);
+    assert.equal(page.entries.at(-1)!.thinkingTokens, 27);
+    assert.doesNotMatch(page.entries.at(-1)!.text, /\[thinking:/);
     assert.doesNotMatch(JSON.stringify(page), /PRIVATE_REASONING|PRIVATE_SIGNATURE/);
     assert.equal(JSON.stringify(f.retained), original);
+  } finally { await f.close(); }
+});
+
+test("TUI thinking metadata omits zero/missing counts and keeps literal answer text separate", async () => {
+  const f = await fixture(1);
+  try {
+    const literal = "Example: [thinking: 0 tokens]\n```\n[thinking: 27 tokens]\n```";
+    for (const usage of [undefined, { reasoning: 0, output: 50 }, { reasoning: 1, output: 50 }]) {
+      f.retained.at(-1)!.model = [{ role: "assistant", content: [{ type: "text", text: literal }], usage, stopReason: "stop" }];
+      const original = JSON.stringify(f.retained), page = await f.act("poll");
+      assert.equal(page.entries.at(-1)!.text, literal);
+      assert.equal(page.entries.at(-1)!.thinkingTokens, usage?.reasoning || undefined);
+      assert.equal(JSON.stringify(f.retained), original); bounded(page);
+    }
+    f.retained.at(-1)!.model = [2, 3].map(reasoning => ({ role: "assistant", content: [{ type: "text", text: "Answer" }], usage: { reasoning, output: 10 } }));
+    assert.equal((await f.act("poll")).entries.at(-1)!.thinkingTokens, 5);
+    f.retained.at(-1)!.model = [1, 2].map(() => ({ role: "assistant", content: [{ type: "text", text: "Answer" }], usage: { reasoning: Number.MAX_SAFE_INTEGER, output: Number.MAX_SAFE_INTEGER } }));
+    assert.equal((await f.act("poll")).entries.at(-1)!.thinkingTokens, undefined);
   } finally { await f.close(); }
 });
 

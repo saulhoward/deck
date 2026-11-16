@@ -339,9 +339,9 @@ test("real PTY: hub inspection is read-only, creation opens Rex, and :hub return
     const command = (text: string) => [{ keys: text }, { wait: text }, { wait: "client idle" }, { keys: "\r" }];
     const steps = [
       { wait: "history for 1" }, { keys: "keep this" }, { keys: "\x1b" }, ...command(":tasks"), { wait: "TASKS" },
-      { keys: "\x1b[B\r" }, { wait: "Unsent prompt preserved" }, { keys: "\x1b" }, { wait: "keep this" }, { keys: "dd" }, { wait: "0/16384 bytes" },
+      { keys: "\x1b[B\r" }, { wait: "Unsent prompt preserved" }, { keys: "\x1b" }, { wait: "keep this" }, { keys: "dd" },
       ...command(":task New task 🧪"), { wait: "Task 3 created" }, ...command(":tasks"), { wait: "New task" }, { keys: "New task" }, { wait: "Search: New task" }, { keys: "\r" },
-      { wait: "history for 3" }, { wait: "READ ONLY" }, { keys: "imust not edit" }, { keys: "\x1b[200~pasted input\x1b[201~" }, { keys: "\x13" }, { wait: "Read-only task inspection" }, { wait: "0/16384 bytes" }, ...command(":rex"), { wait: "Allocation: unallocated" }, { keys: "i" }, { wait: "Presence: unbound" },
+      { wait: "history for 3" }, { wait: "READ ONLY" }, { keys: "imust not edit" }, { keys: "\x1b[200~pasted input\x1b[201~" }, { keys: "\x13" }, { wait: "Read-only task inspection" }, ...command(":rex"), { wait: "Allocation: unallocated" }, { keys: "i" }, { wait: "Presence: unbound" },
       { keys: "o" }, { wait: "Rex attempt admitted" }, { keys: "\x1b" }, ...command(":hub"), { wait: "history for 1" }, { keys: ":q\r" },
     ];
     const driver = fileURLToPath(new URL("../../scripts/tui-pty-test.py", import.meta.url));

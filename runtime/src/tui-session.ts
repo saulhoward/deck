@@ -64,11 +64,11 @@ export function validReply(value: unknown, id: string, hubId?: string, chatId?: 
   return s.entries.every((item, i) => i === 0 || item.id > s.entries[i - 1]!.id);
 }
 // Only a provider-reported count, never reasoning text, signatures or an estimate.
-export function thinkingUsage(usage: unknown): string {
-  if (!usage || typeof usage !== "object" || Array.isArray(usage)) return "";
+export function thinkingUsage(usage: unknown): number | undefined {
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) return undefined;
   const { reasoning, output } = usage as { reasoning?: unknown; output?: unknown };
-  return typeof reasoning === "number" && Number.isSafeInteger(reasoning) && reasoning >= 0 && typeof output === "number" && Number.isSafeInteger(output) && reasoning <= output
-    ? `\n[thinking: ${reasoning} tokens]` : "";
+  return typeof reasoning === "number" && Number.isSafeInteger(reasoning) && reasoning > 0 && typeof output === "number" && Number.isSafeInteger(output) && reasoning <= output
+    ? reasoning : undefined;
 }
 type Command = (name: string, args: Record<string, unknown>, hubId?: string) => Promise<any>;
 export class TuiSession {
@@ -167,7 +167,7 @@ export class TuiSession {
     // History arrives newest-first. Spend the view budget in that order so
     // older tool output cannot hide new input, answers or failure markers.
     for (const entry of page.items) {
-      let role: TuiEntry["role"] = "note", text = "";
+      let role: TuiEntry["role"] = "note", text = "", thinkingTokens = 0;
       if (entry.kind === "deck.input") {
         role = "user"; text = entry.data.text;
         if (entry.data.origin?.kind === "task-tool") { role = "note"; text = `[agent chat ${entry.data.origin.chatId}, task ${entry.data.origin.taskId}${entry.data.origin.chain ? `; request ${entry.data.requestId}; reply ${entry.data.origin.chain.replyToChatId}/${entry.data.origin.chain.replyToRequestId}; hop ${entry.data.origin.chain.hop}/8` : ""}]\n${text}`; }
@@ -176,13 +176,16 @@ export class TuiSession {
         role = entry.kind === "pi.assistant" ? "assistant" : "tool";
         text = entry.model.map((message: any) => {
           const parts = (message.content ?? []).map((part: any) => part.type === "text" ? part.text : part.type === "toolCall" ? `[tool requested: ${part.name}]` : "[non-text content]").join("\n");
-          return (role === "tool" ? `${message.toolName}${message.isError ? " (error)" : ""}\n` : "") + parts + (role === "assistant" ? thinkingUsage(message.usage) : "") + (message.stopReason === "error" || message.stopReason === "aborted" ? `\n[${message.stopReason}]` : "");
+          if (role === "assistant") thinkingTokens += thinkingUsage(message.usage) ?? 0;
+          return (role === "tool" ? `${message.toolName}${message.isError ? " (error)" : ""}\n` : "") + parts + (message.stopReason === "error" || message.stopReason === "aborted" ? `\n[${message.stopReason}]` : "");
         }).join("\n");
       } else text = `[${entry.kind}: retained entry, not rendered]`;
       text = displayText(text, 8192);
       const bytes = Buffer.byteLength(text);
       if (bytes > budget) break;
-      budget -= bytes; entries.push({ id: entry.id, role, text });
+      // Keep provider usage separate from Markdown so quoted text/code cannot
+      // be mistaken for UI metadata, and long answers cannot clip the count.
+      budget -= bytes; entries.push({ id: entry.id, role, text, ...(thinkingTokens > 0 && Number.isSafeInteger(thinkingTokens) ? { thinkingTokens } : {}) });
     }
     // The first entry always fits. If the display window is smaller than the
     // validated page, :older must start before its oldest displayed ID, not

@@ -161,9 +161,9 @@ test("TUI closed requests and display projection reject controls without changin
 });
 
 test("thinking usage shows only validated provider counts, not hidden reasoning", () => {
-  assert.equal(thinkingUsage({ reasoning: 27, output: 50 }), "\n[thinking: 27 tokens]");
-  assert.equal(thinkingUsage({ reasoning: 0, output: 50 }), "\n[thinking: 0 tokens]");
-  for (const usage of [undefined, null, {}, [], { reasoning: 3 }, { reasoning: "3", output: 50 }, { reasoning: -1, output: 50 }, { reasoning: 1.5, output: 50 }, { reasoning: 51, output: 50 }, { reasoning: Infinity, output: Infinity }]) assert.equal(thinkingUsage(usage), "");
+  assert.equal(thinkingUsage({ reasoning: 27, output: 50 }), 27);
+  assert.equal(thinkingUsage({ reasoning: 1, output: 1 }), 1);
+  for (const usage of [undefined, null, {}, [], { reasoning: 0, output: 50 }, { reasoning: 0, output: 0 }, { reasoning: 3 }, { reasoning: "3", output: 50 }, { reasoning: -1, output: 50 }, { reasoning: 1.5, output: 50 }, { reasoning: 51, output: 50 }, { reasoning: Infinity, output: Infinity }]) assert.equal(thinkingUsage(usage), undefined);
 });
 
 const testBinary = process.env.DECK_TEST_BINARY;
@@ -294,7 +294,7 @@ test("real PTY: real isolated mock hub retains input and answer after TUI detach
       { keys: ":tasks" }, { wait: "client idle" }, { keys: "\r" }, { wait: "TASKS" }, { keys: "\x1b[B\r" },
       { wait: "Read-only task inspection" }, { wait: `[${settings.selection.thinkingLevel}]` }, { wait: "READ ONLY" },
       { keys: "itask-only input" }, { keys: "\x1b" }, { keys: ":send" }, { wait: "client idle" }, { keys: "\r" },
-      { wait: "Read-only task inspection" }, { wait: "0/16384 bytes" }, { keys: ":q\r" },
+      { wait: "Read-only task inspection" }, { keys: ":q\r" },
     ]);
     const chats: any = await hubCommand(port, "list_chats", {}, status.hubId);
     const task = chats.items.find((c: any) => c.title === "TUI created task"); assert.ok(task);
@@ -324,12 +324,14 @@ test("real PTY: Vesper sidebar, centered Markdown/table, expanding prompt and En
     // pyte display strings omit the continuation cell of wide glyphs.
     const wide = screens.wide!.split("\n").map(row => row.replaceAll("界", "界 ")), expanded = screens.expanded!.split("\n").map(row => row.replaceAll("界", "界 "));
     assert.equal(wide[2]!.indexOf("Δ hub"), 124); assert.equal(wide[4]!.slice(113).trim(), "");
-    assert.doesNotMatch(screens.wide!, /wintermute|PROMPT|NORMAL|you ·|#\d/);
+    assert.doesNotMatch(screens.wide!, /wintermute|PROMPT|NORMAL|you ·|#\d|\/16384 bytes/);
+    const userRow = wide.findIndex(row => row.includes("• Please render"));
+    for (const y of [userRow - 2, userRow - 1, userRow + 1, userRow + 2]) assert.equal(wide[y]!.slice(0, 112).trim(), "");
     assert.ok(wide.some(row => row.indexOf("• Please render") === 14));
     assert.ok(wide.some(row => row.indexOf("Δ Report") === 14));
     assert.equal(wide[39]!.slice(0, 112).trim(), "mock/echo [medium]");
     assert.equal(wide[39]!.indexOf("mock/echo"), 93);
-    assert.ok(wide.every(row => row[112] === "│"));
+    assert.ok(wide.every(row => row[112] === (row.startsWith("─") ? "┤" : "│")));
     assert.ok(wide.slice(5).every(row => !row.slice(113).trim()), "rest of sidebar stays empty");
     assert.ok(wide.some(row => row.includes("Task") && row.includes("Status")));
     assert.doesNotMatch(screens.wide!, /\*\*Ready\*\*|:---|---:/);
@@ -341,7 +343,7 @@ test("real PTY: Vesper sidebar, centered Markdown/table, expanding prompt and En
     assert.equal(rules(expanded)[1]! - rules(expanded)[0]!, 4);
     assert.match(screens.narrow!.split("\n")[38]!, /Δ hub/);
     assert.match(screens.collapsed!.split("\n")[38]!, /Δ hub/);
-    assert.ok(screens.forced!.split("\n").every(row => row.replaceAll("界", "界 ")[54] === "│"));
+    assert.ok(screens.forced!.split("\n").every(row => row.replaceAll("界", "界 ")[54] === (row.startsWith("─") ? "┤" : "│")));
     assert.match(screens.hidden!.split("\n")[38]!, /Δ hub/);
     const admits = f.requests.filter(r => r.command === "admit");
     assert.equal(admits.length, 1); assert.equal(admits[0].args.text, "hello\nsecond\nthird");

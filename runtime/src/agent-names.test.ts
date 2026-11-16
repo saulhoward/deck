@@ -6,8 +6,9 @@ import test from "node:test";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
+import { defineDoc, type ConversationId } from "@earendil-works/pi-durable";
 import { ChatDoc, DeckRuntime } from "./deck.js";
-import { agentNameAlgorithms, agentRunes, assignAgentName } from "./agent-names.js";
+import { agentNameAlgorithms, agentRunes, assignAgentName, shuffledNameOrder } from "./agent-names.js";
 import { validAgentName, validStatusBinding, validChatListItem, validTuiSnapshot } from "./generated/contracts.js";
 import { dispatch } from "./ipc.js";
 import { TuiSession } from "./tui-session.js";
@@ -27,6 +28,19 @@ test("wintermute-v1 is deterministic, covers both banks, and stays unique after 
   for (const bad of ["", "WinterMute", "winter mute", "wintermute\n", "\x1b[31mwintermute", "a".repeat(65)]) {
     assert.equal(validAgentName(bad), false);
     assert.equal(validStatusBinding({ machineId: "host", cwd: "/cwd", kind: "task", title: "Title", agentName: bad }), false);
+  }
+});
+
+test("allocation shuffles the existing bank, with no fixed first name or excluded wintermute", () => {
+  const unchanged = shuffledNameOrder(max => max - 1);
+  const rotated = shuffledNameOrder(() => 0);
+  assert.deepEqual(unchanged, Array.from({ length: 100 }, (_, i) => i));
+  assert.equal(v1.candidate(unchanged[0]!), "wintermute");
+  assert.equal(v1.candidate(rotated[0]!), "glasscut");
+  for (const order of [unchanged, rotated, shuffledNameOrder()]) {
+    assert.equal(new Set(order).size, 100);
+    assert.deepEqual([...order].sort((a, b) => a - b), unchanged);
+    assert.equal(new Set(order.map(n => v1.candidate(n))).size, 100);
   }
 });
 
@@ -55,6 +69,9 @@ test("names are atomic, unique across versions, stable on retry/restart, and not
     const saved = await Promise.all(tasks.map(t => f.runtime.harness.snapshot(ChatDoc, t.id, context)));
     assert.equal(new Set([main, ...saved].map(s => s!.agentName)).size, 111);
     assert.ok(saved.every(s => s!.agentNameAlgorithm === v1.id));
+    const firstName = (await f.runtime.harness.snapshot(ChatDoc, bindingOnly.id, context))!.agentName!;
+    assert.deepEqual(new Set([firstName, ...saved.slice(0, 99).map(s => s!.agentName!)]), new Set(Array.from({ length: 100 }, (_, i) => v1.candidate(i))));
+    assert.ok(saved.slice(99).every(s => s!.agentName!.endsWith("-2")));
     assert.equal(new Set(saved.slice(0, 86).map(s => s!.agentRune)).size, 86);
     assert.ok(saved.every(s => agentRunes.includes(s!.agentRune!)));
     assert.equal(saved[0]!.agentRune, saved[86]!.agentRune);
@@ -68,19 +85,19 @@ test("names are atomic, unique across versions, stable on retry/restart, and not
     const next = await f.runtime.createTask("After rollback", f.options.binding);
     assert.equal((await f.runtime.harness.snapshot(ChatDoc, next.id, context))!.agentName, rolledBackName);
     assert.equal((await f.runtime.harness.snapshot(ChatDoc, next.id, context))!.agentRune, rolledBackRune);
-    // A future algorithm reserves v1's next candidate; switching back must
-    // skip that reservation rather than duplicate/rename either conversation.
-    let reservedOrdinal = 0;
+    // Reservations are shared across versions, regardless of shuffled order.
+    let attempts = 0;
     const future = await f.runtime.harness.createConversation({ ownership: { kind: "ownerless" }, init: async (tx, id) => {
       const metadata = await tx.doc(ChatDoc, id);
-      await assignAgentName(tx, id, metadata, { id: "test-v2", candidate: ordinal => { reservedOrdinal = ordinal + 1; return v1.candidate(reservedOrdinal); } });
+      await assignAgentName(tx, id, metadata, { id: "test-v2", candidate: () => ++attempts === 1 ? firstName : "future-name" });
     } }, context);
     const futureSaved = await f.runtime.harness.snapshot(ChatDoc, future.id, context);
     assert.equal(futureSaved!.agentNameAlgorithm, "test-v2");
+    assert.equal(attempts, 2); assert.equal(futureSaved!.agentName, "future-name");
     const afterFuture = await f.runtime.createTask("Collision after version change", f.options.binding);
     const afterSaved = await f.runtime.harness.snapshot(ChatDoc, afterFuture.id, context);
     assert.notEqual(afterSaved!.agentName, futureSaved!.agentName);
-    assert.equal(afterSaved!.agentName, v1.candidate(reservedOrdinal + 1));
+    assert.ok(validAgentName(afterSaved!.agentName));
     await tasks[0]!.commit(async tx => { (await tx.doc(ChatDoc, tasks[0]!.id)).title = "Renamed title"; }, context);
     await f.restart();
     assert.equal((await f.runtime.harness.snapshot(ChatDoc, tasks[0]!.id, context))!.agentName, saved[0]!.agentName);
@@ -88,6 +105,36 @@ test("names are atomic, unique across versions, stable on retry/restart, and not
     assert.equal(f.faux.state.callCount, 0);
     const page = await f.runtime.listChats({ limit: 100 });
     assert.ok(page.items.every(item => item.agentName && validChatListItem(item)));
+  } finally { await f.close(); }
+});
+
+test("legacy sequential cursors acquire a persisted shuffle without renaming or duplicating claims", async () => {
+  const f = await fixture();
+  const Cursor = defineDoc<{ next: number; order?: number[] }>({ kind: "deck.agent-name-cursor", version: 1, scope: "session", initial: () => ({ next: 0 }), checkpointWhen: () => true });
+  try {
+    const old: Array<{ id: ConversationId; name: string }> = [];
+    for (let i = 0; i < 7; i++) {
+      const task = await f.runtime.harness.createConversation({ ownership: { kind: "ownerless" }, init: async (tx, id) => {
+        const metadata = await tx.doc(ChatDoc, id);
+        Object.assign(metadata, { kind: "task", title: "Legacy", ...f.options.binding });
+        await assignAgentName(tx, id, metadata, { id: v1.id, candidate: () => v1.candidate(i) });
+      } }, context);
+      old.push({ id: task.id, name: v1.candidate(i) });
+    }
+    await f.runtime.main.commit(async tx => { delete (await tx.doc(Cursor)).order; }, context);
+    await f.restart();
+    const names = new Set(old.map(task => task.name));
+    for (let i = 0; i < 103; i++) {
+      const task = await f.runtime.createTask("New", f.options.binding);
+      const saved = (await f.runtime.harness.snapshot(ChatDoc, task.id, context))!;
+      assert.ok(!names.has(saved.agentName!)); names.add(saved.agentName!);
+    }
+    const cursor = await f.runtime.harness.snapshot(Cursor, context);
+    assert.equal(cursor!.order!.length, 100);
+    assert.ok(cursor!.next >= 110);
+    await f.restart();
+    assert.deepEqual(await f.runtime.harness.snapshot(Cursor, context), cursor);
+    for (const task of old) assert.equal((await f.runtime.harness.snapshot(ChatDoc, task.id, context))!.agentName, task.name);
   } finally { await f.close(); }
 });
 
@@ -103,9 +150,15 @@ test("startup renames only canonical hub and permanently retains its legacy name
     await f.restart();
     assert.deepEqual(await f.runtime.harness.snapshot(ChatDoc, f.runtime.main.id, context), { ...before, agentName: "hub", agentNameAlgorithm: "hub-v1" });
     assert.deepEqual(await f.runtime.history(String(f.runtime.main.id)), history);
-    const next = await f.runtime.createTask("Not the hub", f.options.binding);
+    // Force a collision to prove the old claim is retained, independent of RNG.
+    let attempts = 0;
+    const next = await f.runtime.harness.createConversation({ ownership: { kind: "ownerless" }, init: async (tx, id) => {
+      const metadata = await tx.doc(ChatDoc, id);
+      Object.assign(metadata, { kind: "task", title: "Not the hub", ...f.options.binding });
+      await assignAgentName(tx, id, metadata, { id: "test-v2", candidate: () => ++attempts === 1 ? "wintermute" : "glasscut" });
+    } }, context);
     const saved = (await f.runtime.harness.snapshot(ChatDoc, next.id, context))!;
-    assert.equal(saved.agentName, "glasscut"); // wintermute remains claimed by the root
+    assert.equal(attempts, 2); assert.equal(saved.agentName, "glasscut");
     assert.equal(saved.agentRune, agentRunes[0]); // renaming consumed no rune
     await f.restart();
     assert.deepEqual(await f.runtime.harness.snapshot(ChatDoc, next.id, context), saved);

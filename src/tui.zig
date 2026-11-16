@@ -1047,7 +1047,12 @@ const Model = struct {
         var chat: std.ArrayList(Row) = .empty;
         if (s) |snap| for (snap.entries) |entry| {
             const label = if (entry.role == .assistant) rune(snap) else if (entry.role == .user) "•" else "·";
-            if (entry.role == .user) try chat.append(ctx.arena, .{ .user = true });
+            if (entry.role == .user) {
+                // Other entries already leave a plain gap. Also give the first
+                // user panel an outer margin, separate from its shaded padding.
+                if (chat.items.len == 0) try chat.append(ctx.arena, .{});
+                try chat.append(ctx.arena, .{ .user = true });
+            }
             const first_row = chat.items.len;
             if (entry.role == .assistant or entry.role == .user) {
                 for (try Markdown.render(ctx, entry.text, layout.body, base)) |cells| try chat.append(ctx.arena, .{ .cells = cells, .user = entry.role == .user });
@@ -1055,7 +1060,11 @@ const Model = struct {
             if (chat.items.len == first_row) try chat.append(ctx.arena, .{ .user = entry.role == .user });
             chat.items[first_row].speaker = label;
             chat.items[first_row].speaker_style = if (entry.role == .user) accent else dim;
+            if (entry.role == .assistant) if (entry.thinkingTokens) |tokens| {
+                if (tokens > 0) try rows(ctx, &chat, try std.fmt.allocPrint(ctx.arena, "[thinking: {d} tokens]", .{tokens}), layout.body, dim);
+            };
             try chat.append(ctx.arena, .{ .user = entry.role == .user });
+            if (entry.role == .user) try chat.append(ctx.arena, .{});
         };
         if (chat.items.len == 0) try rows(ctx, &chat, if (s == null) "Connecting to the local hub…" else if (self.readOnly()) "Read-only inspection · :rex open to participate" else "Enter to send · Esc for Normal mode · :help", layout.body, dim);
         self.scroll_max = chat.items.len -| chat_h;
@@ -1081,8 +1090,10 @@ const Model = struct {
         for (0..layout.main) |x| for ([_]u16{ upper, h - 3 }) |y| surface.writeCell(@intCast(x), y, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = Theme.rule });
         const border = try std.fmt.allocPrint(ctx.arena, " {s}{s} ", .{ if (self.task_form) "TASK BRIEF " else "", mode });
         if (self.task_form or mode.len > 0) lineLimit(ctx, surface, 1, upper, border, dim, null, 0, right);
-        const bytes_label = try std.fmt.allocPrint(ctx.arena, " {d}/16384 bytes ", .{self.editor.text.items.len});
-        if (layout.main > border.len + bytes_label.len + 4) lineLimit(ctx, surface, @intCast(right - bytes_label.len), upper, bytes_label, Theme.rule, null, 0, right);
+        if (self.editor.text.items.len * 5 >= Editor.limit * 4) {
+            const bytes_label = try std.fmt.allocPrint(ctx.arena, " {d}/{d} bytes ", .{ self.editor.text.items.len, Editor.limit });
+            if (layout.main > border.len + bytes_label.len + 4) lineLimit(ctx, surface, @intCast(right - bytes_label.len), upper, bytes_label, Theme.rule, null, 0, right);
+        }
         // Operational notices remain visible above the prompt, never swallowed
         // by decorative chrome or the (intentionally otherwise empty) sidebar.
         const notice = self.notice[0..self.notice_len];
@@ -1108,7 +1119,7 @@ const Model = struct {
         const identity = try std.fmt.allocPrint(ctx.arena, "{s} {s}", .{ if (s) |snap| rune(snap) else "·", Theme.name(&name_buffer, saved_name, if (is_hub) null else self.animation()) });
         const role = if (is_hub) "" else if (s) |snap| (if (snap.kind == .subagent) "subagent" else "agent") else "";
         if (layout.sidebar > 0) {
-            for (0..h) |y| surface.writeCell(layout.main, @intCast(y), .{ .char = .{ .grapheme = "│", .width = 1 }, .style = Theme.rule });
+            for (0..h) |y| surface.writeCell(layout.main, @intCast(y), .{ .char = .{ .grapheme = if (y == upper or y == h - 3) "┤" else "│", .width = 1 }, .style = Theme.rule });
             const available = layout.sidebar - 3;
             const identity_x: u16 = @intCast(layout.main + 2 + (available - @min(available, displayWidth(ctx, identity))) / 2);
             const role_x: u16 = @intCast(layout.main + 2 + (available - @min(available, displayWidth(ctx, role))) / 2);
@@ -1574,7 +1585,7 @@ test "user panels pad full chat width, task footer uses brief, and filters canno
             .activityKnown = false,
             .busy = false,
             .queued = 0,
-            .entries = &.{ .{ .id = 1, .role = .user, .text = "**Hello**" }, .{ .id = 2, .role = .assistant, .text = "Answer" } },
+            .entries = &.{ .{ .id = 1, .role = .user, .text = "**Hello**" }, .{ .id = 2, .role = .assistant, .text = "Answer", .thinkingTokens = 27 } },
             .hasOlder = false,
             .historical = false,
             .preview = "",
@@ -1592,14 +1603,63 @@ test "user panels pad full chat width, task footer uses brief, and filters canno
     fw.DrawContext.init(.unicode);
     const draw_ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
     const surface = try Model.draw(&model, draw_ctx);
-    for (0..3) |y| for (0..112) |x| try std.testing.expectEqualDeep(Theme.user.bg, surface.buffer[y * 140 + x].style.bg);
-    try std.testing.expectEqualDeep(base.bg, surface.buffer[3 * 140].style.bg);
+    for (1..4) |y| for (0..112) |x| try std.testing.expectEqualDeep(Theme.user.bg, surface.buffer[y * 140 + x].style.bg);
+    for ([_]usize{ 0, 4 }) |y| for (0..112) |x| {
+        const cell = surface.buffer[y * 140 + x];
+        try std.testing.expectEqualDeep(base.bg, cell.style.bg);
+        try std.testing.expectEqualStrings(" ", cell.char.grapheme);
+    };
     try std.testing.expectEqualDeep(base.bg, surface.buffer[113].style.bg);
+    try std.testing.expectEqualStrings("•", surface.buffer[2 * 140 + 14].char.grapheme);
+    try std.testing.expectEqualDeep(base.fg, surface.buffer[5 * 140 + 16].style.fg);
+    const thinking = "[thinking: 27 tokens]";
+    for (thinking, 0..) |_, x| {
+        const cell = surface.buffer[6 * 140 + 16 + x];
+        try std.testing.expectEqualStrings(thinking[x..][0..1], cell.char.grapheme);
+        try std.testing.expectEqualDeep(dim.fg, cell.style.fg);
+    }
     var footer: std.ArrayList(u8) = .empty;
     defer footer.deinit(a);
     for (surface.buffer[38 * 140 .. 38 * 140 + 112]) |cell| try footer.appendSlice(a, cell.char.grapheme);
     try std.testing.expect(std.mem.indexOf(u8, footer.items, "ᚦ Fix the actual task problem") != null);
     try std.testing.expect(std.mem.endsWith(u8, footer.items, "~/project (feature/demo) "));
+    // Empty/small prompts stay quiet; the first visible count is ceil(80%).
+    const prompt: [Editor.limit]u8 = @splat('a');
+    for ([_]usize{ 0, 1, 13107, 13108, Editor.limit }) |len| {
+        try model.editor.set(prompt[0..len]);
+        const drawn = try Model.draw(&model, draw_ctx);
+        var text: std.ArrayList(u8) = .empty;
+        for (drawn.buffer) |cell| try text.appendSlice(arena.allocator(), cell.char.grapheme);
+        try std.testing.expectEqual(len >= 13108, std.mem.indexOf(u8, text.items, "/16384 bytes") != null);
+        if (len >= 13108) try std.testing.expect(std.mem.indexOf(u8, text.items, try std.fmt.allocPrint(arena.allocator(), "{d}/16384 bytes", .{len})) != null);
+    }
+    try model.editor.set("");
+    // Junctions follow both prompt rules across resize and sidebar overrides.
+    for ([_]bool{ false, true }) |sidebar| {
+        model.sidebar_override = sidebar;
+        for ([_]u16{ 60, 100, 140 }) |width| {
+            var resized = draw_ctx;
+            resized.max.width = width;
+            for ([_][]const u8{ "", "one\ntwo\nthree\nfour" }) |text| {
+                try model.editor.set(text);
+                const drawn = try Model.draw(&model, resized);
+                const layout = Theme.Layout.init(width, sidebar);
+                const upper: usize = if (text.len == 0) 34 else 32;
+                if (sidebar) {
+                    for (0..40) |y| try std.testing.expectEqualStrings(if (y == upper or y == 37) "┤" else "│", drawn.buffer[y * width + layout.main].char.grapheme);
+                } else {
+                    for (drawn.buffer) |cell| try std.testing.expect(!std.mem.eql(u8, cell.char.grapheme, "┤"));
+                }
+            }
+        }
+    }
+    try model.editor.set("");
+    model.sidebar_override = null;
+    model.snapshot.?.value.case0.snapshot.entries = &.{.{ .id = 1, .role = .assistant, .text = "Answer", .thinkingTokens = 0 }};
+    const zero = try Model.draw(&model, draw_ctx);
+    var zero_text: std.ArrayList(u8) = .empty;
+    for (zero.buffer) |cell| try zero_text.appendSlice(arena.allocator(), cell.char.grapheme);
+    try std.testing.expect(std.mem.indexOf(u8, zero_text.items, "[thinking:") == null);
     try std.testing.expect(!model.mouse_tracking);
     var event_ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
     defer event_ctx.cmds.deinit(a);
