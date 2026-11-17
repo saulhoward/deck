@@ -33,7 +33,7 @@ const help =
     \\    Print/reuse or launch the managed local hub Rex session, then exit.
     \\  deck hub --here [--tui | --no-tui] [--port 52800] [--task CHAT_ID] [--message TEXT]
     \\  deck agent [--hub REX_HOST | --local] [--directory STATE] [--port 52800]
-    \\    Create & start form in local Rex; worker/cwd/terminal stay on this machine.
+    \\    Create & open form in local Rex; worker/cwd/terminal stay on this machine.
     \\  deck agent [connection options] --list | --resume NAME | --drafts
     \\  deck agent [connection options] --recover STARTUP_ID | --discard REQUEST_ID --confirm
     \\    Recovery and discard both require --confirm. Use deck agent --help for details.

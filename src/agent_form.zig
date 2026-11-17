@@ -202,11 +202,11 @@ const Model = struct {
         const desc_y = 7 + field_height;
         render.line(ctx, surface, x, desc_y, if (self.description_used) "Description (included, even when empty)" else "Description (optional; omitted)", if (self.focus == 1) Theme.green else Theme.dim, null, 0);
         try self.field(ctx, &surface, x, desc_y + 1, width, field_height, 1);
-        const button = if (self.phase() == .waiting) "[ Waiting for exact allocation ]" else if (self.saved()) "[ Retry exact request ]" else "[ Create & start ]";
+        const button = if (self.phase() == .waiting) "[ Waiting for exact allocation ]" else if (self.saved()) "[ Retry exact request ]" else "[ Create & open ]";
         render.line(ctx, surface, x, h - 5, button, if (self.focus == 2) Theme.green else Theme.dim, null, 0);
         if (self.saved()) render.line(ctx, surface, x + @min(width - 1, 27), h - 5, "[ Discard locally ]", if (self.focus == 3) Theme.green else Theme.dim, null, 0);
         render.line(ctx, surface, x, h - 3, self.notice, Theme.dim, null, 0);
-        render.line(ctx, surface, 0, h - 1, "Tab fields · Enter next/start · Shift-Enter newline · Ctrl-E description · Ctrl-C detach", Theme.dim, null, 0);
+        render.line(ctx, surface, 0, h - 1, "Tab fields · Enter next/open · Shift-Enter newline · Ctrl-E description · Ctrl-C detach", Theme.dim, null, 0);
         return surface;
     }
 };
@@ -254,13 +254,13 @@ pub fn run(init: std.process.Init, record: wire.RexBootstrapRecord, a: std.mem.A
         }
         try model.editor().replace(edited);
         if (model.focus == 1) model.description_used = true;
-        try model.note("Editor contents loaded. Nothing submitted; choose Create & start explicitly.");
+        try model.note("Editor contents loaded. Nothing submitted; choose Create & open explicitly.");
     }
-    if (!stopping.load(.acquire)) if (model.response) |reply| if (reply.value.ready) |ready| return .{ .chatId = try a.dupe(u8, ready.chatId), .allocationId = try a.dupe(u8, ready.allocationId), .inputId = try a.dupe(u8, ready.inputId) };
+    if (!stopping.load(.acquire)) if (model.response) |reply| if (reply.value.ready) |ready| return .{ .chatId = try a.dupe(u8, ready.chatId), .allocationId = try a.dupe(u8, ready.allocationId) };
     return null;
 }
 
-test "creation form accepts typing during read-only startup, preserves paste and requires explicit start" {
+test "creation form accepts typing during read-only startup, preserves paste and requires explicit creation" {
     const a = std.testing.allocator;
     var bridge: Bridge = .{ .pipe = .{ .a = a, .io = std.testing.io, .child = undefined }, .pending = .poll };
     defer bridge.pipe.input.deinit(a);

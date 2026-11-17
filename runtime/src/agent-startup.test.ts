@@ -23,7 +23,7 @@ async function stop(child: ChildProcess | undefined) {
   const closed = once(child, "close"); child.kill("SIGTERM"); const timer = setTimeout(() => child.kill("SIGKILL"), 6000);
   try { await closed; } finally { clearTimeout(timer); }
 }
-for (const { remote, upgrading, live = false, interrupted = false } of [{ remote: false, upgrading: false }, { remote: true, upgrading: false }, { remote: true, upgrading: true }, { remote: true, upgrading: true, live: true }, { remote: true, upgrading: true, live: true, interrupted: true }]) test(`API14+ isolated ${interrupted ? "remote-live-recovery" : live ? "remote-live-upgrade" : upgrading ? "remote-upgrade" : remote ? "remote-selected" : "local"} agent: same-block create/start, exact brief, detach/list/resume${remote ? " and detached worker reuse" : ""}`, { skip: !deck || !rex || (interrupted && process.getuid?.() === 0), timeout: 100000 }, async () => {
+for (const { remote, upgrading, live = false, interrupted = false } of [{ remote: false, upgrading: false }, { remote: true, upgrading: false }, { remote: true, upgrading: true }, { remote: true, upgrading: true, live: true }, { remote: true, upgrading: true, live: true, interrupted: true }]) test(`API14+ isolated ${interrupted ? "remote-live-recovery" : live ? "remote-live-upgrade" : upgrading ? "remote-upgrade" : remote ? "remote-selected" : "local"} agent: same-block create/open, exact brief, detach/list/resume${remote ? " and detached worker reuse" : ""}`, { skip: !deck || !rex || (interrupted && process.getuid?.() === 0), timeout: 100000 }, async () => {
   const root = await realpath(await mkdtemp("/tmp/deck-agent-"));
   const work = join(root, "worker-work"), hubWork = join(root, "hub-work"), client = join(root, "client"), localHome = join(root, "local"), hubHome = remote ? join(root, "remote") : localHome;
   for (const path of new Set([work, hubWork, localHome, hubHome, join(root, "bin")])) await mkdir(path);
@@ -114,14 +114,21 @@ for (const { remote, upgrading, live = false, interrupted = false } of [{ remote
     await send(problem);
     await until(capture, text => text.includes(problem.trim()) && text.includes("Nothing created"));
     await send("\r"); await send(description); await send("\r");
-    assert.equal((await hubCommand(port, "list_chats", {}, status.hubId) as any).items.length, 1, "fields/Enter navigation do not create/start work");
+    assert.equal((await hubCommand(port, "list_chats", {}, status.hubId) as any).items.length, 1, "fields/Enter navigation do not create work");
     await send("\r");
     const page: any = await until(() => hubCommand(port, "list_chats", {}, status.hubId), (p: any) => p.items.length === 2);
     const task = page.items.find((item: any) => item.kind === "task"); assert.ok(task); assert.equal(task.cwd, work); assert.equal(task.machineId, record.machineId);
     const taskStatus: any = await hubCommand(port, "status", { chatId: task.chatId }, status.hubId);
     assert.deepEqual(taskStatus.binding.brief, { problem, description });
+    await until(capture, text => text.includes("Enter to send"));
+    assert.deepEqual((await hubCommand(port, "history", { chatId: task.chatId }, status.hubId) as any).items, [], "creation opens an empty chat");
+    const activity: any = await hubCommand(port, "activity", { chatId: task.chatId }, status.hubId);
+    assert.equal(activity.busy, false); assert.equal(activity.queued, 0);
+    // The first user message is separately authored in the task TUI, not the brief.
+    const message = "Start only on this explicit user message";
+    await send(message); await send("\r");
     const history: any = await until(() => hubCommand(port, "history", { chatId: task.chatId }, status.hubId), (h: any) => h.items.some((entry: any) => entry.kind === "deck.input"));
-    const inputs = history.items.filter((entry: any) => entry.kind === "deck.input"); assert.equal(inputs.length, 1); assert.equal(inputs[0].data.text, problem);
+    const inputs = history.items.filter((entry: any) => entry.kind === "deck.input"); assert.equal(inputs.length, 1); assert.equal(inputs[0].data.text, message);
     assert.equal((await processState()).child.pid, b.pid, "wizard and task TUI retain the same native process");
     const allocated: any = await hubCommand(port, "rex_status", { chatId: task.chatId }, status.hubId);
     assert.equal(allocated.status, "allocated"); assert.equal(allocated.binding.blockId, b.blockId); assert.equal(allocated.binding.sessionId, b.sessionId);
@@ -152,7 +159,7 @@ for (const { remote, upgrading, live = false, interrupted = false } of [{ remote
     assert.equal(reopened.binding.sessionId, b.sessionId);
     await new Promise(r => setTimeout(r, 500));
     assert.equal((await hubCommand(port, "list_chats", {}, status.hubId) as any).items.length, 2);
-    assert.equal((await hubCommand(port, "history", { chatId: task.chatId }, status.hubId) as any).items.filter((entry: any) => entry.kind === "deck.input").length, 1, "resume never replays initial input");
+    assert.equal((await hubCommand(port, "history", { chatId: task.chatId }, status.hubId) as any).items.filter((entry: any) => entry.kind === "deck.input").length, 1, "resume never submits the brief or replays input");
     }
     if (daemon) {
       assert.equal(JSON.parse(await readFile(join(daemon.directory, "rex-connection.json"), "utf8")).pid, daemon.pid);

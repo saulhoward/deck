@@ -23,7 +23,8 @@ const help =
     \\override the local Rex executable/server. No install, endpoint or host fallback.
     \\Worker and task terminal stay on this machine. Workspace is the invoking cwd.
     \\New tasks open a form in Rex: required problem, optional description, then
-    \\explicit Create & start. It becomes the task TUI in the same terminal.
+    \\explicit Create & open. It becomes the task TUI in the same terminal.
+    \\The chat stays empty until you send a message.
     \\Detach never stops work. Uncertain input requires explicit :retry / :discard.
     \\--resume resolves a name on this worker, never creates a new task.
     \\Advanced direct/legacy clients retain --tui, --no-tui and --launch-from.
@@ -389,7 +390,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     const launched = try @import("rex_bootstrap.zig").launch(native, a, record, &cancelled);
     try starts.deleteFile(native.io, pending_name);
     try (std.Io.File{ .handle = starts.handle, .flags = .{ .nonblocking = false } }).sync(native.io);
-    try std.Io.File.stdout().writeStreamingAll(native.io, try std.fmt.allocPrint(a, "Task creation Rex session: {s}\nReview Problem, optional Description and workspace; choose Create & start.\n", .{launched.sessionId}));
+    try std.Io.File.stdout().writeStreamingAll(native.io, try std.fmt.allocPrint(a, "Task creation Rex session: {s}\nReview Problem, optional Description and workspace; choose Create & open.\n", .{launched.sessionId}));
 }
 
 test "agent selection honors explicit/env/local and never treats URL spellings as host identity" {

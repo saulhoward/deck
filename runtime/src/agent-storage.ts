@@ -71,17 +71,4 @@ export class StartupFiles {
       try { await directory.sync(); } finally { await directory.close(); }
     } finally { await rm(tmp, { force: true }); }
   }
-  async claim(name: string): Promise<boolean> {
-    // This is an attempt fence, not an execution/completion receipt. A crash
-    // after publication leaves the ordinary input draft for explicit recovery.
-    const file = await open(join(this.directory, name), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600).catch(error => {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") return undefined;
-      throw error;
-    });
-    if (!file) return false;
-    try { await file.writeFile("{\"attempted\":true}"); await file.sync(); } finally { await file.close(); }
-    const directory = await open(this.directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-    try { await directory.sync(); } finally { await directory.close(); }
-    return true;
-  }
 }

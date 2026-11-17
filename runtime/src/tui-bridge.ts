@@ -43,10 +43,14 @@ try {
   if (bootstrap) {
     const files = new StartupFiles(bootstrapPath(bootstrap.draftRoot, bootstrap.id));
     const draft = await startupDraft(bootstrap, files);
-    if (!draft) throw new Error("Initial input draft missing");
-    if (await files.read("discarded.json") === undefined && await files.claim("input-attempt.json") && await session.startInitial(draft.inputId)) {
-      try { await files.publish("completed.json", { version: 1, inputId: draft.inputId }); await finishStartup(bootstrap); }
-      catch { /* ACK was already validated; retain cleanup metadata without resubmitting or stopping work. */ }
+    if (!draft) throw new Error("Startup form missing");
+    // Opening a task is not input admission. In particular, never replay an
+    // older client's saved problem draft; it remains for explicit user handling.
+    if (await files.read("discarded.json") === undefined) {
+      try {
+        if (await files.read("completed.json") === undefined) await files.publish("completed.json", { version: 1 });
+        await finishStartup(bootstrap);
+      } catch { /* Startup was verified; retain cleanup metadata without replaying or stopping work. */ }
     }
   }
   for await (const request of decoder) {

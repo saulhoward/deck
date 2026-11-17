@@ -58,7 +58,7 @@ async function main() {
       await files.publish("discarded.json", { version: 1 }).catch(error => { if (!missing(error)) throw error; });
       if (record) {
         const form = await startupDraft(record, files);
-        if (form) await new DraftStore(hubId, root).remove(form.inputId);
+        if (form?.inputId) await new DraftStore(hubId, root).remove(form.inputId);
       }
       await finishStartup({ id, hubId, machineId, draftRoot: root });
     } else await store.remove(await store.load(value!));
@@ -79,7 +79,7 @@ async function main() {
   }
   if (recoveredChat) {
     const task = tasks.find(task => task.chatId === recoveredChat);
-    process.stdout.write(`Creation recovered. Initial problem retained as an exact input draft; no terminal or input replayed. If the original creation form is still open, choose Retry there. Otherwise use --resume ${task?.agentName ?? "(find name with --list)"}, then :retry explicitly.\n`);
+    process.stdout.write(`Creation recovered. Problem and description retained as the task brief; no terminal opened or chat input submitted. If the original creation form is still open, choose Retry there. Otherwise use --resume ${task?.agentName ?? "(find name with --list)"}, then send a message when ready.\n`);
     return;
   }
   if (action === "list") {

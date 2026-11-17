@@ -38,7 +38,7 @@ export function wizardTransport(record: RexBootstrapRecord, signal: AbortSignal)
 }
 export class AgentWizard {
   private phase: AgentWizardResponse["phase"] = "form";
-  private notice = "Nothing created or submitted. Review the fields, then choose Create & start.";
+  private notice = "Nothing created. Create & open saves the brief without sending a message.";
   private ready: AgentWizardResponse["ready"];
   constructor(readonly record: RexBootstrapRecord, readonly files: StartupFiles, private readonly transport: WizardTransport) {
     if (!record.binding) throw new Error("Bootstrap has no verified terminal");
@@ -76,17 +76,15 @@ export class AgentWizard {
       ? (await this.transport.launcher({ version: 1, id: randomUUID(), command: "launch_inspect", args: { chatId: ack.chatId } })).status
       : await this.transport.hub("rex_status", { chatId: ack.chatId });
     if (!validRexReply({ command: "rex_status", args: { chatId: ack.chatId }, hubId: form.hubId }, status) || status.taskId !== ack.taskId) throw new Error("Allocation observation unavailable");
-    if (status.status === "pending") { this.phase = "waiting"; this.notice = "Task created; waiting for its exact terminal allocation. No problem input admitted yet."; return; }
+    if (status.status === "pending") { this.phase = "waiting"; this.notice = "Task created; waiting for its exact terminal allocation. No chat input submitted."; return; }
     const b = status.binding, native = this.record.binding!, target = this.record.target;
     if (status.status !== "allocated" || !b || b.machineId !== form.machineId || b.cwd !== form.cwd || b.blockId !== native.blockId || b.windowId !== native.windowId || b.sessionId !== native.sessionId || b.server !== target.server || b.hostId !== target.hostId || b.instanceId !== target.instanceId) throw new Error("Allocation is unconfirmed; no replacement or input");
-    this.ready = { chatId: ack.chatId, allocationId: ack.allocationId, inputId: form.inputId };
-    this.phase = "ready"; this.notice = "Task and allocation verified. Registering this terminal before initial input.";
+    this.ready = { chatId: ack.chatId, allocationId: ack.allocationId };
+    this.phase = "ready"; this.notice = "Task and allocation verified. Opening an empty chat; send a message when ready.";
   }
   private async advance(form: AgentStartupDraft): Promise<void> {
     const chatId = await this.creation(form);
-    // Save before allocation too: if the form terminal dies, an explicit resume
-    // can recover this same input with :retry. Saving is never admission.
-    await new DraftStore(form.hubId, this.record.draftRoot).save({ kind: "input", chatId, requestId: form.inputId, text: form.problem, mode: "steer" });
+    // The brief is creation metadata, not an input draft or an admission.
     const ack = await this.adoption(form, chatId);
     await this.verify(form, ack);
   }
@@ -94,10 +92,9 @@ export class AgentWizard {
     const form = await startupDraft(this.record, this.files);
     if (!form || await this.files.read("discarded.json") !== undefined || await this.files.read("completed.json") !== undefined) throw new Error("No unresolved creation intent");
     const chatId = await this.creation(form);
-    await new DraftStore(form.hubId, this.record.draftRoot).save({ kind: "input", chatId, requestId: form.inputId, text: form.problem, mode: "steer" });
-    await this.files.publish("recovered.json", { version: 1, chatId, inputId: form.inputId });
+    await this.files.publish("recovered.json", { version: 1, chatId, ...(form.inputId === undefined ? {} : { inputId: form.inputId }) });
     await finishStartup(this.record);
-    return chatId; // Never adopt/open a terminal or admit the initial problem.
+    return chatId; // Never adopt/open a terminal or submit the problem.
   }
   async handle(request: AgentWizardRequest): Promise<AgentWizardResponse> {
     if (!validWizardRequest(request)) throw new Error("Invalid creation form");
@@ -109,15 +106,15 @@ export class AgentWizard {
         this.phase = "blocked"; this.notice = "Startup request discarded. Work was not cancelled. Detach; use --list / --resume to inspect any created task.";
       } else if (request.action === "create") {
         if (form) throw new Error("Exact startup draft already exists");
-        form = { version: 1, bootstrapId: this.record.id, hubId: this.record.hubId, machineId: this.record.machineId, cwd: this.record.cwd, creationId: randomUUID(), adoptionId: randomUUID(), inputId: randomUUID(), title: title(request.problem!), problem: request.problem!, ...(request.description === undefined ? {} : { description: request.description }) };
+        form = { version: 1, bootstrapId: this.record.id, hubId: this.record.hubId, machineId: this.record.machineId, cwd: this.record.cwd, creationId: randomUUID(), adoptionId: randomUUID(), title: title(request.problem!), problem: request.problem!, ...(request.description === undefined ? {} : { description: request.description }) };
         await this.files.publish("form.json", form); saved = true;
         await this.advance(form);
       } else if (request.action === "retry") {
         if (!form) throw new Error("No exact draft to retry");
-        await this.advance(form); // Same creation/adoption/input identities only.
+        await this.advance(form); // Same creation/adoption identities only.
       } else if (request.action === "discard") {
         await this.files.publish("discarded.json", { version: 1 });
-        if (form) await new DraftStore(form.hubId, this.record.draftRoot).remove(form.inputId);
+        if (form?.inputId) await new DraftStore(form.hubId, this.record.draftRoot).remove(form.inputId);
         await finishStartup(this.record);
         this.phase = "blocked"; this.notice = "Startup request discarded locally; created tasks and admitted work were not cancelled. Detach to inspect.";
       } else if (this.phase === "waiting" && form) {
