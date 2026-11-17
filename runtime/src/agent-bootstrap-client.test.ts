@@ -114,7 +114,7 @@ test("bootstrap bridge opens a new form as an empty chat; only explicit send adm
   const admissions = f.calls.filter(c => c.command === "admit"); assert.equal(admissions.length, 1);
   assert.deepEqual(admissions[0].args, { chatId: "2", requestId: admissions[0].args.requestId, text, mode: "steer" });
   assert.equal(admissions[0].hubId, f.record.hubId);
-  client.send("poll"); assert.deepEqual((await client.next()).entries, [{ id: 10, role: "user", text }]);
+  client.send("poll"); assert.deepEqual((await client.next()).entries, [{ id: 10, role: "user", text, parts: [{ kind: "text", text }] }]);
   assert.equal(f.calls.filter(c => c.command === "admit").length, 1);
   assert.deepEqual(await f.store.list(), []);
   assert.deepEqual(await readFile(join(f.files.directory, "form.json")), formBytes);

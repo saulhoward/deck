@@ -16,7 +16,12 @@ pub const Layout = struct {
     pub fn init(width: u16, override: ?bool) Layout {
         // Explicit show works below the automatic threshold. At pathological
         // widths preserve at least ten chat columns rather than underflowing.
-        const side: u16 = if ((override orelse (width >= 112)) and width >= 20) @min(28, width / 3) else 0;
+        // Spend spare width on the inventory before expanding chat margins.
+        // Automatic layouts preserve the 80-column body plus four gutters.
+        const side: u16 = if ((override orelse (width >= 112)) and width >= 20)
+            (if (width >= 112) @min(56, width - 84) else @min(56, width / 3))
+        else
+            0;
         const main = width - side;
         const body = @min(80, main -| 4);
         return .{ .main = main, .sidebar = side, .body = @max(1, body), .x = (main - body) / 2 };
@@ -46,7 +51,7 @@ pub fn name(out: *[192]u8, saved: []const u8, phase: ?u64) []const u8 {
 }
 test "sidebar geometry respects 80 columns and explicit narrow overrides" {
     try std.testing.expectEqual(@as(u16, 0), Layout.init(100, null).sidebar);
-    try std.testing.expectEqual(@as(u16, 28), Layout.init(140, null).sidebar);
+    try std.testing.expectEqual(@as(u16, 56), Layout.init(140, null).sidebar);
     try std.testing.expectEqual(@as(u16, 80), Layout.init(140, null).body);
     try std.testing.expect(Layout.init(60, true).sidebar > 0);
     try std.testing.expectEqual(@as(u16, 0), Layout.init(140, false).sidebar);

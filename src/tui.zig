@@ -38,6 +38,7 @@ const help =
     \\Space t / m / n       tasks / models / new task (Normal mode)
     \\Enter                 send; Shift-Enter (or Insert Ctrl-J) newline
     \\:sidebar-toggle       override responsive right sidebar visibility
+    \\:tools                full tool inventory; j/k, PgUp/PgDn, g/G, Esc
     \\
     \\:new                  hub only: JSON task-brief composer (Ctrl-S creates)
     \\:hosts                registered hosts; Enter selects host for new task
@@ -173,16 +174,146 @@ fn lineLimit(ctx: fw.DrawContext, surface: fw.Surface, x: u16, y: u16, text: []c
         col += width;
     }
 }
-fn toolRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), text: []const u8, width: u16) !void {
-    const split = std.mem.indexOfScalar(u8, text, '\n') orelse text.len;
-    try list.append(ctx.arena, .{ .text = text[0..split], .style = dim });
-    if (split == text.len) return;
+fn isBash(part: wire.TuiPart) bool {
+    return std.mem.eql(u8, part.toolName orelse "", "bash");
+}
+fn toolPartRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), part: wire.TuiPart, width: u16, count: usize) !void {
+    const name = part.toolName orelse "tool";
+    const repeat = if (count > 1) try std.fmt.allocPrint(ctx.arena, " (×{d})", .{count}) else "";
+    try rows(ctx, list, try std.fmt.allocPrint(ctx.arena, "{s}{s}{s}", .{ name, repeat, if (part.isError orelse false) " (error)" else "" }), width, dim);
+    if (part.text.len == 0) return;
     var output: std.ArrayList(Row) = .empty;
-    try rows(ctx, &output, text[split + 1 ..], width, dim);
-    // A terminal newline ends the last output line, not a ninth blank line.
+    try rows(ctx, &output, part.text, width, dim);
+    // A terminal newline ends the last line, not a ninth blank line.
     if (output.items.len > 1 and output.items[output.items.len - 1].text.len == 0) _ = output.pop();
-    try list.appendSlice(ctx.arena, output.items[0..@min(8, output.items.len)]);
-    if (output.items.len > 8) try rows(ctx, list, "[output truncated after 8 lines; full output retained in history]", width, dim);
+    if (isBash(part)) {
+        // The bridge preserves the UTF-8 tail even for byte-clipped results.
+        // Count visual rows AFTER wrapping so narrow panes still show <= 8.
+        try list.appendSlice(ctx.arena, output.items[output.items.len -| 8..]);
+    } else {
+        try list.appendSlice(ctx.arena, output.items[0..@min(8, output.items.len)]);
+        if (output.items.len > 8) try rows(ctx, list, "[output truncated after 8 lines; full output retained in history]", width, dim) else if (part.clipped orelse false) try rows(ctx, list, "[view clipped; full output retained in history]", width, dim);
+    }
+}
+fn legacyTool(text: []const u8) wire.TuiPart {
+    const split = std.mem.indexOfScalar(u8, text, '\n') orelse text.len;
+    const header = text[0..split];
+    const failed = std.mem.endsWith(u8, header, " (error)");
+    return .{ .kind = .tool, .toolName = if (failed) header[0 .. header.len - " (error)".len] else header, .isError = failed, .text = if (split < text.len) text[split + 1 ..] else "" };
+}
+fn toolRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), text: []const u8, width: u16) !void {
+    try toolPartRows(ctx, list, legacyTool(text), width, 1);
+}
+fn thinkingRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), tokens: i64, width: u16) !void {
+    if (tokens > 0) try rows(ctx, list, try std.fmt.allocPrint(ctx.arena, "[thinking: {d} tokens]", .{tokens}), width, dim);
+}
+// Only explicitly typed bash requests / hidden-only assistant entries are
+// transparent to a bash run. Actual text, notices and other tools are barriers.
+fn bashRequests(entry: wire.TuiEntry) bool {
+    if (entry.role != .assistant) return false;
+    const parts = entry.parts orelse return false;
+    for (parts) |part| {
+        if (part.kind == .text and part.text.len == 0) continue;
+        if (part.kind != .tool_request or !isBash(part)) return false;
+    }
+    return true;
+}
+const BashRun = struct {
+    count: usize = 0,
+    latest: ?wire.TuiPart = null,
+    thinking: i64 = 0,
+    requests: std.ArrayList(wire.TuiPart) = .empty,
+    fn add(self: *BashRun, part: wire.TuiPart) void {
+        self.count += 1;
+        self.latest = part;
+        self.requests.clearRetainingCapacity();
+    }
+    fn flush(self: *BashRun, ctx: fw.DrawContext, list: *std.ArrayList(Row), width: u16, assistant: []const u8) !void {
+        const first = list.items.len;
+        if (self.latest) |part| {
+            try toolPartRows(ctx, list, part, width, self.count);
+            list.items[first].speaker = "·";
+        }
+        // A request AFTER the latest completed result is still pending: don't
+        // hide it or count it as an output. Requests consumed by results vanish.
+        for (self.requests.items) |part| try rows(ctx, list, part.text, width, dim);
+        try thinkingRows(ctx, list, self.thinking, width);
+        if (list.items.len > first) {
+            if (self.latest == null) list.items[first].speaker = assistant;
+            try list.append(ctx.arena, .{});
+        }
+        self.count = 0;
+        self.latest = null;
+        self.thinking = 0;
+        self.requests.clearRetainingCapacity();
+    }
+};
+fn messageRows(ctx: fw.DrawContext, chat: *std.ArrayList(Row), entry: wire.TuiEntry, width: u16, assistant: []const u8) !void {
+    const user = entry.role == .user;
+    if (user) {
+        if (chat.items.len == 0) try chat.append(ctx.arena, .{});
+        try chat.append(ctx.arena, .{ .user = true });
+    }
+    const first = chat.items.len;
+    if (entry.parts) |parts| {
+        var index: usize = 0;
+        while (index < parts.len) {
+            const part = parts[index];
+            index += 1;
+            switch (part.kind) {
+                .notice, .tool_request => try rows(ctx, chat, part.text, width, dim),
+                .tool => try toolPartRows(ctx, chat, part, width, 1),
+                .text => {
+                    // Adjacent text blocks form one Markdown document (fences
+                    // and tables may span blocks). Notices never enter Markdown.
+                    var text: std.ArrayList(u8) = .empty;
+                    try text.appendSlice(ctx.arena, part.text);
+                    while (index < parts.len and parts[index].kind == .text) : (index += 1) {
+                        try text.append(ctx.arena, '\n');
+                        try text.appendSlice(ctx.arena, parts[index].text);
+                    }
+                    if (text.items.len > 0) for (try Markdown.render(ctx, text.items, width, base)) |cells| try chat.append(ctx.arena, .{ .cells = cells });
+                },
+            }
+        }
+    } else if (entry.role == .assistant or user) {
+        for (try Markdown.render(ctx, entry.text, width, base)) |cells| try chat.append(ctx.arena, .{ .cells = cells });
+    } else if (entry.role == .tool) try toolRows(ctx, chat, entry.text, width) else try rows(ctx, chat, entry.text, width, dim);
+    if (entry.role == .assistant) try thinkingRows(ctx, chat, entry.thinkingTokens orelse 0, width);
+    if (chat.items.len == first) {
+        if (!user) return; // Hidden/non-text-only entries produce no filler.
+        try chat.append(ctx.arena, .{});
+    }
+    for (chat.items[first..]) |*row| row.user = user;
+    chat.items[first].speaker = if (user) "•" else if (entry.role == .assistant) assistant else "·";
+    chat.items[first].speaker_style = if (user) accent else dim;
+    try chat.append(ctx.arena, .{ .user = user });
+    if (user) try chat.append(ctx.arena, .{});
+}
+fn chatRows(ctx: fw.DrawContext, chat: *std.ArrayList(Row), entries: []const wire.TuiEntry, width: u16, assistant: []const u8) !void {
+    var bash: BashRun = .{};
+    for (entries) |entry| {
+        if (bashRequests(entry)) {
+            for (entry.parts.?) |part| if (part.kind == .tool_request) try bash.requests.append(ctx.arena, part);
+            bash.thinking += entry.thinkingTokens orelse 0;
+            continue;
+        }
+        if (entry.role == .tool) {
+            const legacy = [_]wire.TuiPart{legacyTool(entry.text)};
+            for (entry.parts orelse &legacy) |part| {
+                if (part.kind == .tool and isBash(part)) {
+                    bash.add(part);
+                } else {
+                    try bash.flush(ctx, chat, width, assistant);
+                    try messageRows(ctx, chat, .{ .id = entry.id, .role = .tool, .text = "", .parts = &.{part} }, width, assistant);
+                }
+            }
+        } else {
+            try bash.flush(ctx, chat, width, assistant);
+            try messageRows(ctx, chat, entry, width, assistant);
+        }
+    }
+    try bash.flush(ctx, chat, width, assistant);
 }
 fn shortDirectory(a: std.mem.Allocator, directory: []const u8, home: ?[]const u8) ![]const u8 {
     if (home) |prefix| if (prefix.len > 0 and std.mem.startsWith(u8, directory, prefix) and (directory.len == prefix.len or directory[prefix.len] == '/')) return std.fmt.allocPrint(a, "~{s}", .{directory[prefix.len..]});
@@ -236,6 +367,91 @@ test "task display groups children without changing the canonical page or IDs" {
     try std.testing.expectEqualStrings("3", page.items[1].chatId);
     try std.testing.expectEqualStrings("10", page.next.?);
 }
+// Compact sidebar and expanded inventory share one projection. Compact rows
+// never claim clipped data is complete: the sidebar links to the scrollable view.
+fn inventoryRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), snapshot: ?wire.TuiSnapshot, width: u16, compact: bool) !void {
+    const inventory = if (snapshot) |s| s.toolInventory else null;
+    const inv = inventory orelse {
+        const unsupported = if (snapshot) |s| s.toolInventoryStatus == .unsupported else false;
+        try rows(ctx, list, if (unsupported) "Inventory unsupported by hub" else "Inventory unavailable", width, Theme.orange);
+        try rows(ctx, list, "Unknown, not an empty tool list.", width, dim);
+        return;
+    };
+    if (!compact) {
+        try rows(ctx, list, "Execution location: hub = central Deck host; worker local = this chat's assigned machine, not necessarily this terminal.", width, dim);
+        if (inv.hubMachineId) |id| try rows(ctx, list, try std.fmt.allocPrint(ctx.arena, "Hub machine: {s}", .{id}), width, dim);
+        if (inv.workerMachineId) |id| try rows(ctx, list, try std.fmt.allocPrint(ctx.arena, "Assigned machine: {s}", .{id}), width, dim);
+        try list.append(ctx.arena, .{});
+    }
+    if (inv.mcp.len == 0) {
+        try rows(ctx, list, "MCP SERVERS", width, accent);
+        try rows(ctx, list, "No profiles for this chat", width, dim);
+        try list.append(ctx.arena, .{});
+    }
+    for ([_]@FieldType(wire.InventoryMcpProfile, "location"){ .hub, .worker }) |location| {
+        var count: usize = 0;
+        for (inv.mcp) |profile| if (profile.location == location) {
+            count += 1;
+        };
+        if (count == 0) continue;
+        try rows(ctx, list, if (location == .hub) "MCP · HUB" else "MCP · WORKER LOCAL", width, accent);
+        for ([_]@FieldType(wire.InventoryMcpProfile, "state"){ .enabled, .not_granted, .unavailable }) |state| {
+            for (inv.mcp) |profile| {
+                if (profile.location != location or profile.state != state) continue;
+                const style = switch (state) {
+                    .enabled => base,
+                    .not_granted => dim,
+                    .unavailable => Theme.orange,
+                };
+                const label = switch (state) {
+                    .enabled => "enabled",
+                    .not_granted => "not granted",
+                    .unavailable => "unavailable",
+                };
+                const symbol = switch (state) {
+                    .enabled => "●",
+                    .not_granted => "○",
+                    .unavailable => "!",
+                };
+                const summary = if (state == .unavailable)
+                    try std.fmt.allocPrint(ctx.arena, "{s} {s} · {s}", .{ symbol, profile.profileId, label })
+                else
+                    try std.fmt.allocPrint(ctx.arena, "{s} {s} · {s} ({d})", .{ symbol, profile.profileId, label, profile.tools.len });
+                try rows(ctx, list, summary, width, style);
+                if (!compact) {
+                    try rows(ctx, list, try std.fmt.allocPrint(ctx.arena, "  Host {s} · workspace {s}", .{ profile.machineId, if (profile.workspace) |workspace| @tagName(workspace) else "unknown" }), width, dim);
+                    try rows(ctx, list, try std.fmt.allocPrint(ctx.arena, "  Revision {s}", .{profile.revision}), width, dim);
+                    for (profile.tools) |tool| {
+                        try rows(ctx, list, try std.fmt.allocPrint(ctx.arena, "  {s}", .{tool.name}), width, style);
+                        try rows(ctx, list, try std.fmt.allocPrint(ctx.arena, "    {s}", .{tool.alias}), width, dim);
+                    }
+                    try list.append(ctx.arena, .{});
+                }
+            }
+        }
+        if (compact) try list.append(ctx.arena, .{});
+    }
+    for ([_]@FieldType(wire.InventoryBuiltin, "location"){ .worker, .hub, .environment }) |location| {
+        var names: std.ArrayList(u8) = .empty;
+        for (inv.builtins) |tool| {
+            if (tool.location != location) continue;
+            if (names.items.len > 0) try names.appendSlice(ctx.arena, " · ");
+            try names.appendSlice(ctx.arena, tool.name);
+        }
+        if (names.items.len == 0) continue;
+        try rows(ctx, list, switch (location) {
+            .worker => "BUILT-IN · WORKER LOCAL",
+            .hub => "BUILT-IN · HUB",
+            .environment => "ENVIRONMENT TOOLS",
+        }, width, accent);
+        try rows(ctx, list, names.items, width, base);
+        try list.append(ctx.arena, .{});
+    }
+    if (inv.builtins.len == 0) try rows(ctx, list, "No non-MCP model tools", width, dim);
+    try rows(ctx, list, if (compact) "Enabled ≠ health checked" else "Not granted = approved candidate, NOT exposed to this model. Unavailable = missing or incompatible grant/catalog/model surface. Enabled does not prove server or worker health.", width, dim);
+    try rows(ctx, list, if (compact) "Shell also exposes host commands." else "MCP is not the whole tool surface. File/shell and hub coordination tools above are separate. When bash or another execution tool is offered, host programs (e.g. git, compilers, tests) are accessible through it subject to that host's permissions and installed software; these are not separate MCP servers or an enumerated command allowlist.", width, dim);
+}
+
 const Model = struct {
     a: std.mem.Allocator,
     bridge: *Bridge,
@@ -257,6 +473,10 @@ const Model = struct {
     hosts_view: bool = false,
     host_index: usize = 0,
     brief_view: bool = false,
+    tools_view: bool = false,
+    tools_scroll: usize = 0,
+    tools_max: usize = 0,
+    tools_height: usize = 10,
     task_form: bool = false,
     rex_view: bool = false,
     settings_uncertain: bool = false,
@@ -529,6 +749,9 @@ const Model = struct {
         const cmd = self.command.items;
         if (std.mem.eql(u8, cmd, "sidebar-toggle")) {
             self.sidebar_override = !self.sidebar_visible;
+        } else if (std.mem.eql(u8, cmd, "tools")) {
+            self.tools_view = true;
+            self.tools_scroll = 0;
         } else if (std.mem.eql(u8, cmd, "new")) try self.beginTaskForm(null) else if (std.mem.eql(u8, cmd, "hosts")) try self.issue(.hosts) else if (std.mem.eql(u8, cmd, "brief")) {
             self.brief_view = true;
             self.help_scroll = 0;
@@ -567,6 +790,10 @@ const Model = struct {
         }
         if (key.matches('c', .{ .ctrl = true })) {
             self.quit(ctx, false);
+            return;
+        }
+        if (self.tools_view) {
+            if (key.matches(vaxis.Key.escape, .{}) or key.matches('q', .{})) self.tools_view = false else if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) self.tools_scroll = @min(self.tools_max, self.tools_scroll + 1) else if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) self.tools_scroll -|= 1 else if (key.matches(vaxis.Key.page_down, .{}) or key.matches('d', .{ .ctrl = true }) or key.matches('f', .{ .ctrl = true })) self.tools_scroll = @min(self.tools_max, self.tools_scroll + (if (key.matches('d', .{ .ctrl = true })) @max(1, self.tools_height / 2) else self.tools_height)) else if (key.matches(vaxis.Key.page_up, .{}) or key.matches('u', .{ .ctrl = true }) or key.matches('b', .{ .ctrl = true })) self.tools_scroll -|= (if (key.matches('u', .{ .ctrl = true })) @max(1, self.tools_height / 2) else self.tools_height) else if (key.matches('g', .{})) self.tools_scroll = 0 else if (key.matches('G', .{})) self.tools_scroll = self.tools_max;
             return;
         }
         if (self.brief_view) {
@@ -788,6 +1015,7 @@ const Model = struct {
                             self.task_picker = false;
                             self.hosts_view = false;
                             self.brief_view = false;
+                            self.tools_view = false;
                             self.task_form = false;
                             self.rex_view = false;
                             self.model_picker = false;
@@ -869,7 +1097,7 @@ const Model = struct {
                 self.paste_mode = true;
                 self.leader = false;
                 self.filter_paste = self.model_picker or self.task_picker or self.hosts_view;
-                self.reject_paste = self.command_mode or self.help_visible or self.brief_view or self.rex_view or (!self.filter_paste and (self.locked() or self.readOnly()));
+                self.reject_paste = self.command_mode or self.help_visible or self.brief_view or self.tools_view or self.rex_view or (!self.filter_paste and (self.locked() or self.readOnly()));
                 self.paste_overflow = false;
                 self.paste_buffer.clearRetainingCapacity();
             },
@@ -894,7 +1122,9 @@ const Model = struct {
             .paste => self.note("Clipboard replies ignored; use terminal bracketed paste."),
             .mouse => |mouse| {
                 if (self.terminal_status) |status| status.presentation.acknowledge();
-                if (mouse.button == .wheel_up) self.scroll = @min(self.scroll_max, self.scroll + 3) else if (mouse.button == .wheel_down) self.scroll -|= 3;
+                if (self.tools_view) {
+                    if (mouse.button == .wheel_up) self.tools_scroll -|= 3 else if (mouse.button == .wheel_down) self.tools_scroll = @min(self.tools_max, self.tools_scroll + 3);
+                } else if (mouse.button == .wheel_up) self.scroll = @min(self.scroll_max, self.scroll + 3) else if (mouse.button == .wheel_down) self.scroll -|= 3;
                 ctx.consumeAndRedraw();
             },
             else => {},
@@ -963,6 +1193,20 @@ const Model = struct {
             line(ctx, surface, 1, h - 3, "Sample only; offline tasks stay bound. No fallback or enrollment.", dim, null, 0);
             line(ctx, surface, 1, h - 2, self.notice[0..self.notice_len], dim, null, 0);
             line(ctx, surface, 1, h - 1, "Type to filter · arrows/Ctrl-N/P · Enter choose · Ctrl-R refresh · Esc", accent, null, 0);
+            return surface;
+        }
+        if (self.tools_view) {
+            @memset(surface.buffer, .{ .style = base });
+            line(ctx, surface, 2, 1, try std.fmt.allocPrint(ctx.arena, "TOOLS · chat {s} · {s}", .{ if (s) |snap| snap.chatId else "?", if (self.online) "read only" else "STALE observation" }), Theme.orange, null, 0);
+            line(ctx, surface, 2, 2, "Enabled = model-visible, not a health check.", dim, null, 0);
+            var detail: std.ArrayList(Row) = .empty;
+            try inventoryRows(ctx, &detail, s, w - 4, false);
+            const count: usize = h - 6;
+            self.tools_height = count;
+            self.tools_max = detail.items.len -| count;
+            self.tools_scroll = @min(self.tools_scroll, self.tools_max);
+            for (detail.items[self.tools_scroll..@min(detail.items.len, self.tools_scroll + count)], 0..) |row, index| lineLimit(ctx, surface, 2, @intCast(4 + index), row.text, row.style, null, 0, w - 2);
+            line(ctx, surface, 1, h - 1, try std.fmt.allocPrint(ctx.arena, "j/k · PgUp/PgDn · g/G · Esc close   {d}/{d}", .{ self.tools_scroll + 1, self.tools_max + 1 }), accent, null, 0);
             return surface;
         }
         if (self.brief_view) {
@@ -1045,27 +1289,7 @@ const Model = struct {
         const chat_h = upper - 1;
         self.chat_height = chat_h;
         var chat: std.ArrayList(Row) = .empty;
-        if (s) |snap| for (snap.entries) |entry| {
-            const label = if (entry.role == .assistant) rune(snap) else if (entry.role == .user) "•" else "·";
-            if (entry.role == .user) {
-                // Other entries already leave a plain gap. Also give the first
-                // user panel an outer margin, separate from its shaded padding.
-                if (chat.items.len == 0) try chat.append(ctx.arena, .{});
-                try chat.append(ctx.arena, .{ .user = true });
-            }
-            const first_row = chat.items.len;
-            if (entry.role == .assistant or entry.role == .user) {
-                for (try Markdown.render(ctx, entry.text, layout.body, base)) |cells| try chat.append(ctx.arena, .{ .cells = cells, .user = entry.role == .user });
-            } else if (entry.role == .tool) try toolRows(ctx, &chat, entry.text, layout.body) else try rows(ctx, &chat, entry.text, layout.body, dim);
-            if (chat.items.len == first_row) try chat.append(ctx.arena, .{ .user = entry.role == .user });
-            chat.items[first_row].speaker = label;
-            chat.items[first_row].speaker_style = if (entry.role == .user) accent else dim;
-            if (entry.role == .assistant) if (entry.thinkingTokens) |tokens| {
-                if (tokens > 0) try rows(ctx, &chat, try std.fmt.allocPrint(ctx.arena, "[thinking: {d} tokens]", .{tokens}), layout.body, dim);
-            };
-            try chat.append(ctx.arena, .{ .user = entry.role == .user });
-            if (entry.role == .user) try chat.append(ctx.arena, .{});
-        };
+        if (s) |snap| try chatRows(ctx, &chat, snap.entries, layout.body, rune(snap));
         if (chat.items.len == 0) try rows(ctx, &chat, if (s == null) "Connecting to the local hub…" else if (self.readOnly()) "Read-only inspection · :rex open to participate" else "Enter to send · Esc for Normal mode · :help", layout.body, dim);
         self.scroll_max = chat.items.len -| chat_h;
         self.scroll = @min(self.scroll, self.scroll_max);
@@ -1087,7 +1311,8 @@ const Model = struct {
             } else lineLimit(ctx, surface, layout.x, @intCast(y), row.text, row.style, null, 0, layout.x + layout.body);
         }
         const mode = if (self.readOnly()) "READ ONLY" else if (s != null and s.?.draft != null and !s.?.draft.?.saved) "LOCKED UNSAVED" else if (s != null and s.?.draft != null and s.?.draft.?.clipped) "SAVED PREVIEW" else if (s != null and s.?.draft != null and s.?.draft.?.saved) "SAVED LOCKED" else if (self.locked()) "LOCKED" else "";
-        for (0..layout.main) |x| for ([_]u16{ upper, h - 3 }) |y| surface.writeCell(@intCast(x), y, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = Theme.rule });
+        for (0..layout.main) |x| surface.writeCell(@intCast(x), upper, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = Theme.rule });
+        for (0..w) |x| surface.writeCell(@intCast(x), h - 3, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = Theme.rule });
         const border = try std.fmt.allocPrint(ctx.arena, " {s}{s} ", .{ if (self.task_form) "TASK BRIEF " else "", mode });
         if (self.task_form or mode.len > 0) lineLimit(ctx, surface, 1, upper, border, dim, null, 0, right);
         if (self.editor.text.items.len * 5 >= Editor.limit * 4) {
@@ -1095,7 +1320,7 @@ const Model = struct {
             if (layout.main > border.len + bytes_label.len + 4) lineLimit(ctx, surface, @intCast(right - bytes_label.len), upper, bytes_label, Theme.rule, null, 0, right);
         }
         // Operational notices remain visible above the prompt, never swallowed
-        // by decorative chrome or the (intentionally otherwise empty) sidebar.
+        // by decorative chrome or the tool inventory sidebar.
         const notice = self.notice[0..self.notice_len];
         lineLimit(ctx, surface, 1, upper - 1, notice, dim, null, 0, right);
         if (notice.len == 0) if (s) |snap| {
@@ -1119,30 +1344,42 @@ const Model = struct {
         const identity = try std.fmt.allocPrint(ctx.arena, "{s} {s}", .{ if (s) |snap| rune(snap) else "·", Theme.name(&name_buffer, saved_name, if (is_hub) null else self.animation()) });
         const role = if (is_hub) "" else if (s) |snap| (if (snap.kind == .subagent) "subagent" else "agent") else "";
         if (layout.sidebar > 0) {
-            for (0..h) |y| surface.writeCell(layout.main, @intCast(y), .{ .char = .{ .grapheme = if (y == upper or y == h - 3) "┤" else "│", .width = 1 }, .style = Theme.rule });
+            for (0..h - 3) |y| surface.writeCell(layout.main, @intCast(y), .{ .char = .{ .grapheme = if (y == upper) "┤" else "│", .width = 1 }, .style = Theme.rule });
+            surface.writeCell(layout.main, h - 3, .{ .char = .{ .grapheme = "┴", .width = 1 }, .style = Theme.rule });
             const available = layout.sidebar - 3;
             const identity_x: u16 = @intCast(layout.main + 2 + (available - @min(available, displayWidth(ctx, identity))) / 2);
             const role_x: u16 = @intCast(layout.main + 2 + (available - @min(available, displayWidth(ctx, role))) / 2);
             lineLimit(ctx, surface, identity_x, 2, identity, Theme.orange, null, 0, w - 1);
             lineLimit(ctx, surface, role_x, 4, role, dim, null, 0, w - 1);
+            if (h >= 12) {
+                lineLimit(ctx, surface, layout.main + 2, 6, if (self.online) "TOOLS" else "TOOLS · STALE", if (self.online) accent else Theme.orange, null, 0, w - 1);
+                var inventory: std.ArrayList(Row) = .empty;
+                try inventoryRows(ctx, &inventory, s, available, true);
+                const count: usize = h - 11;
+                for (inventory.items[0..@min(count, inventory.items.len)], 0..) |row, index| lineLimit(ctx, surface, layout.main + 2, @intCast(7 + index), row.text, row.style, null, 0, w - 1);
+                const more = inventory.items.len -| count;
+                const hint = if (more > 0) try std.fmt.allocPrint(ctx.arena, ":tools · +{d} rows", .{more}) else ":tools · full inventory";
+                lineLimit(ctx, surface, layout.main + 2, h - 4, hint, accent, null, 0, w - 1);
+            }
         }
+        const footer_right = w - 1;
         const directory = if (s) |snap| snap.cwd orelse "directory unavailable" else "connecting";
         const branch = if (s) |snap| snap.gitBranch orelse "branch —" else "branch —";
         const location = try std.fmt.allocPrint(ctx.arena, "{s} ({s})", .{ try shortDirectory(ctx.arena, directory, self.home), branch });
-        const shown_location = try tailColumns(ctx, location, (layout.main * 2) / 3);
-        const location_x: u16 = @intCast(right - displayWidth(ctx, shown_location));
+        const shown_location = try tailColumns(ctx, location, (@as(u16, w) * 2) / 3);
+        const location_x: u16 = @intCast(footer_right - displayWidth(ctx, shown_location));
         const problem = if (is_hub) "hub" else if (s) |snap| (if (snap.brief) |brief| brief.problem orelse snap.title else snap.title) else "connecting";
         const problem_line = problem[0 .. std.mem.indexOfScalar(u8, problem, '\n') orelse problem.len];
         const task_label = try std.fmt.allocPrint(ctx.arena, "{s} {s}", .{ if (s) |snap| rune(snap) else "·", problem_line });
         lineLimit(ctx, surface, 1, h - 2, task_label, Theme.orange, null, 0, location_x -| 1);
-        lineLimit(ctx, surface, location_x, h - 2, shown_location, dim, null, 0, right);
+        lineLimit(ctx, surface, location_x, h - 2, shown_location, dim, null, 0, footer_right);
         const status = try std.fmt.allocPrint(ctx.arena, "{s} [{s}]", .{ if (s) |snap| snap.model else "model —", if (self.settings()) |settings_value| @tagName(settings_value.selection.thinkingLevel) else "thinking —" });
         // Reserve room for uncertainty even with long model names.
         const warning = if (!self.online) try std.fmt.allocPrint(ctx.arena, "STALE · {s}", .{self.shown_transport.text()}) else if (self.command_mode or self.shown_transport == .waiting or self.shown_transport == .fenced) self.shown_transport.text() else "";
-        const warning_width = @min(right - 2, displayWidth(ctx, warning));
-        const model_width = @min(displayWidth(ctx, status), if (self.command_mode or warning_width > 0) right / 2 else right - 1);
-        const model_x: u16 = @intCast(right - model_width);
-        lineLimit(ctx, surface, model_x, h - 1, status, dim, null, 0, right);
+        const warning_width = @min(footer_right - 2, displayWidth(ctx, warning));
+        const model_width = @min(displayWidth(ctx, status), if (self.command_mode or warning_width > 0) footer_right / 2 else footer_right - 1);
+        const model_x: u16 = @intCast(footer_right - model_width);
+        lineLimit(ctx, surface, model_x, h - 1, status, dim, null, 0, footer_right);
         const command_right = model_x -| 1;
         if (self.command_mode) {
             const command_text = try std.fmt.allocPrint(ctx.arena, ":{s}", .{self.command.items});
@@ -1481,8 +1718,8 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     model.sidebar_override = true;
     model.snapshot.?.value.case0.snapshot.agentRune = "ᚦ";
     const centered = try Model.draw(&model, wide_ctx);
-    try std.testing.expectEqualStrings("ᚦ", centered.buffer[2 * 140 + 120].char.grapheme);
-    try std.testing.expectEqualStrings("a", centered.buffer[4 * 140 + 124].char.grapheme);
+    try std.testing.expectEqualStrings("ᚦ", centered.buffer[2 * 140 + 106].char.grapheme);
+    try std.testing.expectEqualStrings("a", centered.buffer[4 * 140 + 110].char.grapheme);
     try model.press(&ctx, .{ .codepoint = 'v' });
     try std.testing.expect(model.external_edit and ctx.quit);
 }
@@ -1539,7 +1776,7 @@ test "soft wrapping preserves exact bytes, Unicode clusters and cursor offsets" 
     try std.testing.expectEqualStrings("78", result.items[2].text);
 }
 
-test "tool display caps eight visual output lines and marks truncation without changing input" {
+test "tools cap eight visual rows; bash keeps the tail without an extra truncation line" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     fw.DrawContext.init(.unicode);
@@ -1547,9 +1784,9 @@ test "tool display caps eight visual output lines and marks truncation without c
     var result: std.ArrayList(Row) = .empty;
     const original = "bash\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n";
     try toolRows(ctx, &result, original, 80);
-    try std.testing.expectEqual(@as(usize, 10), result.items.len);
-    try std.testing.expectEqualStrings("8", result.items[8].text);
-    try std.testing.expect(std.mem.startsWith(u8, result.items[9].text, "[output truncated after 8 lines"));
+    try std.testing.expectEqual(@as(usize, 9), result.items.len);
+    try std.testing.expectEqualStrings("3", result.items[1].text);
+    try std.testing.expectEqualStrings("10", result.items[8].text);
     result.clearRetainingCapacity();
     try toolRows(ctx, &result, "bash\n1\n2\n3\n4\n5\n6\n7\n8\n", 80);
     try std.testing.expectEqual(@as(usize, 9), result.items.len);
@@ -1603,24 +1840,24 @@ test "user panels pad full chat width, task footer uses brief, and filters canno
     fw.DrawContext.init(.unicode);
     const draw_ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
     const surface = try Model.draw(&model, draw_ctx);
-    for (1..4) |y| for (0..112) |x| try std.testing.expectEqualDeep(Theme.user.bg, surface.buffer[y * 140 + x].style.bg);
-    for ([_]usize{ 0, 4 }) |y| for (0..112) |x| {
+    for (1..4) |y| for (0..84) |x| try std.testing.expectEqualDeep(Theme.user.bg, surface.buffer[y * 140 + x].style.bg);
+    for ([_]usize{ 0, 4 }) |y| for (0..84) |x| {
         const cell = surface.buffer[y * 140 + x];
         try std.testing.expectEqualDeep(base.bg, cell.style.bg);
         try std.testing.expectEqualStrings(" ", cell.char.grapheme);
     };
-    try std.testing.expectEqualDeep(base.bg, surface.buffer[113].style.bg);
-    try std.testing.expectEqualStrings("•", surface.buffer[2 * 140 + 14].char.grapheme);
-    try std.testing.expectEqualDeep(base.fg, surface.buffer[5 * 140 + 16].style.fg);
+    try std.testing.expectEqualDeep(base.bg, surface.buffer[85].style.bg);
+    try std.testing.expectEqualStrings("•", surface.buffer[2 * 140].char.grapheme);
+    try std.testing.expectEqualDeep(base.fg, surface.buffer[5 * 140 + 2].style.fg);
     const thinking = "[thinking: 27 tokens]";
     for (thinking, 0..) |_, x| {
-        const cell = surface.buffer[6 * 140 + 16 + x];
+        const cell = surface.buffer[6 * 140 + 2 + x];
         try std.testing.expectEqualStrings(thinking[x..][0..1], cell.char.grapheme);
         try std.testing.expectEqualDeep(dim.fg, cell.style.fg);
     }
     var footer: std.ArrayList(u8) = .empty;
     defer footer.deinit(a);
-    for (surface.buffer[38 * 140 .. 38 * 140 + 112]) |cell| try footer.appendSlice(a, cell.char.grapheme);
+    for (surface.buffer[38 * 140 .. 39 * 140]) |cell| try footer.appendSlice(a, cell.char.grapheme);
     try std.testing.expect(std.mem.indexOf(u8, footer.items, "ᚦ Fix the actual task problem") != null);
     try std.testing.expect(std.mem.endsWith(u8, footer.items, "~/project (feature/demo) "));
     // Empty/small prompts stay quiet; the first visible count is ceil(80%).
@@ -1634,7 +1871,7 @@ test "user panels pad full chat width, task footer uses brief, and filters canno
         if (len >= 13108) try std.testing.expect(std.mem.indexOf(u8, text.items, try std.fmt.allocPrint(arena.allocator(), "{d}/16384 bytes", .{len})) != null);
     }
     try model.editor.set("");
-    // Junctions follow both prompt rules across resize and sidebar overrides.
+    // Sidebar stops at the full-width footer; prompt keeps its own junction.
     for ([_]bool{ false, true }) |sidebar| {
         model.sidebar_override = sidebar;
         for ([_]u16{ 60, 100, 140 }) |width| {
@@ -1646,7 +1883,10 @@ test "user panels pad full chat width, task footer uses brief, and filters canno
                 const layout = Theme.Layout.init(width, sidebar);
                 const upper: usize = if (text.len == 0) 34 else 32;
                 if (sidebar) {
-                    for (0..40) |y| try std.testing.expectEqualStrings(if (y == upper or y == 37) "┤" else "│", drawn.buffer[y * width + layout.main].char.grapheme);
+                    for (0..37) |y| try std.testing.expectEqualStrings(if (y == upper) "┤" else "│", drawn.buffer[y * width + layout.main].char.grapheme);
+                    try std.testing.expectEqualStrings("┴", drawn.buffer[37 * width + layout.main].char.grapheme);
+                    for (38..40) |y| try std.testing.expect(!std.mem.eql(u8, "│", drawn.buffer[y * width + layout.main].char.grapheme));
+                    for (0..width) |x| try std.testing.expectEqualStrings(if (x == layout.main) "┴" else "─", drawn.buffer[37 * width + x].char.grapheme);
                 } else {
                     for (drawn.buffer) |cell| try std.testing.expect(!std.mem.eql(u8, cell.char.grapheme, "┤"));
                 }
@@ -1686,4 +1926,222 @@ test "untrusted terminal and bidi controls never reach cells" {
     try std.testing.expectEqualStrings("�", safeGrapheme("\xc2\x9b31m"));
     try std.testing.expectEqualStrings("�", safeGrapheme("\u{202e}spoof"));
     try std.testing.expectEqualStrings("👩🏽‍💻", safeGrapheme("👩🏽‍💻"));
+}
+
+fn testSurfaceText(a: std.mem.Allocator, surface: fw.Surface) ![]const u8 {
+    var text: std.ArrayList(u8) = .empty;
+    for (surface.buffer, 0..) |cell, index| {
+        try text.appendSlice(a, cell.char.grapheme);
+        if ((index + 1) % surface.size.width == 0) try text.append(a, '\n');
+    }
+    return text.items;
+}
+
+test "tool inventory separates locations and grants, preserves unknown, and offers all overflow read-only" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    var model: Model = .{ .a = a, .bridge = &bridge, .editor = .init(a), .online = true, .snapshot = .{
+        .arena = try a.create(std.heap.ArenaAllocator),
+        .value = .{ .case0 = .{ .version = 1, .id = "1", .ok = true, .snapshot = .{
+            .clientMode = .task,
+            .hubChatId = "1",
+            .hubId = "hub",
+            .chatId = "2",
+            .title = "Inventory",
+            .model = "mock",
+            .tools = "native-files + bash",
+            .activityKnown = false,
+            .busy = false,
+            .queued = 0,
+            .entries = &.{},
+            .hasOlder = false,
+            .historical = false,
+            .preview = "",
+            .notice = "",
+            .draft = null,
+        } } },
+    } };
+    model.snapshot.?.arena.* = std.heap.ArenaAllocator.init(a);
+    defer model.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    fw.DrawContext.init(.unicode);
+    var ctx: fw.DrawContext = .{ .arena = alloc, .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
+    const snap = &model.snapshot.?.value.case0.snapshot;
+    const unknown = try testSurfaceText(alloc, try Model.draw(&model, ctx));
+    try std.testing.expect(std.mem.indexOf(u8, unknown, "Inventory unavailable") != null);
+    try std.testing.expect(std.mem.indexOf(u8, unknown, "No profiles") == null);
+    snap.toolInventoryStatus = .unsupported;
+    try std.testing.expect(std.mem.indexOf(u8, try testSurfaceText(alloc, try Model.draw(&model, ctx)), "Inventory unsupported") != null);
+    const hub_machine = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const worker_machine = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const revision = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    snap.toolInventoryStatus = .ready;
+    snap.toolInventory = .{ .chatId = "2", .hubMachineId = hub_machine, .workerMachineId = worker_machine, .builtins = &.{
+        .{ .name = "read", .location = .worker },   .{ .name = "write", .location = .worker }, .{ .name = "edit", .location = .worker },                         .{ .name = "bash", .location = .worker },
+        .{ .name = "task_list", .location = .hub }, .{ .name = "subagent", .location = .hub }, .{ .name = "custom_environment_tool", .location = .environment },
+    }, .mcp = &.{
+        .{ .profileId = "search", .machineId = hub_machine, .location = .hub, .workspace = .fixed, .revision = revision, .state = .enabled, .tools = &.{.{ .name = "search", .alias = "mcp_search_alias" }} },
+        .{ .profileId = "workspace", .machineId = worker_machine, .location = .worker, .workspace = .task, .revision = revision, .state = .enabled, .tools = &.{.{ .name = "lookup", .alias = "mcp_lookup_alias" }} },
+        .{ .profileId = "browser", .machineId = worker_machine, .location = .worker, .workspace = .task, .revision = revision, .state = .not_granted, .tools = &.{.{ .name = "browse", .alias = "mcp_browse_alias" }} },
+        .{ .profileId = "old_revision", .machineId = worker_machine, .location = .worker, .revision = revision, .state = .unavailable, .tools = &.{} },
+    } };
+    const text = try testSurfaceText(alloc, try Model.draw(&model, ctx));
+    for ([_][]const u8{ "MCP · HUB", "MCP · WORKER LOCAL", "search · enabled (1)", "workspace · enabled (1)", "browser · not granted (1)", "old_revision · unavailable", "BUILT-IN · WORKER LOCAL", "read · write · edit · bash", "BUILT-IN · HUB", "task_list · subagent", "ENVIRONMENT TOOLS", "custom_environment_tool" }) |expected| try std.testing.expect(std.mem.indexOf(u8, text, expected) != null);
+    ctx.max.height = 24;
+    try std.testing.expect(std.mem.indexOf(u8, try testSurfaceText(alloc, try Model.draw(&model, ctx)), ":tools · +") != null);
+    model.online = false;
+    try std.testing.expect(std.mem.indexOf(u8, try testSurfaceText(alloc, try Model.draw(&model, ctx)), "TOOLS · STALE") != null);
+    model.online = true;
+    var event: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
+    defer event.cmds.deinit(a);
+    try model.editor.set("preserve unsent prompt");
+    try model.command.appendSlice(a, "tools");
+    try model.ex(&event);
+    try std.testing.expect(model.tools_view and bridge.pending == null);
+    ctx.max = .{ .width = 100, .height = 12 }; // Full view also works without sidebar.
+    var all: std.ArrayList(u8) = .empty;
+    while (true) {
+        try all.appendSlice(alloc, try testSurfaceText(alloc, try Model.draw(&model, ctx)));
+        if (model.tools_scroll == model.tools_max) break;
+        try model.press(&event, .{ .codepoint = vaxis.Key.page_down });
+    }
+    for ([_][]const u8{ "mcp_search_alias", "mcp_lookup_alias", "mcp_browse_alias", hub_machine, worker_machine, revision, "workspace unknown", "permissions" }) |expected| try std.testing.expect(std.mem.indexOf(u8, all.items, expected) != null);
+    try model.press(&event, .{ .codepoint = 'g' });
+    try std.testing.expectEqual(0, model.tools_scroll);
+    try model.press(&event, .{ .codepoint = 'G' });
+    try std.testing.expectEqual(model.tools_max, model.tools_scroll);
+    try model.press(&event, .{ .codepoint = 's', .mods = .{ .ctrl = true } });
+    try Model.event(&model, &event, .paste_start);
+    try model.press(&event, .{ .codepoint = 0, .text = "do not insert or execute" });
+    try Model.event(&model, &event, .paste_end);
+    try std.testing.expectEqualStrings("preserve unsent prompt", model.editor.text.items);
+    try std.testing.expect(bridge.pending == null);
+    try model.press(&event, .{ .codepoint = vaxis.Key.escape });
+    try std.testing.expect(!model.tools_view);
+    snap.toolInventory.?.mcp = &.{};
+    ctx.max = .{ .width = 140, .height = 40 };
+    try std.testing.expect(std.mem.indexOf(u8, try testSurfaceText(alloc, try Model.draw(&model, ctx)), "No profiles for this chat") != null);
+    // Fully populated inventory stays within every bounded surface/override.
+    for ([_]u16{ 20, 60, 100, 112, 140, 512 }) |width| for ([_]u16{ 9, 12, 24, 120 }) |height| {
+        ctx.max = .{ .width = width, .height = height };
+        model.sidebar_override = true;
+        _ = try Model.draw(&model, ctx);
+        model.tools_view = true;
+        _ = try Model.draw(&model, ctx);
+        model.tools_view = false;
+    };
+}
+
+fn testRowsText(a: std.mem.Allocator, rendered: []const Row) ![]const u8 {
+    var text: std.ArrayList(u8) = .empty;
+    for (rendered) |row| {
+        if (row.cells) |cells| {
+            for (cells) |cell| try text.appendSlice(a, cell.char.grapheme);
+        } else try text.appendSlice(a, row.text);
+        try text.append(a, '\n');
+    }
+    return text.items;
+}
+
+test "typed notices always use dim grey, literal message brackets stay white, hidden entries add no filler" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    fw.DrawContext.init(.unicode);
+    const ctx: fw.DrawContext = .{ .arena = a, .min = .{}, .max = .{ .width = 80, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
+    var rendered: std.ArrayList(Row) = .empty;
+    const entries: []const wire.TuiEntry = &.{
+        .{ .id = 1, .role = .assistant, .text = "ignored flat fallback", .parts = &.{
+            .{ .kind = .text, .text = "[error]\n[non-text content]" },
+            .{ .kind = .notice, .text = "[view clipped]" },
+            .{ .kind = .tool_request, .toolName = "read", .text = "[tool requested: read]" },
+            .{ .kind = .notice, .text = "[error]" },
+        }, .thinkingTokens = 27 },
+        .{ .id = 2, .role = .assistant, .text = "must not show", .parts = &.{} },
+    };
+    try chatRows(ctx, &rendered, entries, 80, "Δ");
+    try std.testing.expectEqual(7, rendered.items.len); // two literal rows, four notices, one gap
+    for (rendered.items[0..2]) |row| for (row.cells.?) |cell| try std.testing.expectEqualDeep(base.fg, cell.style.fg);
+    for (rendered.items[2..6]) |row| {
+        try std.testing.expect(row.cells == null);
+        try std.testing.expectEqualDeep(dim.fg, row.style.fg);
+    }
+    try std.testing.expectEqualStrings("[thinking: 27 tokens]", rendered.items[5].text);
+    try std.testing.expect(std.mem.indexOf(u8, try testRowsText(a, rendered.items), "must not show") == null);
+    // Notice wrapping does not route continuation lines through Markdown.
+    rendered.clearRetainingCapacity();
+    try chatRows(ctx, &rendered, &.{.{ .id = 3, .role = .assistant, .text = "", .parts = &.{.{ .kind = .notice, .text = "[a **long** generated notice that wraps]" }} }}, 10, "Δ");
+    try std.testing.expect(rendered.items.len > 3);
+    for (rendered.items[0 .. rendered.items.len - 1]) |row| {
+        try std.testing.expect(row.cells == null);
+        try std.testing.expectEqualDeep(dim.fg, row.style.fg);
+        try std.testing.expect(displayWidth(ctx, row.text) <= 10);
+    }
+}
+
+test "six consecutive bash outputs collapse across requests and hidden reasoning to the latest eight rows" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    fw.DrawContext.init(.unicode);
+    const ctx: fw.DrawContext = .{ .arena = a, .min = .{}, .max = .{ .width = 80, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
+    var entries: std.ArrayList(wire.TuiEntry) = .empty;
+    for (0..6) |i| {
+        try entries.append(a, .{ .id = @intCast(3 * i + 1), .role = .assistant, .text = "", .parts = &.{.{ .kind = .tool_request, .toolName = "bash", .text = "[tool requested: bash]" }}, .thinkingTokens = 2 });
+        try entries.append(a, .{ .id = @intCast(3 * i + 2), .role = .assistant, .text = "", .parts = &.{} });
+        const parts = try a.alloc(wire.TuiPart, 1);
+        parts[0] = .{ .kind = .tool, .toolName = "bash", .text = if (i == 5) "old1\nold2\nfinal3\nfinal4\nfinal5\nfinal6\nfinal7\nfinal8\nfinal9\nfinal10\n" else "old output must disappear" };
+        try entries.append(a, .{ .id = @intCast(3 * i + 3), .role = .tool, .text = "", .parts = parts });
+    }
+    var rendered: std.ArrayList(Row) = .empty;
+    try chatRows(ctx, &rendered, entries.items, 80, "Δ");
+    try std.testing.expectEqualStrings("bash (×6)", rendered.items[0].text);
+    try std.testing.expectEqualStrings("final3", rendered.items[1].text);
+    try std.testing.expectEqualStrings("final10", rendered.items[8].text);
+    try std.testing.expectEqualStrings("[thinking: 12 tokens]", rendered.items[9].text);
+    try std.testing.expectEqual(11, rendered.items.len);
+    const text = try testRowsText(a, rendered.items);
+    try std.testing.expect(std.mem.indexOf(u8, text, "old") == null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "tool requested") == null);
+    for (rendered.items[0..10]) |row| try std.testing.expectEqualDeep(dim.fg, row.style.fg);
+    // A pending request is visible and does not increment the completed count.
+    try entries.append(a, .{ .id = 19, .role = .assistant, .text = "", .parts = &.{.{ .kind = .tool_request, .toolName = "bash", .text = "[tool requested: bash]" }} });
+    rendered.clearRetainingCapacity();
+    try chatRows(ctx, &rendered, entries.items, 80, "Δ");
+    try std.testing.expectEqualStrings("bash (×6)", rendered.items[0].text);
+    try std.testing.expectEqualStrings("[tool requested: bash]", rendered.items[9].text);
+    // Rendering is pure: earlier results and canonical IDs are unchanged.
+    try std.testing.expectEqualStrings("old output must disappear", entries.items[2].parts.?[0].text);
+    try std.testing.expectEqual(18, entries.items[17].id);
+}
+
+test "bash runs stop at messages, other tools and notices, including multiple results per entry" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    fw.DrawContext.init(.unicode);
+    const ctx: fw.DrawContext = .{ .arena = a, .min = .{}, .max = .{ .width = 80, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
+    const bash: wire.TuiPart = .{ .kind = .tool, .toolName = "bash", .text = "body" };
+    const entries: []const wire.TuiEntry = &.{
+        .{ .id = 1, .role = .tool, .text = "", .parts = &.{ bash, bash, .{ .kind = .tool, .toolName = "read", .text = "file body" }, bash, bash } },
+        .{ .id = 2, .role = .assistant, .text = "", .parts = &.{.{ .kind = .text, .text = "Message boundary" }} },
+        .{ .id = 3, .role = .tool, .text = "", .parts = &.{bash} },
+        .{ .id = 4, .role = .note, .text = "", .parts = &.{.{ .kind = .notice, .text = "[retained notice]" }} },
+        .{ .id = 5, .role = .tool, .text = "bash\nlegacy first" },
+        .{ .id = 6, .role = .tool, .text = "bash (error)\nlegacy latest" },
+    };
+    var rendered: std.ArrayList(Row) = .empty;
+    try chatRows(ctx, &rendered, entries, 80, "Δ");
+    try std.testing.expectEqualStrings("bash (×2)\nbody\n\nread\nfile body\n\nbash (×2)\nbody\n\nMessage boundary\n\nbash\nbody\n\n[retained notice]\n\nbash (×2) (error)\nlegacy latest\n\n", try testRowsText(a, rendered.items));
+    // Resizing bounds *visual* rows, including wide graphemes and final LF.
+    const unicode = "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界\nlast\n";
+    for ([_]u16{ 4, 10, 80 }) |width| {
+        rendered.clearRetainingCapacity();
+        try toolPartRows(ctx, &rendered, .{ .kind = .tool, .toolName = "bash", .text = unicode, .clipped = true }, width, 1);
+        try std.testing.expect(rendered.items.len <= 9);
+        try std.testing.expectEqualStrings("last", rendered.items[rendered.items.len - 1].text);
+        for (rendered.items) |row| try std.testing.expect(displayWidth(ctx, row.text) <= width);
+    }
 }

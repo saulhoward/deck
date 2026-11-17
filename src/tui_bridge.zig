@@ -154,6 +154,28 @@ pub fn validRequest(value: std.json.Value) bool {
 fn safeId(value: std.json.Value) bool {
     return wire.validPiId(value) and (std.fmt.parseInt(u64, value.string, 10) catch return false) <= 9007199254740991;
 }
+// Match the structured presentation to its bounded flat compatibility text.
+// No bracket heuristics: only explicit part kinds carry UI provenance.
+fn consumeText(remaining: *[]const u8, prefix: []const u8) bool {
+    if (!std.mem.startsWith(u8, remaining.*, prefix)) return false;
+    remaining.* = remaining.*[prefix.len..];
+    return true;
+}
+fn validEntryParts(entry: std.json.Value) bool {
+    var remaining = entry.object.get("text").?.string;
+    if (remaining.len > 8192) return false;
+    const parts = entry.object.get("parts") orelse return true;
+    for (parts.array.items, 0..) |part, index| {
+        if (index > 0 and !consumeText(&remaining, "\n")) return false;
+        if (std.mem.eql(u8, part.object.get("kind").?.string, "tool")) {
+            if (part.object.get("toolName")) |name| if (!consumeText(&remaining, name.string)) return false;
+            if (part.object.get("isError")) |failed| if (failed.bool and !consumeText(&remaining, " (error)")) return false;
+            if (!consumeText(&remaining, "\n")) return false;
+        }
+        if (!consumeText(&remaining, part.object.get("text").?.string)) return false;
+    }
+    return remaining.len == 0;
+}
 pub fn validReply(value: std.json.Value, expected: []const u8, hub_id: ?[]const u8, chat_id: ?[]const u8) bool {
     if (!wire.validTuiResponse(value) or !std.mem.eql(u8, value.object.get("id").?.string, expected)) return false;
     if (!value.object.get("ok").?.bool) return true;
@@ -162,6 +184,7 @@ pub fn validReply(value: std.json.Value, expected: []const u8, hub_id: ?[]const 
     const chat = s.object.get("chatId").?.string;
     if ((std.fmt.parseInt(u64, chat, 10) catch return false) > 9007199254740991) return false;
     if (chat_id) |id| if (!std.mem.eql(u8, id, chat)) return false;
+    if (!@import("tool_inventory.zig").validInventoryFields(s)) return false;
     const hub_chat = s.object.get("hubChatId").?;
     if (!safeId(hub_chat)) return false;
     const task_mode = std.mem.eql(u8, s.object.get("clientMode").?.string, "task");
@@ -205,7 +228,11 @@ pub fn validReply(value: std.json.Value, expected: []const u8, hub_id: ?[]const 
         if (!model_settings.validSnapshot(settings) or !std.mem.eql(u8, settings.object.get("hubId").?.string, s.object.get("hubId").?.string) or !std.mem.eql(u8, settings.object.get("chatId").?.string, chat)) return false;
     }
     var previous: f64 = 0;
+    var text_bytes: usize = 0;
     for (s.object.get("entries").?.array.items) |entry| {
+        if (!validEntryParts(entry)) return false;
+        text_bytes += entry.object.get("text").?.string.len;
+        if (text_bytes > 128 * 1024) return false;
         const raw = entry.object.get("id").?;
         const n: f64 = if (raw == .integer) @floatFromInt(raw.integer) else raw.float;
         if (n <= previous) return false;
@@ -512,5 +539,42 @@ test "renderer boundary correlates transport, chat, hub and canonical history be
     }) |bytes| {
         const raw = try std.json.parseFromSlice(std.json.Value, a, bytes, .{});
         try std.testing.expect(!validRequest(raw.value));
+    }
+}
+
+test "structured content matches flat text and byte bounds before renderer display" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var response = (try std.json.parseFromSlice(std.json.Value, a,
+        \\{"version":1,"id":"1","ok":true,"snapshot":{"clientMode":"hub","hubChatId":"1","hubId":"hub","chatId":"1","title":"Task","model":"mock","tools":"offline","activityKnown":false,"busy":false,"queued":0,"entries":[],"hasOlder":false,"historical":false,"preview":"","notice":"","draft":null}}
+    , .{})).value;
+    const snapshot = response.object.getPtr("snapshot").?;
+    for ([_]struct { entries: []const u8, valid: bool }{
+        .{ .entries = "[{\"id\":1,\"role\":\"assistant\",\"text\":\"[error]\"}]", .valid = true },
+        .{ .entries = "[{\"id\":1,\"role\":\"assistant\",\"text\":\"\",\"parts\":[]}]", .valid = true },
+        .{ .entries = "[{\"id\":1,\"role\":\"assistant\",\"text\":\"must not vanish\",\"parts\":[]}]", .valid = false },
+        .{ .entries = "[{\"id\":1,\"role\":\"assistant\",\"text\":\"body\\n[error]\",\"parts\":[{\"kind\":\"text\",\"text\":\"body\"},{\"kind\":\"notice\",\"text\":\"[error]\"}]}]", .valid = true },
+        .{ .entries = "[{\"id\":1,\"role\":\"tool\",\"text\":\"bash (error)\\noutput\",\"parts\":[{\"kind\":\"tool\",\"toolName\":\"bash\",\"isError\":true,\"clipped\":true,\"text\":\"output\"}]}]", .valid = true },
+        .{ .entries = "[{\"id\":1,\"role\":\"tool\",\"text\":\"bash\\noutput\",\"parts\":[{\"kind\":\"tool\",\"toolName\":\"bash\",\"isError\":true,\"text\":\"output\"}]}]", .valid = false },
+    }) |case| {
+        try snapshot.object.put(a, "entries", (try std.json.parseFromSlice(std.json.Value, a, case.entries, .{})).value);
+        try std.testing.expectEqual(case.valid, validReply(response, "1", "hub", "1"));
+    }
+    for ([_]usize{ 8192, 8193 }) |length| {
+        const text = try a.alloc(u8, length);
+        @memset(text, 'a');
+        const encoded = try std.json.Stringify.valueAlloc(a, [_]wire.TuiEntry{.{ .id = 1, .role = .assistant, .text = text, .parts = &.{.{ .kind = .text, .text = text }} }}, .{});
+        try snapshot.object.put(a, "entries", (try std.json.parseFromSlice(std.json.Value, a, encoded, .{})).value);
+        try std.testing.expectEqual(length == 8192, validReply(response, "1", "hub", "1"));
+    }
+    const payload = try a.alloc(u8, 8192);
+    @memset(payload, 'x');
+    var entries: [17]wire.TuiEntry = undefined;
+    for (&entries, 0..) |*entry, index| entry.* = .{ .id = @intCast(index + 1), .role = .assistant, .text = payload };
+    for ([_]usize{ 16, 17 }) |length| {
+        const encoded = try std.json.Stringify.valueAlloc(a, entries[0..length], .{});
+        try snapshot.object.put(a, "entries", (try std.json.parseFromSlice(std.json.Value, a, encoded, .{})).value);
+        try std.testing.expectEqual(length == 16, validReply(response, "1", "hub", "1"));
     }
 }

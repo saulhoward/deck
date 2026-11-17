@@ -49,10 +49,14 @@ export async function dispatch(runtime: DeckRuntime, request: Record<string, unk
       const chat = args.chatId === undefined ? runtime.main : await runtime.chat(text(args.chatId, "chatId"));
       const saved = await runtime.harness.snapshot(ChatDoc, chat.id, context);
       const model = (await chat.agent(context)).model;
+      let inventory: { toolInventory?: import("./generated/contracts.js").ToolInventory; toolInventoryStatus: "ready" | "unavailable" };
+      try { inventory = { toolInventory: await runtime.toolInventory(String(chat.id)), toolInventoryStatus: "ready" }; }
+      catch { inventory = { toolInventoryStatus: "unavailable" }; } // No stale/partial projection or diagnostic payload.
+
       // Project Deck metadata without rewriting retained documents. Pi model
       // parameters and global inspection records remain compatible opaque data.
       const binding = saved && { ...agentNameFields(saved), machineId: saved.machineId, cwd: saved.cwd, kind: saved.kind, title: saved.title, ...(saved.parentChatId === undefined ? {} : { parentChatId: saved.parentChatId }), ...(saved.ownerTaskId === undefined ? {} : { ownerTaskId: saved.ownerTaskId }), ...(saved.brief ? { brief: saved.brief } : {}) };
-      return { ...(runtime.authentication ? { authentication: runtime.authentication } : {}), ...(!taskClient && runtime.localMachineId ? { machineId: runtime.localMachineId } : {}), implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, modelSettings: 1, taskBrief: 1, ...(taskClient ? {} : { hostInventory: 1, rexAdopt: 1 }), rexStartup: 1, rexOpen: runtime.rexClient && runtime.localFiles ? 1 : 0, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding, ...(taskClient ? {} : { activity: await runtime.harness.inspect(context) }), provider: model?.provider, model: taskClient && model ? { provider: model.provider, modelId: model.modelId } : model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
+      return { ...inventory, ...(runtime.authentication ? { authentication: runtime.authentication } : {}), ...(!taskClient && runtime.localMachineId ? { machineId: runtime.localMachineId } : {}), implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, modelSettings: 1, taskBrief: 1, ...(taskClient ? {} : { hostInventory: 1, rexAdopt: 1 }), rexStartup: 1, rexOpen: runtime.rexClient && runtime.localFiles ? 1 : 0, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding, ...(taskClient ? {} : { activity: await runtime.harness.inspect(context) }), provider: model?.provider, model: taskClient && model ? { provider: model.provider, modelId: model.modelId } : model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
     }
     case "model_settings":
     case "set_model_settings": {

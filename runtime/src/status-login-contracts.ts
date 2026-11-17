@@ -1,3 +1,4 @@
+import { validInventoryFields } from "./tool-inventory-contracts.js";
 import { validBrief } from "./task-brief.js";
 import * as wire from "./generated/contracts.js";
 import { validSafePiId, type ReplyContext } from "./mutation-contracts.js";
@@ -33,7 +34,7 @@ export function validStatusLoginReply(request: ReplyContext, value: unknown): bo
     case "status": {
       if (!wire.validStatusSnapshot(value) || !validSafePiId(value.mainChatId) || !validSafePiId(value.chatId) || value.hubId.length > 200) return false;
       if (value.chatId !== ((args as wire.StatusArgs).chatId ?? value.mainChatId) || (request.hubId !== undefined && request.hubId !== value.hubId)) return false;
-      if (!["offline", "native-files + bash"].includes(value.tools)) return false;
+      if (!["offline", "native-files + bash"].includes(value.tools) || !validInventoryFields(value)) return false;
       if (value.provider !== undefined && value.model?.provider !== undefined && value.provider !== value.model.provider) return false;
       const binding = value.binding;
       return !binding || ((binding.brief === undefined || validBrief(binding.brief)) && (binding.parentChatId === undefined) === (binding.ownerTaskId === undefined) && (binding.parentChatId === undefined || (validSafePiId(binding.parentChatId) && validSafePiId(binding.ownerTaskId))));

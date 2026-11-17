@@ -68,6 +68,7 @@ pub fn validReply(command: []const u8, raw: V, expected_hub: ?V, value: V) bool 
         }
         const tools = field(value, "tools");
         if (!tag(tools, "offline") and !tag(tools, "native-files + bash")) return false;
+        if (!@import("tool_inventory.zig").validInventoryFields(value)) return false;
         if (value.object.get("provider")) |provider| {
             if (value.object.get("model")) |model| {
                 if (model.object.get("provider")) |other| {

@@ -1,5 +1,8 @@
 // Client-only adapter: shared HTTP validation and existing local drafts, no Pi
 // session, store, execution or replay loop. The renderer owns presentation.
+import { displayText, projectEntry, flattenParts, entryBytes } from "./tui-content.js";
+export { displayText, thinkingUsage } from "./tui-content.js";
+import { validInventoryFields } from "./tool-inventory-contracts.js";
 import { localGitBranch } from "./tui-workspace.js";
 import { canParticipate, requireParticipation, requireNavigation, requireCreation, inspectOnly } from "./client-access.js";
 import type { TuiClientMode } from "./generated/contracts.js";
@@ -13,14 +16,6 @@ import { HubError } from "./responses.js";
 import { validTuiRequest, validTuiResponse, type TuiRequest, type TuiSnapshot, type TuiEntry, type TuiResponse } from "./generated/contracts.js";
 import { validSafePiId, validMutationArgs } from "./mutation-contracts.js";
 
-export function displayText(value: string, bytes: number): string {
-  // Keep text, not terminal commands. Never pass provider OSC/CSI/C1 to the TTY.
-  const clean = value.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "").replace(/\t/g, "    ");
-  if (Buffer.byteLength(clean) <= bytes) return clean;
-  let result = "", used = 0;
-  for (const cp of clean) { const n = Buffer.byteLength(cp); if (used + n > bytes - 16) break; used += n; result += cp; }
-  return result + "\n[view clipped]";
-}
 import { validTaskTarget } from "./task-target.js";
 import { validForm, validBrief, taskCreationCommand } from "./task-brief.js";
 import { validHosts } from "./host-inventory.js";
@@ -37,7 +32,7 @@ export function validRequest(value: unknown): value is TuiRequest {
   return value.text === undefined;
 }
 export function validReply(value: unknown, id: string, hubId?: string, chatId?: string, action?: TuiRequest["action"], target?: string, after?: string, mode?: TuiClientMode, hubChatId?: string): value is TuiResponse {
-  if (!validTuiResponse(value) || value.id !== id) return false;
+  if (!validTuiResponse(value) || value.id !== id || Buffer.byteLength(JSON.stringify(value)) >= 1024 * 1024) return false;
   if (!value.ok) return true;
   const s = value.snapshot;
   if ((action === "models" || action === "configure") && !s.modelSettings) return false;
@@ -59,16 +54,13 @@ export function validReply(value: unknown, id: string, hubId?: string, chatId?: 
   if ((action === "rexStatus" || action === "rexInspect") && !s.rex) return false;
   if (action === "rexInspect" && !s.rex?.inspection) return false;
   if (s.rex && (!validRexReply({ command: "rex_status", args: { chatId: s.chatId }, hubId: s.hubId }, s.rex.status) || (s.rex.inspection && !validRexReply({ command: "rex_inspect", args: { chatId: s.chatId }, hubId: s.hubId }, s.rex.inspection)))) return false;
+  if (!validInventoryFields(s)) return false;
   if (s.agentStatus && !validAgentStatus(s.agentStatus)) return false;
   if (s.modelSettings && (!validModelSettingsSnapshot(s.modelSettings) || s.modelSettings.hubId !== s.hubId || s.modelSettings.chatId !== s.chatId)) return false;
-  return s.entries.every((item, i) => i === 0 || item.id > s.entries[i - 1]!.id);
-}
-// Only a provider-reported count, never reasoning text, signatures or an estimate.
-export function thinkingUsage(usage: unknown): number | undefined {
-  if (!usage || typeof usage !== "object" || Array.isArray(usage)) return undefined;
-  const { reasoning, output } = usage as { reasoning?: unknown; output?: unknown };
-  return typeof reasoning === "number" && Number.isSafeInteger(reasoning) && reasoning > 0 && typeof output === "number" && Number.isSafeInteger(output) && reasoning <= output
-    ? reasoning : undefined;
+  if (s.entries.reduce((bytes, item) => bytes + Buffer.byteLength(item.text), 0) > 128 * 1024) return false;
+  return s.entries.every((item, i) => Buffer.byteLength(item.text) <= entryBytes &&
+    (item.parts === undefined || flattenParts(item.parts) === item.text) &&
+    (i === 0 || item.id > s.entries[i - 1]!.id));
 }
 type Command = (name: string, args: Record<string, unknown>, hubId?: string) => Promise<any>;
 export class TuiSession {
@@ -92,6 +84,7 @@ export class TuiSession {
   private settingsUncertain = false;
   private localWorkspace = false;
   private gitSampleAt = 0;
+  private inventorySampleAt = 0;
   constructor(private readonly command: Command, private readonly selected?: string, private readonly expectedHub?: string, private readonly draftRoot?: string, private readonly port = 52800) {}
   async registerStartup(allocationId: string, blockId: string | undefined) {
     if (this.state || this.startupBlocked) throw new Error("Rex startup cannot be replayed in this client");
@@ -132,6 +125,30 @@ export class TuiSession {
     this.supportsSettings = status.modelSettings === 1; this.settingsUncertain = this.supportsSettings;
     const notice = !writable ? `${inspectOnly}${saved.length ? " Saved requests remain untouched; review them in the Rex client." : ""}` : active ? `Saved ${active.kind} ${active.requestId}: :retry or :discard; instruction drafts use --no-tui.${saved.length > 1 ? " Other drafts: --no-tui /drafts." : ""}` : "";
     this.state = { ...(status.binding ? { cwd: displayText(status.binding.cwd, 4096), kind: status.binding.kind, ...(status.binding.agentRune === undefined ? {} : { agentRune: status.binding.agentRune }) } : {}), ...(status.binding?.agentName === undefined ? {} : { agentName: status.binding.agentName }), clientMode: this.mode, hubChatId: this.hubChatId!, hubId: this.hubId!, chatId: this.chatId!, title: this.chatId === this.hubChatId ? "Hub" : displayText(status.binding?.title || `Task ${this.chatId}`, 160), model: displayText(`${status.model?.provider ?? ""}/${status.model?.modelId ?? "unknown model"}`, 160), tools: status.tools, activityKnown: false, busy: false, queued: 0, entries: [], hasOlder: false, historical: false, preview: "", notice, draft: null, ...(status.binding?.brief ? { brief: { ...(status.binding.brief.problem === undefined ? {} : { problem: displayText(status.binding.brief.problem, 2048) }), ...(status.binding.brief.description === undefined ? {} : { description: displayText(status.binding.brief.description, 8192) }) } } : {}) };
+    this.inventorySampleAt = Date.now();
+    this.inventory(status);
+  }
+  private inventory(status: any) {
+    delete this.state!.toolInventory;
+    this.state!.toolInventoryStatus = "unavailable";
+    if (!validInventoryFields({ chatId: this.chatId!, ...(status.toolInventory === undefined ? {} : { toolInventory: status.toolInventory }), ...(status.toolInventoryStatus === undefined ? {} : { toolInventoryStatus: status.toolInventoryStatus }) })) return;
+    if (status.toolInventory !== undefined) {
+      this.state!.toolInventory = structuredClone(status.toolInventory);
+      this.state!.toolInventoryStatus = "ready";
+    } else this.state!.toolInventoryStatus = status.toolInventoryStatus ?? "unsupported";
+  }
+  private async refreshInventory() {
+    if (Date.now() - this.inventorySampleAt < 2000) return;
+    this.inventorySampleAt = Date.now();
+    // Clear first: any failed/unsupported refresh means unknown, not a replay of
+    // formerly available tools. This read never gates participation/settings.
+    delete this.state!.toolInventory;
+    this.state!.toolInventoryStatus = "unavailable";
+    try {
+      const status = await this.command("status", { chatId: this.chatId }, this.hubId);
+      if (status.hubGuard !== 1 || status.hubId !== this.hubId || status.chatId !== this.chatId || status.mainChatId !== this.hubChatId) return;
+      this.inventory(status);
+    } catch { /* Observation unavailable; no automatic effect or health probe. */ }
   }
   private async refreshSettings() {
     if (!this.supportsSettings) throw new Error("Hub does not advertise model settings; upgrade it only when idle");
@@ -149,30 +166,18 @@ export class TuiSession {
     }
   }
   private renderHistory(page: any): { entries: TuiEntry[]; next: string | undefined } {
-    let budget = 128 * 1024;
+    let budget = 128 * 1024, wireBudget = 512 * 1024;
     const entries: TuiEntry[] = [];
     // History arrives newest-first. Spend the view budget in that order so
     // older tool output cannot hide new input, answers or failure markers.
     for (const entry of page.items) {
-      let role: TuiEntry["role"] = "note", text = "", thinkingTokens = 0;
-      if (entry.kind === "deck.input") {
-        role = "user"; text = entry.data.text;
-        if (entry.data.origin?.kind === "task-tool") { role = "note"; text = `[agent chat ${entry.data.origin.chatId}, task ${entry.data.origin.taskId}${entry.data.origin.chain ? `; request ${entry.data.requestId}; reply ${entry.data.origin.chain.replyToChatId}/${entry.data.origin.chain.replyToRequestId}; hop ${entry.data.origin.chain.hop}/8` : ""}]\n${text}`; }
-      }
-      else if (entry.kind === "pi.assistant" || entry.kind === "pi.tool-result") {
-        role = entry.kind === "pi.assistant" ? "assistant" : "tool";
-        text = entry.model.map((message: any) => {
-          const parts = (message.content ?? []).map((part: any) => part.type === "text" ? part.text : part.type === "toolCall" ? `[tool requested: ${part.name}]` : "[non-text content]").join("\n");
-          if (role === "assistant") thinkingTokens += thinkingUsage(message.usage) ?? 0;
-          return (role === "tool" ? `${message.toolName}${message.isError ? " (error)" : ""}\n` : "") + parts + (message.stopReason === "error" || message.stopReason === "aborted" ? `\n[${message.stopReason}]` : "");
-        }).join("\n");
-      } else text = `[${entry.kind}: retained entry, not rendered]`;
-      text = displayText(text, 8192);
-      const bytes = Buffer.byteLength(text);
-      if (bytes > budget) break;
-      // Keep provider usage separate from Markdown so quoted text/code cannot
-      // be mistaken for UI metadata, and long answers cannot clip the count.
-      budget -= bytes; entries.push({ id: entry.id, role, text, ...(thinkingTokens > 0 && Number.isSafeInteger(thinkingTokens) ? { thinkingTokens } : {}) });
+      const projected = projectEntry(entry);
+      const bytes = Buffer.byteLength(projected.text);
+      // Parts duplicate the flat compatibility text and add JSON overhead. A
+      // separate wire budget prevents many tiny parts escaping the frame cap.
+      const wireBytes = Buffer.byteLength(JSON.stringify(projected)) + 1;
+      if (bytes > budget || wireBytes > wireBudget) break;
+      budget -= bytes; wireBudget -= wireBytes; entries.push(projected);
     }
     // The first entry always fits. If the display window is smaller than the
     // validated page, :older must start before its oldest displayed ID, not
@@ -306,6 +311,7 @@ export class TuiSession {
       }
       case "latest":
       case "poll": {
+        await this.refreshInventory();
         if (this.supportsSettings) await this.refreshSettings();
         if (request.action === "latest" || (!request.hold && !state.historical)) {
           const page = await this.history(), rendered = this.renderHistory(page);

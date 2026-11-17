@@ -13,7 +13,7 @@ import { hubCommand } from "./hub-client.js";
 import { displayText, thinkingUsage, TuiSession, validRequest, validReply } from "./tui-session.js";
 import type { ActivitySnapshot, ModelSettingsChange, ModelSettingsSnapshot, TuiRequest } from "./generated/contracts.js";
 
-async function fixture(withSettings = false, withProgramStatus = false, withStyle = false) {
+async function fixture(withSettings = false, withProgramStatus = false, withStyle = false, withTools = false) {
   const local = await clientEnv(); const requests: any[] = []; let loss = false, malformed = false, oversized = false, hang = false;
   let settingsLoss = false, settingsInvalid = false;
   const settings: ModelSettingsSnapshot = { hubId: "tui-test", chatId: "1", selection: { provider: "mock", modelId: "echo", thinkingLevel: "medium" }, defaultModel: { provider: "mock", modelId: "echo" }, models: ["echo", "zeta"].map((modelId) => ({ provider: "mock", modelId, name: modelId, thinkingLevels: ["off", "low", "medium", "high"], defaultThinkingLevel: "medium" })) };
@@ -27,7 +27,12 @@ async function fixture(withSettings = false, withProgramStatus = false, withStyl
     if (withProgramStatus && (command === "history" || command === "activity") && activity.agentStatus?.state === "working" && ++statusReads >= 3) {
       activity.agentStatus = { state: statusOutcome, taskId: String(statusId) }; activity.busy = false;
     }
-    if (command === "status") result = { ...(withStyle ? { machineId: "local", binding: { machineId: "local", cwd: process.cwd(), kind: "main", title: "Hub", agentName: "wintermute", agentNameAlgorithm: "wintermute-v1", agentRune: "Δ" } } : {}), ...(withSettings ? { modelSettings: 1 } : {}), hubId: "tui-test", hubGuard: 1, mainChatId: "1", chatId: "1", provider: "mock", model: { provider: "mock", modelId: "echo" }, tools: "offline" };
+    if (command === "status") result = { ...(withTools ? { toolInventoryStatus: "ready", toolInventory: {
+      chatId: "1", hubMachineId: "a".repeat(32), workerMachineId: "b".repeat(32),
+      builtins: [{ name: "read", location: "worker" }, { name: "bash", location: "worker" }, { name: "task_list", location: "hub" }, { name: "custom_environment_tool", location: "environment" }],
+      mcp: [{ profileId: "hub_search", machineId: "a".repeat(32), location: "hub", workspace: "fixed", revision: "c".repeat(64), state: "enabled", tools: [{ name: "search", alias: "mcp_hub_search_alias" }] },
+        { profileId: "worker_browser", machineId: "b".repeat(32), location: "worker", workspace: "task", revision: "d".repeat(64), state: "not_granted", tools: [{ name: "browse", alias: "mcp_worker_browser_alias" }] }],
+    } } : {}), ...(withStyle ? { machineId: "local", binding: { machineId: "local", cwd: process.cwd(), kind: "main", title: "Hub", agentName: "wintermute", agentNameAlgorithm: "wintermute-v1", agentRune: "Δ" } } : {}), ...(withSettings ? { modelSettings: 1 } : {}), hubId: "tui-test", hubGuard: 1, mainChatId: "1", chatId: "1", provider: "mock", model: { provider: "mock", modelId: "echo" }, tools: "offline" };
     else if (command === "model_settings") result = settingsInvalid ? { ...settings, chatId: "2" } : settings;
     else if (command === "set_model_settings") {
       if (JSON.stringify(args.expected) !== JSON.stringify(settings.selection)) { response.end(JSON.stringify({ version: 1, id, ok: false, error: { code: "conflict", message: "Refresh settings" } })); return; }
@@ -323,27 +328,29 @@ test("real PTY: Vesper sidebar, centered Markdown/table, expanding prompt and En
     if (process.env.DECK_TUI_CAPTURE) console.log(JSON.stringify(screens));
     // pyte display strings omit the continuation cell of wide glyphs.
     const wide = screens.wide!.split("\n").map(row => row.replaceAll("界", "界 ")), expanded = screens.expanded!.split("\n").map(row => row.replaceAll("界", "界 "));
-    assert.equal(wide[2]!.indexOf("Δ hub"), 124); assert.equal(wide[4]!.slice(113).trim(), "");
+    assert.equal(wide[2]!.indexOf("Δ hub"), 110); assert.equal(wide[4]!.slice(85).trim(), "");
     assert.doesNotMatch(screens.wide!, /wintermute|PROMPT|NORMAL|you ·|#\d|\/16384 bytes/);
     const userRow = wide.findIndex(row => row.includes("• Please render"));
-    for (const y of [userRow - 2, userRow - 1, userRow + 1, userRow + 2]) assert.equal(wide[y]!.slice(0, 112).trim(), "");
-    assert.ok(wide.some(row => row.indexOf("• Please render") === 14));
-    assert.ok(wide.some(row => row.indexOf("Δ Report") === 14));
-    assert.equal(wide[39]!.slice(0, 112).trim(), "mock/echo [medium]");
-    assert.equal(wide[39]!.indexOf("mock/echo"), 93);
-    assert.ok(wide.every(row => row[112] === (row.startsWith("─") ? "┤" : "│")));
-    assert.ok(wide.slice(5).every(row => !row.slice(113).trim()), "rest of sidebar stays empty");
+    for (const y of [userRow - 2, userRow - 1, userRow + 1, userRow + 2]) assert.equal(wide[y]!.slice(0, 84).trim(), "");
+    assert.ok(wide.some(row => row.indexOf("• Please render") === 0));
+    assert.ok(wide.some(row => row.indexOf("Δ Report") === 0));
+    assert.equal(wide[39]!.trim(), "mock/echo [medium]");
+    assert.equal(wide[39]!.indexOf("mock/echo"), 121);
+    assert.ok(wide.slice(0, 37).every(row => row[84] === (row.startsWith("─") ? "┤" : "│")));
+    assert.equal(wide[37]!, "─".repeat(84) + "┴" + "─".repeat(55));
+    assert.match(screens.wide!, /Inventory unsupported by hub/);
+    assert.match(screens.wide!, /:tools · full inventory/);
     assert.ok(wide.some(row => row.includes("Task") && row.includes("Status")));
     assert.doesNotMatch(screens.wide!, /\*\*Ready\*\*|:---|---:/);
-    assert.ok(expanded.some(row => row.indexOf("hello") === 16));
-    assert.ok(expanded.some(row => row.indexOf("second") === 16));
-    assert.ok(expanded.some(row => row.indexOf("third") === 16));
+    assert.ok(expanded.some(row => row.indexOf("hello") === 2));
+    assert.ok(expanded.some(row => row.indexOf("second") === 2));
+    assert.ok(expanded.some(row => row.indexOf("third") === 2));
     const rules = (rows: string[]) => rows.flatMap((row, i) => row.startsWith("─") ? [i] : []);
     assert.equal(rules(wide)[1]! - rules(wide)[0]!, 3); // two input rows
     assert.equal(rules(expanded)[1]! - rules(expanded)[0]!, 4);
     assert.match(screens.narrow!.split("\n")[38]!, /Δ hub/);
     assert.match(screens.collapsed!.split("\n")[38]!, /Δ hub/);
-    assert.ok(screens.forced!.split("\n").every(row => row.replaceAll("界", "界 ")[54] === (row.startsWith("─") ? "┤" : "│")));
+    assert.ok(screens.forced!.split("\n").slice(0, 37).every(row => row.replaceAll("界", "界 ")[54] === (row.startsWith("─") ? "┤" : "│")));
     assert.match(screens.hidden!.split("\n")[38]!, /Δ hub/);
     const admits = f.requests.filter(r => r.command === "admit");
     assert.equal(admits.length, 1); assert.equal(admits[0].args.text, "hello\nsecond\nthird");
@@ -440,4 +447,23 @@ test("real PTY: SIGTERM restores terminal without stopping the hub", { skip: !te
   const f = await fixture();
   try { await pty(f.port, f.local.env, [{ wait: "mock/echo" }, { signal: "SIGTERM" }]); assert.ok(f.requests.every((v) => ["status", "history"].includes(v.command))); }
   finally { await f.close(); }
+});
+
+
+test("real PTY: hub/local MCP inventory, full details and shell caveat remain read-only", { skip: !testBinary, timeout: 20000 }, async () => {
+  const f = await fixture(true, false, true, true), screens: Record<string, string> = {};
+  try {
+    await pty(f.port, f.local.env, [
+      { wait: "mock/echo" }, { resize: [40, 140] }, { wait: "hub_search · enabled (1)" }, { capture: "sidebar" },
+      { keys: "keep this draft" }, { keys: "\x1b" }, { keys: ":tools\r" }, { wait: "mcp_hub_search_alias" }, { capture: "details" },
+      { keys: "G" }, { wait: "permissions" }, { capture: "end" }, { keys: "\x1b" }, { wait: "keep this draft" },
+      { resize: [12, 80] }, { keys: ":tools\r" }, { wait: "TOOLS · chat" }, { keys: "G" }, { wait: "permissions" },
+      { keys: "\x1b" }, { keys: ":q!\r" },
+    ], screens);
+    for (const expected of ["MCP · HUB", "MCP · WORKER LOCAL", "worker_browser · not granted (1)", "BUILT-IN · WORKER LOCAL", "BUILT-IN · HUB", "ENVIRONMENT TOOLS"]) assert.ok(screens.sidebar!.includes(expected), expected);
+    assert.match(screens.details!, /workspace fixed/);
+    assert.match(screens.details!, /mcp_worker_browser_alias/);
+    assert.match(screens.end!, /MCP is not the whole tool surface/);
+    assert.ok(f.requests.every(r => ["status", "history", "model_settings"].includes(r.command)));
+  } finally { await f.close(); }
 });

@@ -24,6 +24,7 @@ import { taskTools } from "./task-tools.js";
 import { McpGrantsDoc, extensionName, grantKey, profileGrant, mcpExtensions } from "./mcp-tools.js";
 import { validCatalog } from "./mcp-contracts.js";
 import { validMcpGrantArgs, type McpCatalog, type McpGrantArgs, type McpGrantSnapshot } from "./generated/contracts.js";
+import { projectToolInventory } from "./tool-inventory.js";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
@@ -253,6 +254,17 @@ export class DeckRuntime {
     return validMachineIdentity(taskMachine) && (profile.machineId===taskMachine || (profile.workspace==="fixed" && profile.machineId===this.localMachineId));
   }
   mcpCatalog(): McpCatalog { return structuredClone(this.mcpCatalogValue); }
+  // Serialize with grant/configuration changes so the public surface and saved
+  // grant revision cannot be spliced across a concurrent control request.
+  toolInventory(id: string) {
+    return this.serial(async () => {
+      const chat = await this.chat(id);
+      const agent = await chat.agent(context);
+      const binding = await this.harness.snapshot(ChatDoc, chat.id, context);
+      const grants = await this.harness.snapshot(McpGrantsDoc, chat.id, context);
+      return projectToolInventory(String(chat.id), agent, this.mcpCatalogValue, grants?.profiles ?? [], this.localMachineId, binding?.machineId, profile => this.mcpBindingAllowed(profile, binding?.machineId ?? ""));
+    });
+  }
   async toolProfiles(id: string): Promise<McpGrantSnapshot> {
     const chat=await this.chat(id); const grants=await this.harness.snapshot(McpGrantsDoc,chat.id,context);
     return {chatId:id,revision:grants?.revision??0,profiles:grants?.profiles.map(g=>({...g}))??[]};
