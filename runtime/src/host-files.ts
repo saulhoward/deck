@@ -55,6 +55,7 @@ export class PipeFiles implements HostFiles {
       finally { fail(); }
     })();
   }
+  get drained(): boolean { return !this.failed && this.pending.size === 0 && this.writer.writableLength === 0; }
   private sample(binding: Binding, target: string): Promise<ShellProgress> | undefined {
     const id = `progress:${target}`;
     if (this.failed || this.pending.size >= 20 || [...this.pending.values()].filter((item) => item.kind === "progress").length >= 4 || this.pending.has(id)) return;

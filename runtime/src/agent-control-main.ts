@@ -11,7 +11,7 @@ import { AgentWizard, wizardTransport, startupDraft } from "./agent-wizard.js";
 import { DraftStore } from "./drafts.js";
 const [kind, selected, action, root, value, ...extra] = process.argv.slice(2);
 async function main() {
-  if (extra.length || !selected || !root?.startsWith("/") || !["local", "worker"].includes(kind ?? "") || !["ready", "prepare", "list", "resume", "drafts", "discard", "discard-startup", "recover"].includes(action ?? "") || ((action === "resume" || action === "discard" || action === "discard-startup" || action === "recover") !== (value !== undefined))) throw new Error("Invalid agent launch options");
+  if (extra.length || !selected || !root?.startsWith("/") || !["local", "worker"].includes(kind ?? "") || !["ready", "prepare", "upgrade-ready", "list", "resume", "drafts", "discard", "discard-startup", "recover"].includes(action ?? "") || ((action === "resume" || action === "discard" || action === "discard-startup" || action === "recover") !== (value !== undefined))) throw new Error("Invalid agent launch options");
   const port = kind === "local" ? Number(selected) : 52800;
   const remote = kind === "worker" ? await rexLauncherTarget(selected) : undefined;
   const status = remote ? undefined : await hubCommand(port, "status");
@@ -31,7 +31,8 @@ async function main() {
   if (action === "ready") { process.stdout.write(JSON.stringify({ hubId, machineId })); return; }
   const store = new LauncherDrafts({hubId, machineId}, root);
   const indexes = await startupIndexes(root, hubId, machineId);
-  if (action === "prepare") {
+  if (action === "prepare" || action === "upgrade-ready") {
+    if (action === "upgrade-ready" && indexes.length) throw new Error("Unclaimed startup forms remain; finish or explicitly discard them before upgrading");
     if ((await store.list()).length) throw new Error("Unresolved launcher request exists; use --drafts before a new task");
     for (const index of indexes) {
       const files = new StartupFiles(bootstrapPath(root, index.id));

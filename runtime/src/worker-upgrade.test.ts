@@ -47,6 +47,25 @@ async function fixture(busy?: "task" | "queued" | "placed") {
 }
 async function bytes(path: string) { return readFile(path, "utf8"); }
 
+test("offline administration cannot overwrite unresolved live custody", async () => {
+  const f = await fixture();
+  try {
+    await f.prepare(); await f.approve();
+    const plan = { version: 1, id: randomUUID(), hubId: f.hubId, machineId: machine, beforeImplementation: oldDigest, implementation: newDigest, beforeClient: f.before.rexClient, client: { executable: client, socket: f.before.rexClient.socket } };
+    const local = join(f.worker, "live-handoff.json");
+    await put(local, { plan, before: f.before, phase: "prepared" });
+    await assert.rejects(f.prepare(), /Live handoff is unresolved/);
+    await assert.rejects(f.apply(), /Live handoff is unresolved/);
+    assert.deepEqual(JSON.parse(await bytes(join(f.worker, "rex-connection.json"))), f.before);
+    const registryPath = join(f.hub, "rex-workers.json");
+    const registry = JSON.parse(await bytes(registryPath)); registry.handoffs = [{ plan, phase: "committed" }];
+    await put(registryPath, registry);
+    const saved = await bytes(registryPath);
+    await assert.rejects(f.approve(), /unresolved live handoffs/);
+    assert.equal(await bytes(registryPath), saved);
+  } finally { await f.close(); }
+});
+
 test("offline upgrade changes only paired pins, retains uncertainty, session, tasks and old client authority; retries are idempotent", async () => {
   const f = await fixture();
   try {

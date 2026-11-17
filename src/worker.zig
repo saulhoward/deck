@@ -377,10 +377,17 @@ pub fn serveRemoteClient(native: Native, read_fd: std.posix.fd_t, write_fd: std.
 pub fn serveMcp(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8, mcp: ?*const @import("mcp_profiles.zig").Profiles) void {
     serveImpl(native, read_fd, write_fd, control_fd, journal_path, machine_id, true, false, null, mcp);
 }
+pub const Drain = struct { requested: std.atomic.Value(bool) = .init(false), idle: std.atomic.Value(bool) = .init(false), ready: std.atomic.Value(bool) = .init(false) };
+pub fn serveRemoteMcpTracked(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8, client: ?contracts.WorkerRexClient, mcp: ?*const @import("mcp_profiles.zig").Profiles, drain: ?*Drain) void {
+    serveImplTracked(native, read_fd, write_fd, control_fd, journal_path, machine_id, client != null, true, client, mcp, drain);
+}
 pub fn serveRemoteMcp(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8, client: ?contracts.WorkerRexClient, mcp: ?*const @import("mcp_profiles.zig").Profiles) void {
     serveImpl(native, read_fd, write_fd, control_fd, journal_path, machine_id, client != null, true, client, mcp);
 }
 fn serveImpl(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8, allow_rex: bool, network: bool, rex_client: ?contracts.WorkerRexClient, mcp: ?*const @import("mcp_profiles.zig").Profiles) void {
+    return serveImplTracked(native, read_fd, write_fd, control_fd, journal_path, machine_id, allow_rex, network, rex_client, mcp, null);
+}
+fn serveImplTracked(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, control_fd: std.posix.fd_t, journal_path: []const u8, machine_id: []const u8, allow_rex: bool, network: bool, rex_client: ?contracts.WorkerRexClient, mcp: ?*const @import("mcp_profiles.zig").Profiles, drain: ?*Drain) void {
     const io = native.io;
     const input = Io.File{ .handle = read_fd, .flags = .{ .nonblocking = false } };
     const output = Io.File{ .handle = write_fd, .flags = .{ .nonblocking = false } };
@@ -398,9 +405,19 @@ fn serveImpl(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, 
         state.cancelAll();
         state.jobs.wait(io);
     }
+    if (drain) |d| d.ready.store(true, .release);
+    defer if (drain) |d| d.ready.store(false, .release);
     while (true) {
         // Cancellation/control EOF must also wake an otherwise idle network reader.
         if (state.stopping.load(.acquire)) return;
+        if (drain) |d| if (d.requested.load(.acquire)) {
+            // A maintenance pause never cancels accepted jobs. Stop consuming
+            // unaccepted frames and join all jobs/receipt publication first.
+            state.jobs.wait(io);
+            d.idle.store(true, .release);
+            io.sleep(.fromMilliseconds(25), .awake) catch return;
+            continue;
+        };
         var polls = [_]std.posix.pollfd{.{ .fd = input.handle, .events = std.posix.POLL.IN, .revents = 0 }};
         if ((std.posix.poll(&polls, 100) catch return) == 0) continue;
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -417,6 +434,7 @@ fn serveImpl(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix.fd_t, 
         // Observed control failure refuses subsequent requests. In-flight file
         // operations still drain; process groups are independently cancelled.
         if (state.stopping.load(.acquire)) return;
+        if (drain) |d| if (d.requested.load(.acquire)) continue;
         const parsed = boundary.parseRequest(allocator, body) catch return;
         if (if (parsed.value.operation == .mcp_call) mcp == null else !allow_rex and !@import("remote_link.zig").supported(parsed.value.operation)) {
             const response = resultFrame(allocator, parsed.value, .{ .ok = false, .code = "offline", .output = "Remote Rex capability unavailable; no operation accepted" }) catch return;

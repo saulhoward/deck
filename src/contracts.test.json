@@ -1,5 +1,7 @@
 {
   "bases": {
+    "WorkerHandoffPlan": { "version": 1, "id": "00000000-0000-4000-8000-000000000001", "hubId": "00000000-0000-4000-8000-000000000002", "machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "beforeImplementation": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "implementation": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "beforeClient": { "executable": "/tools/old", "socket": "/private/worker.sock" }, "client": { "executable": "/tools/new", "socket": "/private/worker.sock" } },
+    "WorkerHandoffReply": { "kind": "worker_upgrade", "id": "00000000-0000-4000-8000-000000000001", "hubId": "00000000-0000-4000-8000-000000000002", "status": "prepared" },
     "RexWorkerRegistration": { "version": 1, "machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "implementation": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "capabilities": ["files", "bash", "rex", "launcher"], "rexClient": { "executable": "/tools/new-deck", "socket": "/private/worker.sock" }, "previousClients": [{ "executable": "/tools/old-deck", "socket": "/private/worker.sock" }], "upgradeId": "00000000-0000-4000-8000-000000000001", "upgradeHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
     "RexWorkerUpgrade": { "version": 1, "kind": "prepared", "id": "00000000-0000-4000-8000-000000000001", "machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "configHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "receiptsHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "before": { "version": 1, "server": "https://hub.example", "hostId": "00000000-0000-4000-8000-000000000001", "account": "test", "executable": "/tools/rex", "hubId": "00000000-0000-4000-8000-000000000001", "hubPort": 52800, "sessionId": "session:00000000-0000-4000-8000-000000000001", "pid": 42, "pendingSession": false, "rexClient": { "executable": "/tools/old-deck", "socket": "/private/worker.sock" }, "implementation": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "implementation": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "client": { "executable": "/tools/new-deck", "socket": "/private/worker.sock" } },
     "RexRuntimeReady": { "kind": "ready", "hubId": "00000000-0000-4000-8000-000000000001" },
@@ -137,6 +139,15 @@
     }
   },
   "cases": [
+    { "name": "live worker handoff plan", "schema": "WorkerHandoffPlan", "valid": true },
+    { "name": "live handoff protocol is explicit", "schema": "WorkerHandoffPlan", "set": { "version": 2 }, "valid": false },
+    { "name": "live handoff needs expected old image", "schema": "WorkerHandoffPlan", "remove": ["beforeImplementation"], "valid": false },
+    { "name": "live handoff needs expected old client", "schema": "WorkerHandoffPlan", "remove": ["beforeClient"], "valid": false },
+    { "name": "live handoff cannot force", "schema": "WorkerHandoffPlan", "set": { "force": true }, "valid": false },
+    { "name": "live handoff cannot install", "schema": "WorkerHandoffPlan", "set": { "download": "https://example.com/package" }, "valid": false },
+    { "name": "live handoff acknowledgment", "schema": "WorkerHandoffReply", "valid": true },
+    { "name": "live handoff needs correlation", "schema": "WorkerHandoffReply", "remove": ["id"], "valid": false },
+    { "name": "live handoff unsupported ack refuses", "schema": "WorkerHandoffReply", "set": { "status": "force" }, "valid": false },
     { "name": "offline worker upgrade plan", "schema": "RexWorkerUpgrade", "valid": true },
     { "name": "offline worker upgrade approval", "schema": "RexWorkerUpgrade", "set": { "kind": "approved" }, "valid": true },
     { "name": "upgrade requires receipt evidence", "schema": "RexWorkerUpgrade", "remove": ["receiptsHash"], "valid": false },

@@ -117,7 +117,7 @@ fn pinned(c: wire.RexWorkerConnection, identity: forward.Identity, port: u16, cl
     return sameWorkerScope(c, identity, port) and std.mem.eql(u8, c.rexClient.executable, client) and std.mem.eql(u8, c.implementation, implementation);
 }
 const WorkerSelection = struct { directory: []const u8, reuse_client: ?[]const u8 = null };
-fn workerDirectory(native: Native, a: std.mem.Allocator, root: []const u8, hub: []const u8, executable: []const u8, identity: forward.Identity, port: u16, client: []const u8, cwd: []const u8, cancelled: *std.atomic.Value(bool)) !WorkerSelection {
+fn workerDirectory(native: Native, a: std.mem.Allocator, root: []const u8, hub: []const u8, executable: []const u8, identity: forward.Identity, port: u16, client: []const u8, cwd: []const u8, cancelled: *std.atomic.Value(bool), allow_upgrade: bool) !WorkerSelection {
     const parent_path = try std.fs.path.join(a, &.{ root, "workers" });
     var parent = try storage.directory(native, parent_path);
     defer parent.close(native.io);
@@ -136,13 +136,31 @@ fn workerDirectory(native: Native, a: std.mem.Allocator, root: []const u8, hub: 
     };
     if (prior) |c| if (!sameWorkerScope(c, identity, port) or c.pendingSession) return error.WorkerConflict;
     const implementation = try @import("remote_worker.zig").digest(native);
+    var upgrading = false;
+    var upgrade_lock: ?std.Io.File = null;
+    defer if (upgrade_lock) |file| file.close(native.io);
+    var launch_client = client;
     if (prior) |c| {
         if (!pinned(c, identity, port, client, &implementation)) {
             if (native.environ.getPosix(worker_client.guard) != null) return error.WorkerClientUnavailable;
             worker_client.verify(native, a, c.rexClient.executable, c.implementation, &implementation, cancelled) catch return error.WorkerClientUnavailable;
-            // Do not edit pins, signal a PID from metadata or launch a second
-            // daemon. Release this scope's locks before entering its old client.
-            return .{ .directory = path, .reuse_client = c.rexClient.executable };
+            // Recovery/attachment must remain reachable when an unclaimed form
+            // or active work is exactly what prevents a new-package transition.
+            if (!allow_upgrade) return .{ .directory = path, .reuse_client = c.rexClient.executable };
+            if (c.handoffVersion == null) {
+                try std.Io.File.stderr().writeStreamingAll(native.io, "deck: upgrade deferred: legacy worker has no live handoff; reusing its verified client. Use the checked offline transition once.\n");
+                return .{ .directory = path, .reuse_client = c.rexClient.executable };
+            }
+            const machine = (try @import("state.zig").load(native.io, a, dir)).value.machine_id;
+            const scope = try std.json.Stringify.valueAlloc(a, Ready{ .hubId = c.hubId orelse return error.WorkerUpgradeDeferred, .machineId = machine }, .{});
+            var scope_digest: [32]u8 = undefined;
+            std.crypto.hash.sha2.Sha256.hash(scope, &scope_digest, .{});
+            var starts = try storage.directory(native, try std.fs.path.join(a, &.{ root, "startups" }));
+            defer starts.close(native.io);
+            upgrade_lock = storage.lock(native, starts, try std.fmt.allocPrint(a, "{s}.lock", .{std.fmt.bytesToHex(scope_digest, .lower)})) catch return error.WorkerUpgradeDeferred;
+            upgrading = true;
+            launch_client = c.rexClient.executable;
+            try std.Io.File.stderr().writeStreamingAll(native.io, "deck: negotiating worker upgrade using the installed local package; no download or effect replay\n");
         }
     }
     const writer = storage.lock(native, dir, "writer.lock") catch |err| switch (err) {
@@ -154,14 +172,20 @@ fn workerDirectory(native: Native, a: std.mem.Allocator, root: []const u8, hub: 
         file.close(native.io); // Child takes actual exclusion; parent never owns its runtime.
         var env: std.process.Environ.Map = .init(a);
         for ([_][]const u8{ "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "REX_RUNTIME_DIR", "DECK_NODE", "DECK_RUNTIME_ROOT" }) |name| if (native.environ.getPosix(name)) |v| try env.put(name, v);
+        if (prior) |c| if (!std.mem.eql(u8, c.implementation, &implementation) or (upgrading and worker_client.nixPackage(launch_client) != null)) {
+            _ = env.swapRemove("DECK_RUNTIME_ROOT");
+            _ = env.swapRemove("DECK_NODE");
+        };
         // No inherited terminal/stdin lifetime or provider/vault credentials.
         // Do not set a process group here: the child performs setsid itself.
-        var child = try std.process.spawn(native.io, .{ .argv = &.{ client, "worker", "rex", "--detach", "--directory", path, "--hub", hub, "--rex", executable, "--client", client, "--port", try std.fmt.allocPrint(a, "{d}", .{port}) }, .environ_map = &env, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
+        var child = try std.process.spawn(native.io, .{ .argv = &.{ launch_client, "worker", "rex", "--detach", "--directory", path, "--hub", hub, "--rex", executable, "--client", launch_client, "--port", try std.fmt.allocPrint(a, "{d}", .{port}) }, .environ_map = &env, .stdin = .ignore, .stdout = .ignore, .stderr = .ignore });
         Native.closeStreams(native.io, &child);
         launched = child.id; // Only our child; never a diagnostic PID from disk.
         // Deliberately not killed on timeout/detach: this worker may already
         // own issued effects. Readiness is proven by exclusion plus scoped RPC.
     }
+    var requested = false;
+    var handoff_pending = upgrading;
     const start = std.Io.Timestamp.now(native.io, .awake);
     while (start.durationTo(std.Io.Timestamp.now(native.io, .awake)).toMilliseconds() < 30000) {
         if (launched) |pid| if ((try Native.waitNoHang(pid)).pid != 0) return error.WorkerUnavailable;
@@ -172,7 +196,43 @@ fn workerDirectory(native: Native, a: std.mem.Allocator, root: []const u8, hub: 
             },
             else => return err,
         };
-        if (!pinned(c, identity, port, client, &implementation)) return error.WorkerConflict;
+        if (!sameWorkerScope(c, identity, port)) return error.WorkerConflict;
+        if (c.pendingSession) {
+            if (launched == null or upgrading) return error.WorkerConflict;
+            // The child we actually spawned may still be creating its first
+            // session. A pre-existing uncertain session was refused above.
+            try native.io.sleep(.fromMilliseconds(100), .awake);
+            continue;
+        }
+        if (!pinned(c, identity, port, client, &implementation)) {
+            if (!upgrading or !pinned(c, identity, port, prior.?.rexClient.executable, prior.?.implementation)) return error.WorkerConflict;
+            if (requested) {
+                if (try @import("worker_handoff.zig").load(native, a, path)) |pending| if (pending.phase == .deferred) return error.WorkerUpgradeDeferred;
+            } else {
+                const pending = try @import("worker_handoff.zig").load(native, a, path);
+                if (pending == null or pending.?.phase == .deferred) {
+                    _ = ready(native, a, cwd, "worker", path, root, cancelled) catch {
+                        try native.io.sleep(.fromMilliseconds(100), .awake);
+                        continue;
+                    };
+                    const checked = try control(native, a, cwd, "worker", path, root, "upgrade-ready", null, cancelled);
+                    if (!checked.result.ok) return error.WorkerUpgradeDeferred;
+                }
+                @import("worker_handoff.zig").request(native, a, path, c, client, &implementation) catch |err| {
+                    if (err == error.WorkerUpgradeDeferred) return err;
+                    try native.io.sleep(.fromMilliseconds(100), .awake);
+                    continue;
+                };
+                requested = true;
+            }
+            try native.io.sleep(.fromMilliseconds(100), .awake);
+            continue;
+        }
+        if (try @import("worker_handoff.zig").load(native, a, path)) |pending| if (pending.phase != .deferred) {
+            handoff_pending = true;
+            try native.io.sleep(.fromMilliseconds(100), .awake);
+            continue;
+        };
         const probe = storage.lock(native, dir, "writer.lock") catch |err| switch (err) {
             error.ClientAlreadyStarting => null,
             else => return err,
@@ -198,7 +258,7 @@ fn workerDirectory(native: Native, a: std.mem.Allocator, root: []const u8, hub: 
         }
         try native.io.sleep(.fromMilliseconds(100), .awake);
     }
-    return error.WorkerUnavailable;
+    return if (handoff_pending) error.WorkerUpgradeUnconfirmed else error.WorkerUnavailable;
 }
 fn uuid(native: Native, a: std.mem.Allocator) ![]const u8 {
     var bytes: [16]u8 = undefined;
@@ -255,7 +315,11 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
             same_host = std.mem.eql(u8, remote.value.host_id, observed.value.host_id) and std.mem.eql(u8, remote.value.account, observed.value.account);
         }
         if (!same_host) {
-            const selected_worker = try workerDirectory(native, a, root, hub, executable, remote.value, o.port, client, cwd, &cancelled);
+            const selected_worker = workerDirectory(native, a, root, hub, executable, remote.value, o.port, client, cwd, &cancelled, o.mode == .create or o.mode == .list) catch |err| blk: {
+                if (err != error.WorkerUpgradeDeferred or o.mode != .list) return err;
+                try std.Io.File.stderr().writeStreamingAll(native.io, "deck: upgrade deferred; listing through the verified pinned client without changing the worker\n");
+                break :blk try workerDirectory(native, a, root, hub, executable, remote.value, o.port, client, cwd, &cancelled, false);
+            };
             if (selected_worker.reuse_client) |saved_client| return worker_client.replace(native, a, saved_client, args);
             worker_path = selected_worker.directory;
         }
@@ -272,6 +336,13 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     const scope_key = std.fmt.bytesToHex(scope_hash, .lower);
     const launch_lock = try storage.lock(native, starts, try std.fmt.allocPrint(a, "{s}.lock", .{scope_key}));
     defer launch_lock.close(native.io);
+    // Recheck after acquiring creation exclusion: another CLI may have begun
+    // a handoff since this invocation first contacted the worker.
+    if (worker_path) |path| {
+        const c = try connection(native, a, path);
+        if (!std.mem.eql(u8, c.rexClient.executable, client)) return error.WorkerConflict;
+        if (try @import("worker_handoff.zig").load(native, a, path)) |pending| if (pending.phase != .deferred) return error.WorkerUpgradeUnconfirmed;
+    }
     const pending_name = try std.fmt.allocPrint(a, "{s}.pending.json", .{scope_key});
     const pending_bytes = @import("mcp_profiles.zig").readPrivate(native, a, try std.fs.path.join(a, &.{ starts_path, pending_name }), 4096) catch |err| switch (err) {
         error.FileNotFound => null,

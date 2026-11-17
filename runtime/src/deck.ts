@@ -60,6 +60,7 @@ function positiveId(id: string, kind: string): number {
 function chatId(id: string): ConversationId { return positiveId(id, "conversation") as ConversationId; }
 export type Input = { requestId: string; text: string; mode: "steer" | "followUp"; origin?: { kind: "task-tool"; chatId: string; taskId: string; chain?: MessageChain } };
 import { AsyncLocalStorage } from "node:async_hooks";
+import { workerIdle } from "./worker-handoff.js";
 
 export type RuntimeOptions = {
   models: Models;
@@ -81,6 +82,34 @@ export type RuntimeOptions = {
 };
 
 export class DeckRuntime {
+  private readonly workerPauses = new Map<string, string>();
+  private storage!: import("@earendil-works/pi-durable").Storage;
+  private requireWorkerAdmission(machine: string) { if (this.workerPauses.has(machine)) throw new DeckError("busy", "Worker upgrade in progress; input was not admitted"); }
+  private async mutableChat(id: string) {
+    const chat = await this.chat(id);
+    const binding = await this.harness.snapshot(ChatDoc, chat.id, context);
+    if (binding) this.requireWorkerAdmission(binding.machineId);
+    return chat;
+  }
+  pauseWorker(machine: string, id: string) {
+    return this.serial(async () => {
+      const existing = this.workerPauses.get(machine);
+      if (existing && existing !== id) throw new DeckError("busy", "Another worker transition owns admission");
+      this.workerPauses.set(machine, id);
+    });
+  }
+  workerDrained(machine: string, id: string) {
+    return this.serial(async () => {
+      if (this.workerPauses.get(machine) !== id) throw new DeckError("conflict", "Worker transition changed");
+      return this.harness.commit(() => workerIdle(this.storage, machine), context);
+    });
+  }
+  resumeWorker(machine: string, id: string) {
+    return this.serial(async () => {
+      if (this.workerPauses.has(machine) && this.workerPauses.get(machine) !== id) throw new DeckError("conflict", "Worker transition changed");
+      this.workerPauses.delete(machine);
+    });
+  }
   private tail: Promise<unknown> = Promise.resolve();
   private readonly commandGuard = new AsyncLocalStorage<() => Promise<void>>();
   async guardedCommand<T>(guard: () => Promise<void>, fn: () => Promise<T>): Promise<T> {
@@ -171,6 +200,7 @@ export class DeckRuntime {
       const hubId = await harness.commit(async (tx) => (await tx.doc(Identity)).id, context);
       // Bind Deck tool callbacks before recovered Pi tool tasks can run.
       runtime = new DeckRuntime(harness, main, options.admissionGuard ?? (async () => {}), !!options.hostFiles, hubId, implementation, importer.task, rex.task, reconciler.task, options.models, { provider: options.model.provider, modelId: options.model.modelId }, options.hostFiles, options.rexClient, options.binding.machineId, catalog, installed, options.authentication);
+      runtime.storage = storage;
       harness.resume();
       return runtime;
     } catch (error) {
@@ -230,7 +260,7 @@ export class DeckRuntime {
   setToolProfiles(args: McpGrantArgs): Promise<McpGrantSnapshot> {
     return this.serial(async()=>{
       if(!validMcpGrantArgs(args)) throw new DeckError("invalid","Invalid MCP grant change");
-      const chat=await this.chat(args.chatId); const agent=await chat.agent(context);
+      const chat=await this.mutableChat(args.chatId); const agent=await chat.agent(context);
       return chat.commit(async tx=>{
         const record=await tx.conversation(chat.id), binding=await tx.doc(ChatDoc,chat.id), saved=await tx.doc(McpGrantsDoc,chat.id);
         if(!record || record.owner || binding.kind==="subagent") throw new DeckError("invalid","Only independent chats can change MCP grants");
@@ -284,6 +314,7 @@ export class DeckRuntime {
   createTask(title: string, binding: Binding, requestId: string = randomUUID(), signal?: AbortSignal, suppliedBrief: TaskBrief = {}): Promise<Conversation> {
     return this.serial(async () => {
       signal?.throwIfAborted();
+      this.requireWorkerAdmission(binding.machineId);
       if (!title.trim() || !binding.machineId || !binding.cwd.startsWith("/")) throw new DeckError("invalid", "Task needs a title, host and absolute cwd");
       if (!requestId || requestId.length > 200) throw new DeckError("invalid", "Invalid task request ID");
       const brief = briefFields(suppliedBrief); const hasBrief = Object.keys(brief).length > 0;
@@ -324,7 +355,7 @@ export class DeckRuntime {
         positiveId(origin.chatId, "origin conversation"); positiveId(origin.taskId, "origin task");
         if (origin.chain !== undefined && (!validChain(origin.chain) || origin.chain.hop < 1)) throw new DeckError("invalid", "Invalid message provenance");
       }
-      const chat = await this.chat(id);
+      const chat = await this.mutableChat(id);
       if ((await this.harness.snapshot(ChatDoc, chat.id, context))?.kind === "subagent") throw new DeckError("invalid", "Subagent chats accept input only through their owning tool; inspect or stop them instead");
       const existing = await chat.commit(async (tx) => {
         const existing = await tx.submissionByRequest(chat.id, input.requestId);
@@ -382,7 +413,7 @@ export class DeckRuntime {
     return this.serial(async () => {
       signal?.throwIfAborted();
       if (typeof requestId !== "string" || !requestId || requestId.length > 200) throw new DeckError("invalid", "Invalid instruction import request ID");
-      const chat = await this.chat(id);
+      const chat = await this.mutableChat(id);
       return chat.commit(async (tx) => {
         const receipt = await tx.doc(InstructionRequest, chat.id, requestId, null);
         if (receipt.taskId) {
@@ -412,7 +443,7 @@ export class DeckRuntime {
       let saved: RexTarget;
       try { saved = rexTarget(target); } catch { throw new DeckError("invalid", "Rex allocation needs an explicit local target and client"); }
       const hash = createHash("sha256").update(JSON.stringify([id, this.hubId, saved])).digest("hex");
-      const chat = await this.chat(id);
+      const chat = await this.mutableChat(id);
       return chat.commit(async (tx) => {
         const receipt = await tx.doc(RexRequest, chat.id, requestId, hash);
         if (receipt.hash !== hash) throw new DeckError("conflict", "Rex allocation request ID reused with different launch arguments");
@@ -523,7 +554,7 @@ export class DeckRuntime {
       signal?.throwIfAborted();
       if (typeof requestId !== "string" || !requestId || requestId.length > 200) throw new DeckError("invalid", "Invalid Rex reconciliation request ID");
       const hash = createHash("sha256").update(JSON.stringify([id, this.hubId])).digest("hex");
-      const chat = await this.chat(id);
+      const chat = await this.mutableChat(id);
       return chat.commit(async (tx) => {
         const receipt = await tx.doc(RexReconcileRequest, chat.id, requestId, hash);
         if (receipt.hash !== hash) throw new DeckError("conflict", "Rex reconciliation identity changed");
@@ -621,7 +652,7 @@ export class DeckRuntime {
   setModelSettings(args: SetModelSettingsArgs): Promise<ModelSettingsAck> {
     return this.serial(async () => {
       if (!validSetModelSettingsArgs(args)) throw new DeckError("invalid", "Invalid model settings");
-      const chat = await this.chat(args.chatId);
+      const chat = await this.mutableChat(args.chatId);
       const saved = await this.harness.snapshot(ChatDoc, chat.id, context);
       if (!saved || !["main", "task"].includes(saved.kind)) throw new DeckError("invalid", "Only ownerless Deck chats can change model settings");
       return chat.commit(async (tx) => {
@@ -646,7 +677,7 @@ export class DeckRuntime {
 
   configure(id: string, change: AgentChange) {
     return this.serial(async () => {
-      const chat = await this.chat(id);
+      const chat = await this.mutableChat(id);
       return chat.commit(async (tx) => {
         // Query Pi's authoritative work records, not a second execution tracker. This
         // includes pending/parked/background work and effects still draining after stop.

@@ -49,6 +49,40 @@ pub fn lock(native: Native, dir: std.Io.Dir, name: []const u8) !std.Io.File {
     if (!try file.tryLock(native.io, .exclusive)) return error.ClientAlreadyStarting;
     return file;
 }
+// A live handoff inherits the SAME flock description across exec. Compare
+// device+inode against the private lock name; a supplied FD is not authority.
+pub fn inheritedLock(native: Native, dir: std.Io.Dir, fd: std.posix.fd_t) !std.Io.File {
+    if (fd < 3) return error.InvalidHandoffLock;
+    const held: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    const other_fd = try std.posix.openat(dir.handle, "writer.lock", .{ .ACCMODE = .RDONLY, .CLOEXEC = true, .NOFOLLOW = true, .NONBLOCK = true }, 0);
+    defer Native.close(other_fd);
+    try owner(fd);
+    try owner(other_fd);
+    for ([_]std.posix.fd_t{ fd, other_fd }) |candidate| {
+        const info = try (std.Io.File{ .handle = candidate, .flags = .{ .nonblocking = false } }).stat(native.io);
+        if (info.kind != .file or info.permissions.toMode() & 0o077 != 0) return error.InvalidHandoffLock;
+    }
+    if (!std.mem.eql(u64, &try fileKey(fd), &try fileKey(other_fd)) or !try held.tryLock(native.io, .exclusive)) return error.InvalidHandoffLock;
+    _ = try Native.fcntl(fd, std.posix.F.SETFD, std.posix.FD_CLOEXEC);
+    return held;
+}
+fn fileKey(fd: std.posix.fd_t) ![3]u64 {
+    if (@import("builtin").os.tag == .linux) {
+        const linux = std.os.linux;
+        var info: linux.Statx = undefined;
+        while (true) switch (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .INO = true }, &info))) {
+            .SUCCESS => break,
+            .INTR => continue,
+            else => return error.InvalidHandoffLock,
+        };
+        if (!info.mask.INO) return error.InvalidHandoffLock;
+        return .{ info.dev_major, info.dev_minor, info.ino };
+    } else {
+        var info: std.c.Stat = undefined;
+        if (std.c.fstat(fd, &info) != 0) return error.InvalidHandoffLock;
+        return .{ @intCast(info.dev), 0, info.ino };
+    }
+}
 pub fn save(native: Native, allocator: std.mem.Allocator, dir: std.Io.Dir, name: []const u8, value: anytype) !void {
     const bytes = try std.json.Stringify.valueAlloc(allocator, value, .{});
     defer allocator.free(bytes);

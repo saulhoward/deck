@@ -35,6 +35,11 @@ export class RoutedFiles implements HostFiles {
     if (mcp) this.mcp.add(machineId);
     if (paused) this.paused.add(machineId);
   }
+  protected pauseTransport(machineId: string) { this.paused.add(machineId); }
+  protected replaceClient(machineId: string, client: WorkerRexClient) {
+    if (!this.paused.has(machineId) || !this.remotes.has(machineId) || !validRexClient(client)) throw new Error("Worker replacement is not fenced");
+    this.clients.set(machineId, client);
+  }
   protected activateTransport(machineId: string) { this.paused.delete(machineId); }
   rexClientFor(machineId: string) { return this.clients.get(machineId); }
   private readonly observing = new Set<string>();

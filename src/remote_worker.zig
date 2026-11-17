@@ -122,7 +122,7 @@ pub fn session(native: Native, config: wire.RemoteWorkerConfig, implementation: 
 fn sessionConfigured(native: Native, config: wire.RemoteWorkerConfig, implementation: []const u8, executable: []const u8, journal: []const u8, address: std.Io.net.IpAddress, verify: @import("remote_link.zig").Verify, stop_flag: *std.atomic.Value(bool), mcp: ?*const @import("mcp_profiles.zig").Profiles) !void {
     return sessionWithTrust(native, .{ .hubId = config.hubId, .machineId = config.machineId, .rexClient = config.rexClient, .launcher = config.launcher }, implementation, journal, address, .{ .tailscale = .{ .executable = executable, .expected = config.hubPeer, .verify = verify } }, stop_flag, mcp);
 }
-pub const SessionConfig = struct { hubId: []const u8, machineId: []const u8, rexClient: ?wire.WorkerRexClient = null, launcher: ?bool = null };
+pub const SessionConfig = struct { hubId: []const u8, machineId: []const u8, rexClient: ?wire.WorkerRexClient = null, launcher: ?bool = null, drain: ?*@import("worker.zig").Drain = null };
 const TransportTrust = union(enum) {
     tailscale: struct { executable: []const u8, expected: wire.TailPeer, verify: @import("remote_link.zig").Verify },
     rex,
@@ -214,10 +214,10 @@ fn sessionWithTrust(native: Native, config: SessionConfig, implementation: []con
     local_owned = false;
     if (config.launcher orelse false) std.Io.File.stderr().writeStreamingAll(native.io, "deck: approved launcher relay enabled (list/create/open/inspect only)\n") catch {};
     std.Io.File.stderr().writeStreamingAll(native.io, if (mcp != null) (if (clients != null) "deck: worker connected (files/bash/MCP/Rex task relay; no Pi runtime)\n" else "deck: worker connected (files/bash/MCP; no Pi runtime)\n") else if (clients != null) "deck: worker connected (files/bash/Rex task relay; no Pi runtime)\n" else "deck: worker connected (files/bash only; no Pi runtime)\n") catch {};
-    @import("worker.zig").serveRemoteMcp(native, input, output, pipe[0], journal, config.machineId, config.rexClient, mcp);
+    @import("worker.zig").serveRemoteMcpTracked(native, input, output, pipe[0], journal, config.machineId, config.rexClient, mcp, config.drain);
 }
-const LocalListener = struct { server: std.Io.net.Server, inode: std.Io.File.INode };
-fn clientListener(native: Native, path: []const u8) !LocalListener {
+pub const LocalListener = struct { server: std.Io.net.Server, inode: std.Io.File.INode };
+pub fn clientListener(native: Native, path: []const u8) !LocalListener {
     const parent = try std.Io.Dir.cwd().statFile(native.io, std.fs.path.dirname(path) orelse return error.UnsafeClientSocket, .{ .follow_symlinks = false });
     if (parent.kind != .directory or parent.permissions.toMode() & 0o077 != 0) return error.UnsafeClientSocket;
     const previous = std.Io.Dir.cwd().statFile(native.io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {

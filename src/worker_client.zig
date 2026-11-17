@@ -22,7 +22,7 @@ fn nativeImage(bytes: []const u8) bool {
 }
 // Legacy records pin the native image, not arbitrary shell scripts. Only the
 // known full Deck Nix layout supplies an independently packaged old runtime.
-fn nixPackage(client: []const u8) ?[]const u8 {
+pub fn nixPackage(client: []const u8) ?[]const u8 {
     if (!std.mem.startsWith(u8, client, "/nix/store/") or !std.mem.endsWith(u8, client, "/bin/deck")) return null;
     const package = client[0 .. client.len - "/bin/deck".len];
     const name = package["/nix/store/".len..];

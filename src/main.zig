@@ -488,6 +488,8 @@ pub fn main(init: std.process.Init) void {
                 error.SelectedHubUnavailable => "deck: selected hub/worker unavailable or incompatible; run the matching deck serve on the selected host. No local fallback.\n",
                 error.LocalRexUnavailable => "deck: local Rex unavailable/unsupported; start/update Rex. Task terminals must stay on this machine.\n",
                 error.WorkerConflict => "deck: existing worker identity differs or session creation is unconfirmed. Inspect it; no worker replaced or state reset.\n",
+                error.WorkerUpgradeUnconfirmed => "deck: worker upgrade unconfirmed; its original transition retains custody. Retry with the same installed package; do not reset pins, delete locks or replay work.\n",
+                error.WorkerUpgradeDeferred => "deck: worker upgrade deferred: the hub/worker could not safely drain or negotiate this transition. Existing work and pins retained; no forced replacement or replay.\n",
                 error.WorkerClientUnavailable => "deck: existing worker retained, but its pinned client could not be safely reused. Keep/restore the original immutable package; no worker upgrade, pin rewrite or effect replay.\n",
                 error.WorkerUnavailable => "deck: worker startup/readiness unconfirmed. Any started worker is left intact; no task created and no work replayed.\n",
                 error.BootstrapLaunchUnconfirmed => "deck: task-form terminal creation unconfirmed. Inspect saved startup metadata and Rex; do not blindly launch a duplicate.\n",
@@ -625,6 +627,7 @@ test {
     _ = @import("agent_form.zig");
     _ = @import("rex_bootstrap.zig");
     _ = @import("worker_test.zig");
+    _ = @import("handoff_test.zig");
     _ = @import("worker_limits_test.zig");
     _ = @import("shell_test.zig");
     _ = @import("contracts_test.zig");

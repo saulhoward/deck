@@ -50,10 +50,10 @@ type ClientTarget = { machineId: string; client: WorkerRexClient; launcher: bool
 export function serveWorkerClients(runtime: DeckRuntime, machineId: string, client: WorkerRexClient, readFd: number, writeFd: number, launcher = false) {
   return serveClients(runtime, readFd, writeFd, { machineId, client, launcher });
 }
-export function serveAutomaticWorkerClients(runtime: DeckRuntime, readFd: number, writeFd: number, register: (registration: RexWorkerRegistration) => void) {
-  return serveClients(runtime, readFd, writeFd, undefined, register, true);
+export function serveAutomaticWorkerClients(runtime: DeckRuntime, readFd: number, writeFd: number, register: (registration: RexWorkerRegistration) => void, current?: () => RexWorkerRegistration | undefined) {
+  return serveClients(runtime, readFd, writeFd, undefined, register, true, current);
 }
-function serveClients(runtime: DeckRuntime, readFd: number, writeFd: number, target?: ClientTarget, register?: (registration: RexWorkerRegistration) => void, announceReady = false) {
+function serveClients(runtime: DeckRuntime, readFd: number, writeFd: number, target?: ClientTarget, register?: (registration: RexWorkerRegistration) => void, announceReady = false, current?: () => RexWorkerRegistration | undefined) {
   const reader = new Socket({ fd: readFd, readable: true, writable: false });
   let writer: Socket;
   try { writer = new Socket({ fd: writeFd, readable: false, writable: true }); }
@@ -76,6 +76,8 @@ function serveClients(runtime: DeckRuntime, readFd: number, writeFd: number, tar
           await new Promise<void>((resolve, reject) => writer.write(encodeFrame({ kind: "registered", hubId: runtime.hubId }), error => error ? reject(error) : resolve()));
           continue;
         }
+        const updated = current?.();
+        if (updated) target = { machineId: updated.machineId, client: updated.rexClient, launcher: true, previousClients: updated.previousClients ?? [] };
         const { machineId, client, launcher, previousClients } = target;
         if (!validWorkerFrame(raw) || pending.size >= 8) throw new Error();
         const key = `${raw.connectionId}:${raw.id}`; if (pending.has(key)) throw new Error(); pending.add(key);

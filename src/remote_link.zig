@@ -23,6 +23,18 @@ pub const Link = struct {
     output: tcp.fd_t,
     control: tcp.fd_t,
     clients: ?relay.Pipes = null,
+    pause: std.atomic.Value(bool) = .init(false),
+    quiescent: std.atomic.Value(bool) = .init(false),
+    connected: std.atomic.Value(bool) = .init(false),
+    changed: std.atomic.Value(bool) = .init(false),
+    change_mutex: std.Io.Mutex = .init,
+    replacement: ?wire.RexWorkerRegistration = null,
+    pub fn replace(self: *Link, registration: wire.RexWorkerRegistration) void {
+        self.change_mutex.lockUncancelable(self.native.io);
+        defer self.change_mutex.unlock(self.native.io);
+        self.changed.store(false, .release);
+        self.replacement = registration;
+    }
     const Pending = struct {
         body: []u8,
         request: std.json.Parsed(wire.NativeRequest),
@@ -110,6 +122,7 @@ pub const Link = struct {
         return fd;
     }
     pub fn serve(self: *Link) void {
+        defer self.connected.store(false, .release);
         defer self.listener.deinit(self.native.io);
         defer Native.close(self.input);
         defer Native.close(self.output);
@@ -162,6 +175,27 @@ pub const Link = struct {
         var last_ping = tcp.now(io);
         var last_pong = last_ping;
         while (true) {
+            self.change_mutex.lockUncancelable(self.native.io);
+            const replacement = self.replacement;
+            self.replacement = null;
+            self.change_mutex.unlock(self.native.io);
+            if (replacement) |registration| {
+                if (!self.quiescent.load(.acquire)) return error.UnfencedReplacement;
+                if (connection) |c| c.close();
+                connection = null;
+                if (client_relay) |*r| r.disconnect();
+                self.connected.store(false, .release);
+                self.rex = registration;
+                gate = trust.Gate.initRex(io, registration); // Fresh nonce fences every old generation.
+                replies.reset();
+                to_worker.clear();
+                control_used = 0;
+                heartbeat_used = 0;
+                self.changed.store(true, .release);
+            }
+            const paused = self.pause.load(.acquire);
+            self.quiescent.store(paused and pending.items.len == 0 and to_worker.items.items.len == 0 and to_pi.items.items.len == 0 and (if (client_relay) |*r| r.idle() else true), .release);
+            if (client_relay) |*r| r.accepting = !paused;
             var polls = [_]std.posix.pollfd{
                 .{ .fd = self.listener.socket.handle, .events = std.posix.POLL.IN, .revents = 0 },
                 .{ .fd = self.input, .events = if (pending.items.len + to_pi.items.items.len < 20) std.posix.POLL.IN else 0, .revents = 0 },
@@ -261,6 +295,7 @@ pub const Link = struct {
                     c.close();
                     if (client_relay) |*r| r.disconnect();
                     connection = null;
+                    self.connected.store(false, .release);
                     _ = gate.disconnect(c.ticket);
                     to_worker.clear();
                     replies.reset();
@@ -277,8 +312,9 @@ pub const Link = struct {
                     error.WouldBlock => continue,
                     else => return err,
                 };
-                if (connection != null) Native.close(incoming) else {
+                if (paused or connection != null) Native.close(incoming) else {
                     connection = self.handshake(&gate, incoming) catch null;
+                    self.connected.store(connection != null, .release);
                     if (connection != null) for (cancelled) |id| {
                         if (id != 0) {
                             std.mem.writeInt(u64, controls[control_used..][0..8], id, .big);
@@ -312,7 +348,7 @@ pub const Link = struct {
                         const reply = try std.json.Stringify.valueAlloc(a, .{ .version = 1, .id = request.id, .result = .{ .ok = true, .code = "link_status", .output = if (connection != null) @as([]const u8, "connected") else "offline" } }, .{});
                         defer a.free(reply);
                         try to_pi.append(reply);
-                    } else if (wrong_mcp_host or connection == null or !std.mem.eql(u8, request.machineId, self.host().machineId) or (if (request.operation == .mcp_call) std.mem.indexOfScalar(wire.WorkerCapability, self.host().capabilities.?, .mcp) == null else !supported(request.operation) and self.clients == null)) {
+                    } else if (paused or wrong_mcp_host or connection == null or !std.mem.eql(u8, request.machineId, self.host().machineId) or (if (request.operation == .mcp_call) std.mem.indexOfScalar(wire.WorkerCapability, self.host().capabilities.?, .mcp) == null else !supported(request.operation) and self.clients == null)) {
                         try failure(&to_pi, request, false);
                     } else {
                         try to_worker.append(copy);

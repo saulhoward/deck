@@ -10,7 +10,7 @@ import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { requireIdleStorage } from "./compatibility.js";
 import { validRexClient, validRexRegistration } from "./remote-contracts.js";
-import { validMachineIdentity, validNativeReceipt, validMcpReceipt, validRexWorkerConnection, validRexWorkerRegistry, validRexWorkerUpgrade, type RexWorkerConnection, type RexWorkerRegistry, type RexWorkerUpgrade, type RexWorkerRegistration } from "./generated/contracts.js";
+import { validWorkerHandoffLocal, validMachineIdentity, validNativeReceipt, validMcpReceipt, validRexWorkerConnection, validRexWorkerRegistry, validRexWorkerUpgrade, type RexWorkerConnection, type RexWorkerRegistry, type RexWorkerUpgrade, type RexWorkerRegistration } from "./generated/contracts.js";
 const MAX_BYTES = 512 * 1024 * 1024;
 export class UpgradeError extends Error { constructor(message = "Invalid, changed, unsupported or unsafe upgrade state") { super(message); } }
 function check(ok: unknown, message?: string): asserts ok { if (!ok) throw new UpgradeError(message); }
@@ -127,6 +127,10 @@ export type UpgradeOptions = { mode: "prepare" | "approve" | "apply"; state: str
 export async function upgrade(options: UpgradeOptions): Promise<void> {
   const { mode, state, from, output, client, implementation } = options;
   const identity = await config(state);
+  if (mode !== "approve") {
+    try { const pending: unknown = JSON.parse((await read(join(state, "live-handoff.json"), 16384)).toString()); check(validWorkerHandoffLocal(pending) && pending.phase === "deferred", "Live handoff is unresolved; resume its original transition instead of an offline replacement"); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+  }
   if (output) { check(isAbsolute(output) && output !== state && !output.startsWith(state + sep), "Keep transfer artifacts outside the service state"); await directory(dirname(output)); }
   if (mode === "prepare") {
     check(/^[a-f0-9]{64}$/.test(implementation));
@@ -147,6 +151,7 @@ export async function upgrade(options: UpgradeOptions): Promise<void> {
     const value: unknown = JSON.parse((await read(path)).toString());
     check(validRexWorkerRegistry(value) && value.hubId === plan.before.hubId && value.hosts.every(validRexRegistration));
     const registry: RexWorkerRegistry = value;
+    check(!registry.handoffs?.length, "Hub has unresolved live handoffs; do not replace their custody records");
     check(new Set(registry.hosts.map(host => host.machineId)).size === registry.hosts.length && registry.hosts.every(host => host.hubId === registry.hubId && host.machineId !== identity.machine));
     const index = registry.hosts.findIndex(host => host.machineId === plan.machineId); const current = registry.hosts[index]; check(current);
     const already = current.upgradeId === plan.id;

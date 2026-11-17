@@ -10,6 +10,7 @@ import { serveWorkerClients, serveAutomaticWorkerClients } from "./remote-client
 import { parseRexRoutes, RexRoutedFiles } from "./rex-routes.js";
 import { loadCatalog } from "./mcp-tools.js";
 import { serveIpc } from "./ipc.js";
+import { serveWorkerHandoffs } from "./worker-handoff.js";
 
 async function main() {
   const [path, machineId, cwd, descriptor, mode, modelId, readFd, writeFd, controlFd, nativeExecutable, routesJson, mcpCatalogPath, automaticJson] = process.argv.slice(2);
@@ -71,7 +72,12 @@ async function main() {
       }
     });
     for (const host of routes?.hosts ?? []) if (host.rexClient) clients.push(serveWorkerClients(runtime, host.machineId, host.rexClient, host.clientReadFd!, host.clientWriteFd!, host.launcher === true));
-    for (const [index, slot] of (automatic?.slots ?? []).entries()) clients.push(serveAutomaticWorkerClients(runtime, slot.clientReadFd, slot.clientWriteFd, registration => automaticFiles!.register(index, registration)));
+    for (const handoff of automatic?.handoffs ?? []) {
+      automaticFiles!.restoreHandoff(handoff.plan);
+      await runtime.pauseWorker(handoff.plan.machineId, handoff.plan.id);
+    }
+    if (automatic?.handoffReadFd !== undefined) clients.push(serveWorkerHandoffs(runtime, automaticFiles!, automatic.handoffReadFd, automatic.handoffWriteFd!));
+    for (const [index, slot] of (automatic?.slots ?? []).entries()) clients.push(serveAutomaticWorkerClients(runtime, slot.clientReadFd, slot.clientWriteFd, registration => automaticFiles!.register(index, registration), () => automaticFiles!.registration(index)));
     await serveIpc(runtime, process.stdin, process.stdout, provider.login);
   } finally { await shutdown(); }
 }

@@ -27,11 +27,15 @@ fn frame(bytes: []const u8) !std.json.Parsed(wire.TaskRelayFrame) {
 pub const Hub = struct {
     pipes: Pipes,
     launcher: bool = false,
+    accepting: bool = true,
     network: tcp.Reader = .{},
     replies: tcp.Reader = .{},
     to_pi: tcp.Queue = .{},
     to_worker: tcp.Queue = .{},
     pending: std.ArrayList(std.json.Parsed(wire.TaskRelayFrame)) = .empty,
+    pub fn idle(self: *const Hub) bool {
+        return self.pending.items.len == 0 and self.to_pi.items.items.len == 0 and self.to_worker.items.items.len == 0;
+    }
     pub fn init(pipes: Pipes) !Hub {
         try tcp.nonblock(pipes.input, true);
         try tcp.nonblock(pipes.output, true);
@@ -69,7 +73,7 @@ pub const Hub = struct {
         }
         if (fd) |socket| {
             try self.to_worker.flush(socket, io);
-            if (self.pending.items.len + self.to_worker.items.items.len >= 8) return;
+            if (!self.accepting or self.pending.items.len + self.to_worker.items.items.len >= 8) return;
             if (try self.network.read(io, socket)) |bytes| {
                 defer self.network.reset();
                 const request = try frame(bytes);

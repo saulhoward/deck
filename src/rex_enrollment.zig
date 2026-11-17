@@ -8,6 +8,7 @@ const tcp = @import("remote_io.zig");
 const trust = @import("remote_contracts.zig");
 const storage = @import("private_store.zig");
 const Link = @import("remote_link.zig").Link;
+const handoff = @import("handoff_contracts.zig");
 const a = std.heap.page_allocator;
 fn registryDirectory(native: Native, path: []const u8) !std.Io.Dir {
     // Registry publication fsyncs this handle. Zig's default Linux directory
@@ -24,6 +25,8 @@ const Slot = struct {
     client_requests: [2]tcp.fd_t,
     client_replies: [2]tcp.fd_t,
     registration: ?wire.RexWorkerRegistration = null,
+    handoff: ?wire.WorkerHandoffState = null,
+    link_committed: bool = false,
     link: ?*Link = null,
     thread: ?std.Thread = null,
     failed: bool = false,
@@ -73,6 +76,10 @@ pub const Hub = struct {
     listener: ?std.Io.net.Server = null,
     thread: ?std.Thread = null,
     stopping: std.atomic.Value(bool) = .init(false),
+    upgrade_requests: ?[2]tcp.fd_t = null,
+    upgrade_replies: ?[2]tcp.fd_t = null,
+    upgrade_child_open: bool = true,
+    upgrade_failed: bool = false,
     pub fn init(native: Native, state_path: []const u8, local_machine: []const u8, port: u16) !*Hub {
         const self = try a.create(Hub);
         self.* = .{ .native = native, .arena = .init(a), .directory = try registryDirectory(native, state_path), .local_machine = local_machine };
@@ -97,12 +104,30 @@ pub const Hub = struct {
         }
         self.hub_id = registry.hubId;
         try self.slots.ensureTotalCapacity(a, 8);
-        try self.inherit.ensureTotalCapacity(a, 40);
+        try self.inherit.ensureTotalCapacity(a, 42);
+        self.upgrade_requests = try Native.pipe();
+        try tcp.nonblock(self.upgrade_requests.?[1], true);
+        self.upgrade_replies = try Native.pipe();
+        self.inherit.appendAssumeCapacity(.{ .handle = self.upgrade_requests.?[0], .flags = .{ .nonblocking = false } });
+        self.inherit.appendAssumeCapacity(.{ .handle = self.upgrade_replies.?[1], .flags = .{ .nonblocking = false } });
         for (0..8) |i| {
             var slot = try Slot.init();
             if (i < registry.hosts.len) slot.registration = registry.hosts[i];
             self.slots.appendAssumeCapacity(slot);
             for (slot.childEnds()) |fd| self.inherit.appendAssumeCapacity(.{ .handle = fd, .flags = .{ .nonblocking = false } });
+        }
+        for (registry.handoffs orelse &.{}) |pending| {
+            if (!handoff.valid(pending.plan)) return error.InvalidHandoff;
+            var found = false;
+            for (self.slots.items) |*slot| if (slot.registration) |r| {
+                if (std.mem.eql(u8, r.machineId, pending.plan.machineId)) {
+                    if (slot.handoff != null or !handoff.matches(r, pending.plan, pending.phase == .committed)) return error.InvalidHandoff;
+                    if (pending.phase == .committed and (r.upgradeId == null or !std.mem.eql(u8, r.upgradeId.?, pending.plan.id) or r.upgradeHash == null or !std.mem.eql(u8, r.upgradeHash.?, &try handoff.hash(a, pending.plan)))) return error.InvalidHandoff;
+                    slot.handoff = pending;
+                    found = true;
+                }
+            };
+            if (!found) return error.InvalidHandoff;
         }
         self.listener = try (try std.Io.net.IpAddress.parse("127.0.0.1", enrollmentPort(port))).listen(native.io, .{ .reuse_address = true });
         _ = try Native.fcntl(self.listener.?.socket.handle, std.posix.F.SETFD, std.posix.FD_CLOEXEC);
@@ -111,10 +136,20 @@ pub const Hub = struct {
     pub fn json(self: *Hub) ![]u8 {
         var slots: [8]wire.RexRuntimeSlot = undefined;
         for (self.slots.items, 0..) |slot, i| slots[i] = .{ .registration = slot.registration, .readFd = slot.results[0], .writeFd = slot.requests[1], .controlFd = slot.controls[1], .clientReadFd = slot.client_requests[0], .clientWriteFd = slot.client_replies[1] };
-        return std.json.Stringify.valueAlloc(a, wire.RexRuntimeRoutes{ .hubId = self.hub_id, .slots = &slots }, .{});
+        var pending: std.ArrayList(wire.WorkerHandoffState) = .empty;
+        defer pending.deinit(a);
+        for (self.slots.items) |slot| if (slot.handoff) |p| {
+            try pending.append(a, p);
+        };
+        return std.json.Stringify.valueAlloc(a, wire.RexRuntimeRoutes{ .hubId = self.hub_id, .slots = &slots, .handoffReadFd = if (self.upgrade_requests) |p| p[0] else null, .handoffWriteFd = if (self.upgrade_replies) |p| p[1] else null, .handoffs = pending.items }, .{});
     }
     pub fn closeChildEnds(self: *Hub) void {
         for (self.slots.items) |*slot| slot.closeChildEnds();
+        if (self.upgrade_child_open) {
+            self.upgrade_child_open = false;
+            if (self.upgrade_requests) |p| Native.close(p[0]);
+            if (self.upgrade_replies) |p| Native.close(p[1]);
+        }
         self.inherit.clearRetainingCapacity();
     }
     pub fn start(self: *Hub) !void {
@@ -124,6 +159,9 @@ pub const Hub = struct {
         self.stopping.store(true, .release);
         if (self.thread) |thread| thread.join();
         if (self.listener) |*listener| listener.deinit(self.native.io);
+        self.closeChildEnds();
+        if (self.upgrade_requests) |p| Native.close(p[1]);
+        if (self.upgrade_replies) |p| Native.close(p[0]);
         for (self.slots.items) |*slot| slot.deinit(self.native);
         self.slots.deinit(a);
         self.inherit.deinit(a);
@@ -187,6 +225,11 @@ pub const Hub = struct {
         defer temporary.deinit();
         const temp = temporary.allocator();
         const raw = (try std.json.parseFromSlice(std.json.Value, temp, bytes, .{})).value;
+        if (wire.validWorkerHandoffRequest(raw)) {
+            const request = (try wire.parseWorkerHandoffRequest(temp, bytes)).value;
+            const status = try self.upgrade(request, temp);
+            return tcp.send(native.io, fd, wire.WorkerHandoffReply{ .kind = "worker_upgrade", .id = request.plan.id, .hubId = self.hub_id.?, .status = status });
+        }
         if (!trust.validRexRegistration(raw)) return error.InvalidWorkerRegistration;
         var incoming = (try wire.parseRexWorkerRegistration(temp, bytes)).value;
         // Historical client authority is installed only by the offline hub
@@ -210,6 +253,12 @@ pub const Hub = struct {
             }
         };
         const slot = selected orelse return error.WorkerCapacity;
+        if (slot.failed) return error.RegistrationUnavailable;
+        try self.activate(slot, incoming, temp);
+        try tcp.send(native.io, fd, wire.RexEnrollmentAck{ .version = 1, .hubId = self.hub_id.?, .machineId = incoming.machineId, .port = slot.link.?.listener.socket.address.getPort() });
+    }
+    fn activate(self: *Hub, slot: *Slot, incoming: wire.RexWorkerRegistration, temp: std.mem.Allocator) !void {
+        const native = self.native;
         if (slot.failed) return error.RegistrationUnavailable;
         if (slot.thread == null) {
             // A failed native/Pi handshake permanently fences this slot for this
@@ -236,21 +285,174 @@ pub const Hub = struct {
             registration.hubId = try alloc.dupe(u8, ack.hubId);
             self.hub_id = registration.hubId;
             slot.registration = registration;
-            var hosts: std.ArrayList(wire.RexWorkerRegistration) = .empty;
-            for (self.slots.items) |s| if (s.registration) |r| try hosts.append(temp, r);
-            try storage.save(native, temp, self.directory, "rex-workers.json", wire.RexWorkerRegistry{ .version = 1, .hubId = self.hub_id, .hosts = hosts.items });
+            try self.saveRegistry(temp);
             var listener = try (try std.Io.net.IpAddress.parse("127.0.0.1", 0)).listen(native.io, .{ .reuse_address = true });
             errdefer listener.deinit(native.io);
             _ = try Native.fcntl(listener.socket.handle, std.posix.F.SETFD, std.posix.FD_CLOEXEC);
             const link = try a.create(Link);
             errdefer a.destroy(link);
             link.* = .{ .native = native, .rex = registration, .listener = listener, .input = slot.requests[0], .output = slot.results[1], .control = slot.controls[0], .clients = .{ .input = slot.client_replies[0], .output = slot.client_requests[1] } };
+            if (slot.handoff) |p| link.pause.store(p.phase == .prepared, .release);
+            slot.link_committed = if (slot.handoff) |p| p.phase == .committed else false;
             slot.thread = try std.Thread.spawn(.{}, Link.serve, .{link});
             slot.link = link;
         }
-        try tcp.send(native.io, fd, wire.RexEnrollmentAck{ .version = 1, .hubId = self.hub_id.?, .machineId = incoming.machineId, .port = slot.link.?.listener.socket.address.getPort() });
+    }
+    fn saveRegistry(self: *Hub, alloc: std.mem.Allocator) !void {
+        var hosts: std.ArrayList(wire.RexWorkerRegistration) = .empty;
+        defer hosts.deinit(alloc);
+        var pending: std.ArrayList(wire.WorkerHandoffState) = .empty;
+        defer pending.deinit(alloc);
+        for (self.slots.items) |s| {
+            if (s.registration) |r| try hosts.append(alloc, r);
+            if (s.handoff) |p| try pending.append(alloc, p);
+        }
+        try storage.save(self.native, alloc, self.directory, "rex-workers.json", wire.RexWorkerRegistry{ .version = 1, .hubId = self.hub_id, .hosts = hosts.items, .handoffs = if (pending.items.len > 0) pending.items else null });
+    }
+    fn writeUpgrade(self: *Hub, bytes: []const u8) !void {
+        var offset: usize = 0;
+        const end = tcp.now(self.native.io) + 5000;
+        while (offset < bytes.len) {
+            if (self.stopping.load(.acquire) or tcp.now(self.native.io) >= end) return error.HandoffUnavailable;
+            var polls = [_]std.posix.pollfd{.{ .fd = self.upgrade_requests.?[1], .events = std.posix.POLL.OUT, .revents = 0 }};
+            if (try std.posix.poll(&polls, 50) == 0) continue;
+            const n = std.c.write(polls[0].fd, bytes[offset..].ptr, bytes.len - offset);
+            switch (std.c.errno(n)) {
+                .SUCCESS => {
+                    if (n == 0) return error.HandoffUnavailable;
+                    offset += @intCast(n);
+                },
+                .AGAIN, .INTR => {},
+                else => return error.HandoffUnavailable,
+            }
+        }
+    }
+    fn admin(self: *Hub, request: wire.WorkerHandoffAdmin, alloc: std.mem.Allocator) !@FieldType(wire.WorkerHandoffReply, "status") {
+        if (self.upgrade_failed or self.upgrade_requests == null) return error.HandoffUnavailable;
+        errdefer {
+            self.upgrade_failed = true; // Never consume a delayed ACK as a later phase.
+            std.debug.print("deck: worker upgrade channel unconfirmed; retain transition custody and use same-build hub recovery, not pin resets\n", .{});
+        }
+        const body = try std.json.Stringify.valueAlloc(alloc, request, .{});
+        if (body.len > 64 * 1024) return error.HandoffUnavailable;
+        var header: [4]u8 = undefined;
+        std.mem.writeInt(u32, &header, @intCast(body.len), .big);
+        try self.writeUpgrade(&header);
+        try self.writeUpgrade(body);
+        try self.readPipe(self.upgrade_replies.?[0], &header);
+        const length = std.mem.readInt(u32, &header, .big);
+        if (length == 0 or length > 4096) return error.HandoffUnavailable;
+        const bytes = try alloc.alloc(u8, length);
+        try self.readPipe(self.upgrade_replies.?[0], bytes);
+        const reply = (try wire.parseWorkerHandoffReply(alloc, bytes)).value;
+        if (!std.mem.eql(u8, reply.id, request.plan.id) or !std.mem.eql(u8, reply.hubId, request.plan.hubId)) return error.HandoffUnavailable;
+        const expected = switch (request.action) {
+            .prepare => reply.status == .prepared or reply.status == .deferred,
+            .commit => reply.status == .committed,
+            .finish, .cancel => reply.status == .finished,
+        };
+        if (!expected) return error.HandoffUnavailable;
+        return reply.status;
+    }
+    fn awaitFlag(self: *Hub, flag: *std.atomic.Value(bool)) !bool {
+        const end = tcp.now(self.native.io) + 2000;
+        while (tcp.now(self.native.io) < end and !self.stopping.load(.acquire)) {
+            if (flag.load(.acquire)) return true;
+            try self.native.io.sleep(.fromMilliseconds(10), .awake);
+        }
+        return false;
+    }
+    fn upgrade(self: *Hub, request: wire.WorkerHandoffRequest, temp: std.mem.Allocator) !@FieldType(wire.WorkerHandoffReply, "status") {
+        const plan = request.plan;
+        if (!handoff.valid(plan) or self.hub_id == null or !std.mem.eql(u8, self.hub_id.?, plan.hubId)) return error.InvalidHandoff;
+        var selected: ?*Slot = null;
+        for (self.slots.items) |*s| if (s.registration) |r| {
+            if (std.mem.eql(u8, r.machineId, plan.machineId)) selected = s;
+        };
+        const slot = selected orelse return error.InvalidHandoff;
+        const current = slot.registration.?;
+        if (slot.handoff) |p| {
+            if (!handoff.same(p.plan, plan)) return .deferred;
+        }
+        const after = handoff.matches(current, plan, true);
+        if (!after and !handoff.matches(current, plan, false)) return .deferred;
+        if (after and (current.upgradeId == null or !std.mem.eql(u8, current.upgradeId.?, plan.id) or current.upgradeHash == null or !std.mem.eql(u8, current.upgradeHash.?, &try handoff.hash(temp, plan)))) return .deferred;
+        // Contact from a retained terminal package is not consent to roll the
+        // worker back. Explicit offline administration remains separate.
+        if (!after and slot.handoff == null) for (current.previousClients orelse &.{}) |previous| {
+            if (std.mem.eql(u8, previous.executable, plan.client.executable)) return .deferred;
+        };
+        if (request.action == .probe) return if (self.upgrade_failed) .deferred else .supported;
+        try self.activate(slot, current, temp);
+        const link = slot.link.?;
+        if (request.action == .prepare) {
+            if (after) return if (slot.handoff == null) .finished else .committed;
+            // Verify history capacity before pausing any admission or old process.
+            _ = handoff.replacement(temp, current, plan) catch return .deferred;
+            if (try self.admin(.{ .kind = "worker_upgrade", .action = .prepare, .plan = plan }, temp) != .prepared) return .deferred;
+            link.pause.store(true, .release);
+            if (!try self.awaitFlag(&link.quiescent)) {
+                if (slot.handoff != null) return error.HandoffUnconfirmed;
+                _ = try self.admin(.{ .kind = "worker_upgrade", .action = .cancel, .plan = plan }, temp);
+                link.pause.store(false, .release);
+                return .deferred;
+            }
+            if (slot.handoff == null) {
+                const retained = try std.json.Stringify.valueAlloc(self.arena.allocator(), plan, .{});
+                slot.handoff = .{ .plan = (try wire.parseWorkerHandoffPlan(self.arena.allocator(), retained)).value, .phase = .prepared };
+            }
+            try self.saveRegistry(temp);
+            return .prepared;
+        }
+        if (request.action == .commit) {
+            if (slot.handoff == null) return if (after) .finished else .deferred;
+            if (slot.handoff.?.phase == .prepared) {
+                if (!link.quiescent.load(.acquire)) return error.HandoffUnconfirmed;
+                slot.registration = try handoff.replacement(self.arena.allocator(), current, slot.handoff.?.plan);
+                slot.handoff.?.phase = .committed;
+            }
+            try self.saveRegistry(temp); // Retain intent before accepting replacement bytes.
+            if (try self.admin(.{ .kind = "worker_upgrade", .action = .commit, .plan = plan, .registration = slot.registration.? }, temp) != .committed) return error.HandoffUnconfirmed;
+            if (!slot.link_committed) {
+                link.replace(slot.registration.?);
+                if (!try self.awaitFlag(&link.changed)) return error.HandoffUnconfirmed;
+                slot.link_committed = true;
+            }
+            link.pause.store(false, .release);
+            return .committed;
+        }
+        if (!after or !link.connected.load(.acquire)) return .deferred;
+        if (slot.handoff) |p| {
+            if (p.phase != .committed) return error.HandoffUnconfirmed;
+        }
+        slot.handoff = null;
+        try self.saveRegistry(temp);
+        if (try self.admin(.{ .kind = "worker_upgrade", .action = .finish, .plan = plan }, temp) != .finished) return error.HandoffUnconfirmed;
+        return .finished;
     }
 };
+
+test "handoff control rejects wrong-phase acknowledgements and never consumes a late reply as a retry" {
+    const native = Native.testing();
+    var tmp = std.testing.tmpDir(.{ .iterate = true });
+    defer tmp.cleanup();
+    const manager = try a.create(Hub);
+    manager.* = .{ .native = native, .arena = .init(a), .directory = try tmp.dir.openDir(native.io, ".", .{ .iterate = true }), .local_machine = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" };
+    defer manager.deinit();
+    manager.upgrade_requests = try Native.pipe();
+    manager.upgrade_replies = try Native.pipe();
+    const plan: wire.WorkerHandoffPlan = .{ .version = 1, .id = "00000000-0000-4000-8000-000000000001", .hubId = "00000000-0000-4000-8000-000000000002", .machineId = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", .beforeImplementation = &@as([64]u8, @splat('a')), .implementation = &@as([64]u8, @splat('b')), .beforeClient = .{ .executable = "/tools/old", .socket = "/private/worker.sock" }, .client = .{ .executable = "/tools/new", .socket = "/private/worker.sock" } };
+    for ([_]@FieldType(wire.WorkerHandoffReply, "status"){ .committed, .prepared }) |status| {
+        const bytes = try std.json.Stringify.valueAlloc(a, wire.WorkerHandoffReply{ .kind = "worker_upgrade", .id = plan.id, .hubId = plan.hubId, .status = status }, .{});
+        defer a.free(bytes);
+        var header: [4]u8 = undefined;
+        std.mem.writeInt(u32, &header, @intCast(bytes.len), .big);
+        try tcp.writeAll(native.io, manager.upgrade_replies.?[1], &header);
+        try tcp.writeAll(native.io, manager.upgrade_replies.?[1], bytes);
+        try std.testing.expectError(error.HandoffUnavailable, manager.admin(.{ .kind = "worker_upgrade", .action = .prepare, .plan = plan }, manager.arena.allocator()));
+        try std.testing.expect(manager.upgrade_failed);
+    }
+}
 
 test "automatic worker registry publication syncs its state directory" {
     const native: Native = .{ .io = std.testing.io, .environ = .empty };

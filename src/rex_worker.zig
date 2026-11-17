@@ -10,10 +10,13 @@ const tcp = @import("remote_io.zig");
 const state = @import("state.zig");
 const worker = @import("remote_worker.zig");
 var stopping = std.atomic.Value(bool).init(false);
+var session_stopping = std.atomic.Value(bool).init(false);
+const handoff = @import("worker_handoff.zig");
 fn stop(_: std.posix.SIG) callconv(.c) void {
     stopping.store(true, .release);
+    session_stopping.store(true, .release);
 }
-const Options = struct { directory: []const u8, server: []const u8, client: []const u8, executable: ?[]const u8 = null, port: u16 = 52800, detached: bool = false };
+const Options = struct { directory: []const u8, server: []const u8, client: []const u8, executable: ?[]const u8 = null, port: u16 = 52800, detached: bool = false, handoff_lock: ?std.posix.fd_t = null };
 fn options(args: []const []const u8) !Options {
     var dir: ?[]const u8 = null;
     var server: ?[]const u8 = null;
@@ -22,6 +25,7 @@ fn options(args: []const []const u8) !Options {
     var port: u16 = 52800;
     var seen_port = false;
     var detached = false;
+    var handoff_lock: ?std.posix.fd_t = null;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--detach") and !detached) {
@@ -38,6 +42,8 @@ fn options(args: []const []const u8) !Options {
             client = args[i + 1];
         } else if (std.mem.eql(u8, arg, "--rex") and executable == null) {
             executable = args[i + 1];
+        } else if (std.mem.eql(u8, arg, "--handoff-lock-fd") and handoff_lock == null) {
+            handoff_lock = try std.fmt.parseInt(std.posix.fd_t, args[i + 1], 10);
         } else if (std.mem.eql(u8, arg, "--port") and !seen_port) {
             port = try std.fmt.parseInt(u16, args[i + 1], 10);
             seen_port = true;
@@ -46,7 +52,7 @@ fn options(args: []const []const u8) !Options {
         i += 1;
     }
     if (dir == null or server == null or client == null or !@import("mcp_profiles.zig").absolute(dir.?) or !@import("mcp_profiles.zig").absolute(client.?)) return error.InvalidArguments;
-    return .{ .directory = dir.?, .server = server.?, .client = client.?, .executable = executable, .port = port, .detached = detached };
+    return .{ .directory = dir.?, .server = server.?, .client = client.?, .executable = executable, .port = port, .detached = detached, .handoff_lock = handoff_lock };
 }
 fn cli(native: Native, a: std.mem.Allocator, cwd: []const u8, connection: wire.RexWorkerConnection, suffix: []const []const u8) !@import("shell.zig").Captured {
     var argv: std.ArrayList([]const u8) = .empty;
@@ -88,6 +94,12 @@ fn load(native: Native, a: std.mem.Allocator, path: []const u8) !wire.RexWorkerC
 }
 pub fn run(native: Native, args: []const []const u8) !void {
     const opts = try options(args);
+    if (opts.handoff_lock) |fd| {
+        if (fd < 3) return error.InvalidHandoffLock;
+        // The exec inherited this one lock. Do not leak it to the Rex identity
+        // subprocess before the later device/inode/exclusion validation.
+        _ = try Native.fcntl(fd, std.posix.F.SETFD, std.posix.FD_CLOEXEC);
+    }
     if (opts.detached and std.c.setsid() < 0) return error.WorkerDetachFailed;
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -95,10 +107,10 @@ pub fn run(native: Native, args: []const []const u8) !void {
     const executable = opts.executable orelse try @import("rex_resolve.zig").findRex(native, a);
     const identity = try forward.identity(native, a, executable, opts.server, &stopping);
     const cwd = try std.process.currentPathAlloc(native.io, a);
-    try state.initialize(native.io, a, opts.directory);
-    var dir = try storage.directory(native, opts.directory);
+    if (opts.handoff_lock == null) try state.initialize(native.io, a, opts.directory);
+    var dir = try storage.openDirectory(native, opts.directory, opts.handoff_lock == null);
     defer dir.close(native.io);
-    const held = try state.lock(native.io, dir);
+    const held = if (opts.handoff_lock) |fd| try storage.inheritedLock(native, dir, fd) else try state.lock(native.io, dir);
     defer held.close(native.io);
     const config = (try state.load(native.io, a, dir)).value;
     const socket_root = try std.fmt.allocPrint(a, "/tmp/deck-rex-{d}-{s}", .{ std.c.geteuid(), config.machine_id });
@@ -117,6 +129,7 @@ pub fn run(native: Native, args: []const []const u8) !void {
     // URL aliases may change spelling only after authenticated host/account
     // equality. They never change the pinned hub or worker identity.
     connection.pid = std.c.getpid(); // Diagnostic only; reuse requires writer exclusion and scoped RPC.
+    connection.handoffVersion = 1;
     connection.server = opts.server;
     connection.executable = executable;
     try storage.save(native, a, dir, "rex-connection.json", connection);
@@ -126,21 +139,49 @@ pub fn run(native: Native, args: []const []const u8) !void {
     std.posix.sigaction(.TERM, &action, null);
     std.posix.sigaction(.INT, &action, null);
     tcp.ignorePipe();
+    const manager = try handoff.Manager.init(native, dir, opts.directory, config.machine_id, &implementation, connection.rexClient, &session_stopping, &stopping);
+    var manager_open = true;
+    defer if (manager_open) manager.deinit();
     while (!stopping.load(.acquire)) {
+        if (manager.replacement_ready.load(.acquire)) {
+            const plan = manager.intent.?.plan;
+            const replacement = try a.dupe(u8, plan.client.executable);
+            const raw_image = @import("worker_client.zig").nixPackage(replacement) == null;
+            manager.deinit();
+            manager_open = false;
+            _ = try Native.fcntl(held.handle, std.posix.F.SETFD, 0);
+            defer _ = Native.fcntl(held.handle, std.posix.F.SETFD, std.posix.FD_CLOEXEC) catch 0;
+            const args_next = &.{ replacement, "worker", "rex", "--directory", opts.directory, "--hub", connection.server, "--rex", connection.executable, "--client", replacement, "--port", try std.fmt.allocPrint(a, "{d}", .{connection.hubPort}), "--handoff-lock-fd", try std.fmt.allocPrint(a, "{d}", .{held.handle}) };
+            var env = try std.process.Environ.createMap(native.environ, a);
+            if (!raw_image) {
+                _ = env.swapRemove("DECK_RUNTIME_ROOT");
+                _ = env.swapRemove("DECK_NODE");
+            }
+            return std.process.replace(native.io, .{ .argv = args_next, .environ_map = &env });
+        }
+        if (session_stopping.load(.acquire) or manager.drain.requested.load(.acquire)) {
+            manager.drain.idle.store(true, .release);
+            manager.drained.store(true, .release);
+            try native.io.sleep(.fromMilliseconds(25), .awake);
+            continue;
+        }
+        manager.drained.store(false, .release);
+        manager.drain.idle.store(false, .release);
         var attempt = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer attempt.deinit();
         const alloc = attempt.allocator();
         var current = try load(native, alloc, path);
-        connected(native, alloc, dir, cwd, &current, config.machine_id, &implementation, journal) catch |err| {
+        connected(native, alloc, dir, cwd, &current, config.machine_id, &implementation, journal, &manager.drain) catch |err| {
             switch (err) {
                 error.RexSessionUnconfirmed, error.RexIdentityChanged, error.WorkerIdentityChanged, error.RexForwardRequiresApi14 => return err,
                 else => if (!stopping.load(.acquire)) std.Io.File.stderr().writeStreamingAll(native.io, "deck: Rex worker disconnected/unavailable; no issued effect replayed\n") catch {},
             }
         };
+        manager.drained.store(true, .release);
         if (!stopping.load(.acquire)) try native.io.sleep(.fromMilliseconds(500), .awake);
     }
 }
-fn connected(native: Native, a: std.mem.Allocator, dir: std.Io.Dir, cwd: []const u8, connection: *wire.RexWorkerConnection, machine: []const u8, implementation: []const u8, journal: []const u8) !void {
+fn connected(native: Native, a: std.mem.Allocator, dir: std.Io.Dir, cwd: []const u8, connection: *wire.RexWorkerConnection, machine: []const u8, implementation: []const u8, journal: []const u8, drain: *@import("worker.zig").Drain) !void {
     const observed = try forward.identity(native, a, connection.executable, connection.server, &stopping);
     if (!std.mem.eql(u8, observed.value.host_id, connection.hostId) or !std.mem.eql(u8, observed.value.account, connection.account)) return error.RexIdentityChanged;
     const sid = try session(native, a, dir, cwd, connection);
@@ -159,5 +200,5 @@ fn connected(native: Native, a: std.mem.Allocator, dir: std.Io.Dir, cwd: []const
     try storage.save(native, a, dir, "rex-connection.json", connection.*);
     var effects_tunnel = try forward.Tunnel.open(native, a, connection.executable, connection.server, sid, @intCast(ack.port), &stopping);
     defer effects_tunnel.close();
-    try worker.sessionRex(native, .{ .hubId = ack.hubId, .machineId = machine, .rexClient = connection.rexClient, .launcher = true }, implementation, journal, &effects_tunnel, &stopping, null);
+    try worker.sessionRex(native, .{ .hubId = ack.hubId, .machineId = machine, .rexClient = connection.rexClient, .launcher = true, .drain = drain }, implementation, journal, &effects_tunnel, &session_stopping, null);
 }

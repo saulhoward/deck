@@ -25,7 +25,7 @@ No checkout, global Node or npm installation is needed. The default package inst
 
 Installation does **not** start a hub, create its state, configure model credentials or install/upgrade Rex. Follow the [current workflow](#current-workflow) and [provider setup](#connect-a-provider) on the coordinator. Automatic task startup needs separately installed **Rex API 14+** on the execution machine and remote coordinator.
 
-To upgrade an existing installation, first follow the [stop, drain and backup procedure](#stop-upgrade-and-back-up), then:
+Before replacing a running hub with upgraded code, follow the [stop, drain and backup procedure](#stop-upgrade-and-back-up). Client/worker-only updates can use the negotiated [worker upgrade](#upgrade-an-automatic-worker) below instead. Update the installed package with:
 
 ```sh
 nix profile upgrade --refresh deck
@@ -90,7 +90,9 @@ deck agent --local             # ignore DECK_HUB_REX_HOST
 
 Selection is `--hub` → `DECK_HUB_REX_HOST` → local. Only authenticated host/account equality permits recognizing a remote spelling as this same host; an unavailable/different remote **never falls back** to a local hub. Rex host access authenticates the forwarding boundary, not knowledge of a URL. There is no direct remote HTTP/Tailscale-socket fallback.
 
-The worker, task terminal and cwd stay on the **invoking machine**. Remote startup registers and reuses a compatible detached native worker automatically. It has receipts and private connection metadata, not inference, a provider store or a Pi database. Closing the launcher/TUI does not stop the worker or task. After a client update, normal commands automatically reuse the worker's verified original full Nix client, including its older UI, and print a notice; you do not need to find/type the old store path. Keep that package installed. Identity conflicts, unconfirmed session creation, missing/changed packages and unsupported wrappers still refuse. This is client reuse, not live worker upgrading or compatibility negotiation; it changes no pins and replaces no daemon. An older pinned client retains its compiled Rex checks, so installing a newer Deck profile alone does not update that client's policy. Use the [checked offline worker transition](#upgrade-an-automatic-worker) to adopt the new worker/client pair, including from a legacy daemon. Automatic enrollment has eight pinned worker slots; it is not automatic worker migration/retirement. Worker-local MCP configuration still uses the explicit advanced setup below; automatic enrollment advertises files/bash/Rex/launcher, not MCP.
+The worker, task terminal and cwd stay on the **invoking machine**. Remote startup registers and reuses a compatible detached native worker automatically. It has receipts and private connection metadata, not inference, a provider store or a Pi database. Closing the launcher/TUI does not stop the worker or task. After a client update, `deck agent --hub ...` can negotiate a **live worker upgrade using the installed local package**. When both hub and worker support handoff protocol 1, it pauses admission only for that worker, checks all its canonical work, drains native jobs without cancelling them, and replaces the daemon while retaining its actual writer lock. The hub and other workers stay running. It downloads nothing and never treats the hub's executable hash as a Mac/Linux compatibility test. Busy work, unclaimed forms, unsupported peers or unsafe packages defer the upgrade rather than forcing replacement. See [worker upgrades](#upgrade-an-automatic-worker).
+
+Legacy workers without the handoff endpoint still reuse their verified original client, including its older UI and compiled Rex checks. Keep that package installed; use the checked offline transition once to reach a handoff-capable version. Identity conflicts, unconfirmed session creation, missing/changed packages and unsupported wrappers still refuse. Automatic enrollment has eight pinned worker slots; it is not automatic worker migration/retirement. Worker-local MCP configuration still uses the explicit advanced setup below; automatic enrollment advertises files/bash/Rex/launcher, not MCP.
 
 The form shows the cwd and requires a nonblank **Problem** (2,048 UTF-8 bytes maximum). **Description** is optional (8,192 bytes); omitted and explicitly empty are distinct. Enter moves between fields/buttons; Shift-Enter or Insert-mode Ctrl-J inserts a newline. Ctrl-E toggles description presence. Choose **Create & start**, or press Ctrl-S, to authorize creation and initial input. Paste is literal. The problem is saved exactly as the brief and initial input; the display title is derived separately.
 
@@ -453,7 +455,17 @@ Restore keeps identities and workspace bindings. Do not run source and restored 
 
 ### Upgrade an automatic worker
 
-`deck worker upgrade` provides a **checked offline transition**, not a live rolling upgrade. It supports the automatic files/bash/Rex/launcher worker, including legacy daemons without a handoff endpoint. Normal `agent` commands still reuse a pinned client; they never silently replace its worker.
+### Normal live upgrade
+
+Install the desired full Deck package locally, then run your usual `deck agent --hub ...` command. No separate upgrade command is needed when both services support handoff protocol 1. The hub approves compatible local replacement, not an arbitrary download. There is no general release-version comparison; a known predecessor client cannot automatically roll the worker back.
+
+Finish or explicitly discard unclaimed task-creation forms first. `--drafts`, `--discard`, `--recover`, and `--resume` remain available through the verified pinned client; `--list` can use that client after a definite upgrade deferral. An unconfirmed transition is never bypassed. If the worker has unfinished tasks or queued/placed input, upgrade is deferred without cancelling that work. Once prepared, the daemon owns the durable transition even if the foreground CLI disconnects: native jobs must finish before its process is replaced. Machine identity, transport session, receipts (including uncertain results), task bindings and existing terminal allocations stay intact. Existing terminals keep their original UI/package; new terminals use the replacement. Keep predecessor packages available (at most eight distinct predecessor paths).
+
+If contact reports **upgrade unconfirmed**, retry with the same installed package. Do not delete `live-handoff.json`, remove locks, reset pins or resubmit effects. A failed maintenance IPC channel stays fenced until the same hub build is restarted through normal operator recovery. This does not upgrade the hub or Rex, migrate receipt formats, or authorize unattended package installation. Real macOS/HTTPS two-machine acceptance of live handoff remains outstanding.
+
+### Legacy/offline transition
+
+`deck worker upgrade` provides a **checked offline transition**, not the live protocol above. It supports automatic files/bash/Rex/launcher workers, including legacy daemons without a handoff endpoint. Use it once for those daemons, or for explicitly offline administration. It refuses unresolved live handoffs.
 
 1. Finish or cancel unsubmitted task-creation forms, drain **all hub work**, stop the hub and affected worker through their actual service/process owners, and back up both recovery domains. This transition does not migrate unclaimed form/bootstrap intents. Do not signal a PID merely because it appears in connection metadata. Keep both services stopped throughout the following steps; the commands acquire the actual local writer lock but do not remotely stop or lease either service.
 2. On the worker, use the **new full Deck package** to prepare a private plan:
@@ -478,7 +490,7 @@ Restore keeps identities and workspace bindings. Do not run source and restored 
 
 Transfer directories must already exist, be canonical and owner-only (`0700`); artifacts are private (`0600`) and must remain outside service state. They contain private connection metadata, not a remote attestation or permission to skip an operator's review. No package downloads, Rex installation, process kills, automatic rollback, receipt edits or effect replay occur.
 
-After a lost acknowledgement or partial failure, keep services stopped and retry the **same plan/approval**. Hub approval and worker apply are individually durable/idempotent, not a distributed atomic transaction. Do not delete metadata to “start over.” Changes since preparation, an uncertain session, unfinished hub work, unsupported formats or more than eight distinct predecessor client paths refuse. Old hub binaries may reject the new registration metadata: restart the upgraded hub, not an uncoordinated rollback. Explicit live drain/handoff and automatic rolling replacement remain future work.
+After a lost acknowledgement or partial failure, keep services stopped and retry the **same plan/approval**. Hub approval and worker apply are individually durable/idempotent, not a distributed atomic transaction. Do not delete metadata to “start over.” Changes since preparation, an uncertain session, unfinished hub work, unsupported formats or more than eight distinct predecessor client paths refuse. Old hub binaries may reject the new registration metadata: restart the upgraded hub, not an uncoordinated rollback. The offline artifacts remain separate from the live protocol; neither path silently rolls back a partially committed transition.
 
 ## Register a files/bash worker
 

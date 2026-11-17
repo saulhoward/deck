@@ -90,11 +90,37 @@
     },
     "RexWorkerRegistry": {
       "type": "object", "additionalProperties": false,
-      "properties": { "version": { "const": 1 }, "hubId": { "$ref": "#/$defs/RexUuid" }, "hosts": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/RexWorkerRegistration" } } }, "required": ["version", "hosts"]
+      "properties": { "version": { "const": 1 }, "hubId": { "$ref": "#/$defs/RexUuid" }, "hosts": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/RexWorkerRegistration" } }, "handoffs": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/WorkerHandoffState" } } }, "required": ["version", "hosts"]
     },
     "RexWorkerConnection": {
       "type": "object", "additionalProperties": false,
-      "properties": { "version": { "const": 1 }, "server": { "type": "string", "minLength": 1, "maxLength": 4096 }, "hostId": { "$ref": "#/$defs/RexUuid" }, "account": { "type": "string", "minLength": 1, "maxLength": 200 }, "executable": { "type": "string", "minLength": 1, "maxLength": 4096 }, "hubId": { "$ref": "#/$defs/RexUuid" }, "hubPort": { "type": "integer", "minimum": 1, "maximum": 65535 }, "sessionId": { "$ref": "#/$defs/RexSessionId" }, "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 }, "pendingSession": { "type": "boolean" }, "rexClient": { "$ref": "#/$defs/WorkerRexClient" }, "implementation": { "$ref": "#/$defs/Sha256" } }, "required": ["version", "server", "hostId", "account", "executable", "hubPort", "pendingSession", "rexClient", "implementation", "pid"]
+      "properties": { "version": { "const": 1 }, "server": { "type": "string", "minLength": 1, "maxLength": 4096 }, "hostId": { "$ref": "#/$defs/RexUuid" }, "account": { "type": "string", "minLength": 1, "maxLength": 200 }, "executable": { "type": "string", "minLength": 1, "maxLength": 4096 }, "hubId": { "$ref": "#/$defs/RexUuid" }, "hubPort": { "type": "integer", "minimum": 1, "maximum": 65535 }, "sessionId": { "$ref": "#/$defs/RexSessionId" }, "pid": { "type": "integer", "minimum": 1, "maximum": 2147483647 }, "handoffVersion": { "const": 1 }, "pendingSession": { "type": "boolean" }, "rexClient": { "$ref": "#/$defs/WorkerRexClient" }, "implementation": { "$ref": "#/$defs/Sha256" } }, "required": ["version", "server", "hostId", "account", "executable", "hubPort", "pendingSession", "rexClient", "implementation", "pid"]
+    },
+    "WorkerHandoffPlan": {
+      "description": "Local installed-package offer. Protocol 1 preserves native wire/receipt formats and automatic files/bash/Rex/launcher scope; not a package download or hub-selected executable.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/RexUuid" }, "hubId": { "$ref": "#/$defs/RexUuid" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "beforeImplementation": { "$ref": "#/$defs/Sha256" }, "beforeClient": { "$ref": "#/$defs/WorkerRexClient" }, "implementation": { "$ref": "#/$defs/Sha256" }, "client": { "$ref": "#/$defs/WorkerRexClient" } },
+      "required": ["version", "id", "hubId", "machineId", "beforeImplementation", "beforeClient", "implementation", "client"]
+    },
+    "WorkerHandoffRequest": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "kind": { "const": "worker_upgrade" }, "action": { "enum": ["probe", "prepare", "commit", "finish"] }, "plan": { "$ref": "#/$defs/WorkerHandoffPlan" } }, "required": ["kind", "action", "plan"]
+    },
+    "WorkerHandoffReply": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "kind": { "const": "worker_upgrade" }, "id": { "$ref": "#/$defs/RexUuid" }, "hubId": { "$ref": "#/$defs/RexUuid" }, "status": { "enum": ["supported", "pending", "deferred", "prepared", "committed", "finished"] } }, "required": ["kind", "id", "hubId", "status"]
+    },
+    "WorkerHandoffState": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "plan": { "$ref": "#/$defs/WorkerHandoffPlan" }, "phase": { "enum": ["prepared", "committed"] } }, "required": ["plan", "phase"]
+    },
+    "WorkerHandoffLocal": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "plan": { "$ref": "#/$defs/WorkerHandoffPlan" }, "before": { "$ref": "#/$defs/RexWorkerConnection" }, "phase": { "enum": ["requested", "prepared", "committed", "deferred"] } }, "required": ["plan", "before", "phase"]
+    },
+    "WorkerHandoffAdmin": {
+      "type": "object", "additionalProperties": false,
+      "properties": { "kind": { "const": "worker_upgrade" }, "action": { "enum": ["prepare", "commit", "finish", "cancel"] }, "plan": { "$ref": "#/$defs/WorkerHandoffPlan" }, "registration": { "$ref": "#/$defs/RexWorkerRegistration" } }, "required": ["kind", "action", "plan"]
     },
     "RexWorkerUpgrade": {
       "description": "Explicit offline operator transfer, not a live handoff or remote attestation. Only implementation/client pins change; retained identity and receipts stay in place.",
@@ -120,7 +146,7 @@
     },
     "RexRuntimeRoutes": {
       "type": "object", "additionalProperties": false,
-      "properties": { "hubId": { "$ref": "#/$defs/RexUuid" }, "slots": { "type": "array", "minItems": 8, "maxItems": 8, "items": { "$ref": "#/$defs/RexRuntimeSlot" } } }, "required": ["slots"]
+      "properties": { "hubId": { "$ref": "#/$defs/RexUuid" }, "slots": { "type": "array", "minItems": 8, "maxItems": 8, "items": { "$ref": "#/$defs/RexRuntimeSlot" } }, "handoffReadFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "handoffWriteFd": { "type": "integer", "minimum": 3, "maximum": 2147483647 }, "handoffs": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/WorkerHandoffState" } } }, "required": ["slots"]
     },
     "RemoteLinkHeader": {
       "type": "object", "additionalProperties": false,
