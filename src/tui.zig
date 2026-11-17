@@ -93,7 +93,7 @@ const TransportStatus = enum {
         return switch (self) {
             .quiet => "client",
             .idle => "client idle",
-            .waiting => "client waiting",
+            .waiting => "", // Request admission still uses this state, never a flashing label.
             .fenced => "client fenced",
         };
     }
@@ -123,6 +123,44 @@ pub fn displayWidth(ctx: fw.DrawContext, text: []const u8) usize {
     var width: usize = 0;
     while (it.next()) |g| width += glyph(ctx, g.bytes(text)).width;
     return width;
+}
+// Animate only visible graphemes, preserving spaces and terminal cell widths.
+// A wide emoji/CJK grapheme cycles through two runes, then lands as one glyph.
+fn animatedText(ctx: fw.DrawContext, saved: []const u8, columns: u16, pulse: ?Theme.Pulse) ![]const u8 {
+    const Item = struct { text: []const u8, width: u8, rank: ?usize };
+    var items: [512]Item = undefined;
+    var len: usize = 0;
+    var cells: usize = 0;
+    var count: usize = 0;
+    var it = vaxis.unicode.graphemeIterator(saved);
+    while (it.next()) |g| {
+        const item = glyph(ctx, g.bytes(saved));
+        if (len == items.len or cells + item.width > columns) break;
+        const blank = std.mem.eql(u8, item.text, " ");
+        items[len] = .{ .text = item.text, .width = item.width, .rank = if (blank) null else count };
+        if (!blank) count += 1;
+        cells += item.width;
+        len += 1;
+    }
+    var ranks: [512]usize = undefined;
+    if (pulse) |p| Theme.revealRanks(ranks[0..count], p.seed);
+    var out: std.ArrayList(u8) = .empty;
+    for (items[0..len]) |item| {
+        if (pulse) |p| if (item.rank) |index| {
+            const settled = (@min(p.step, p.duration) * count) / @max(1, p.duration);
+            if (ranks[index] >= settled) {
+                for (0..item.width) |column| {
+                    var bytes: [4]u8 = undefined;
+                    const size = std.unicode.utf8Encode(Theme.rune(p.seed, p.step, index * 16 + column), &bytes) catch unreachable;
+                    const rune_text = bytes[0..size];
+                    try out.appendSlice(ctx.arena, if (ctx.stringWidth(rune_text) == 1) rune_text else "?");
+                }
+                continue;
+            }
+        };
+        try out.appendSlice(ctx.arena, item.text);
+    }
+    return out.items;
 }
 pub fn rows(ctx: fw.DrawContext, list: *std.ArrayList(Row), text: []const u8, width: u16, style: vaxis.Style) !void {
     // Soft-wrap at whitespace without inserting/removing a single source byte.
@@ -495,9 +533,9 @@ const Model = struct {
     scroll_max: usize = 0,
     chat_height: usize = 10,
     ticks: u64 = 0,
-    frame: u64 = 0,
-    name_started: ?u64 = null,
-    busy_started: ?u64 = null,
+    frame: u64 = 0, // Monotonic 50ms quanta, not a count of rendered frames.
+    animation_epoch: std.Io.Timestamp = .zero,
+    animations: Theme.Animation = .{},
     activity_seen: u64 = 0,
     sidebar_override: ?bool = null,
     sidebar_visible: bool = false,
@@ -507,13 +545,17 @@ const Model = struct {
     online: bool = false,
     notice: [1024]u8 = undefined,
     notice_len: usize = 0,
-    fn animation(self: *Model) ?u64 {
-        if (self.name_started) |start| if (self.frame - start < 18) return self.frame - start;
-        if (self.online and self.frame - self.activity_seen < 100) if (self.busy_started) |start| {
-            const phase = (self.frame - start) % 160;
-            if (phase < 18) return phase;
-        };
-        return null;
+    fn freshBusy(self: *Model) bool {
+        if (!self.online or self.bridge.failed or self.frame -| self.activity_seen >= 100) return false;
+        const s = self.state() orelse return false;
+        return s.activityKnown and (s.busy or s.queued > 0);
+    }
+    fn animation(self: *Model, target: Theme.Target) ?Theme.Pulse {
+        if (self.animations.mode == .busy and !self.freshBusy()) return null;
+        return self.animations.pulse(target, self.frame);
+    }
+    fn animating(self: *Model) bool {
+        return self.animation(.sidebar) != null or self.animation(.problem) != null;
     }
     fn rune(s: wire.TuiSnapshot) []const u8 {
         if (std.mem.eql(u8, s.chatId, s.hubChatId)) return "Δ";
@@ -973,9 +1015,10 @@ const Model = struct {
                 try ctx.tick(50, self.widget());
             },
             .tick => {
-                const was_animated = self.animation() != null;
-                self.frame +|= 1;
-                if (was_animated or self.animation() != null) ctx.redraw = true;
+                const was_animated = self.animating();
+                self.frame = @intCast(@divFloor(@max(0, self.animation_epoch.durationTo(std.Io.Timestamp.now(ctx.io, .awake)).nanoseconds), 50 * std.time.ns_per_ms));
+                self.animations.advance(self.frame, self.freshBusy());
+                if (was_animated or self.animating()) ctx.redraw = true;
                 if (stopping.load(.monotonic)) {
                     ctx.quit = true;
                     return;
@@ -1003,13 +1046,8 @@ const Model = struct {
                         response.deinit();
                     } else {
                         const s = response.value.case0.snapshot;
-                        if (self.snapshot == null or action == .select) self.name_started = self.frame;
-                        if (action == .poll or action == .latest or action == .select) {
-                            self.activity_seen = self.frame;
-                            if (s.activityKnown and s.busy) {
-                                if (self.busy_started == null) self.busy_started = self.frame;
-                            } else self.busy_started = null;
-                        }
+                        if (self.snapshot == null or action == .select) self.animations.attach(self.frame, !std.mem.eql(u8, s.chatId, s.hubChatId));
+                        if (action == .poll or action == .latest or action == .select) self.activity_seen = self.frame;
                         if (self.terminal_status) |status| if (s.cwd) |cwd| try status.identity(rune(s), cwd);
                         if (action == .select) {
                             self.task_picker = false;
@@ -1070,14 +1108,15 @@ const Model = struct {
                         if (self.snapshot) |old| old.deinit();
                         self.snapshot = response;
                         self.online = true;
+                        self.animations.advance(self.frame, self.freshBusy());
                     }
                 }
                 self.ticks += 1;
                 if (self.ticks % 10 == 0 and self.bridge.pending == null and !self.command_mode and !self.leader and !self.paste_mode and !self.model_picker and !self.task_picker and !self.hosts_view and !self.brief_view and !self.rex_view) {
                     try self.issue(.poll);
                 }
-                // A slow background read becomes visible even without input or
-                // a reply. Fast polling alone doesn't change the footer.
+                // Only actionable transport state is shown; routine in-flight
+                // reads never flash a waiting label or displace footer content.
                 if (self.transportStatus(std.Io.Timestamp.now(ctx.io, .awake)) != self.shown_transport) ctx.redraw = true;
                 try ctx.tick(50, self.widget());
             },
@@ -1338,15 +1377,16 @@ const Model = struct {
             const end = @min(self.editor.cursor - row.offset, row.text.len);
             surface.cursor = .{ .col = @intCast(layout.x + @min(layout.body - 1, displayWidth(ctx, row.text[0..end]))), .row = @intCast(prompt_y + cursor_row - start), .shape = if (self.editor.mode == .insert) .beam else .block };
         }
-        var name_buffer: [192]u8 = undefined;
         const is_hub = if (s) |snap| std.mem.eql(u8, snap.chatId, snap.hubChatId) else false;
         const saved_name = if (is_hub) "hub" else if (s) |snap| snap.agentName orelse "unnamed" else "connecting";
-        const identity = try std.fmt.allocPrint(ctx.arena, "{s} {s}", .{ if (s) |snap| rune(snap) else "·", Theme.name(&name_buffer, saved_name, if (is_hub) null else self.animation()) });
+        const symbol = if (s) |snap| rune(snap) else "·";
+        const symbol_width: u16 = @intCast(displayWidth(ctx, symbol) + 1);
         const role = if (is_hub) "" else if (s) |snap| (if (snap.kind == .subagent) "subagent" else "agent") else "";
         if (layout.sidebar > 0) {
             for (0..h - 3) |y| surface.writeCell(layout.main, @intCast(y), .{ .char = .{ .grapheme = if (y == upper) "┤" else "│", .width = 1 }, .style = Theme.rule });
             surface.writeCell(layout.main, h - 3, .{ .char = .{ .grapheme = "┴", .width = 1 }, .style = Theme.rule });
             const available = layout.sidebar - 3;
+            const identity = try std.fmt.allocPrint(ctx.arena, "{s} {s}", .{ symbol, try animatedText(ctx, saved_name, available -| symbol_width, self.animation(.sidebar)) });
             const identity_x: u16 = @intCast(layout.main + 2 + (available - @min(available, displayWidth(ctx, identity))) / 2);
             const role_x: u16 = @intCast(layout.main + 2 + (available - @min(available, displayWidth(ctx, role))) / 2);
             lineLimit(ctx, surface, identity_x, 2, identity, Theme.orange, null, 0, w - 1);
@@ -1370,12 +1410,13 @@ const Model = struct {
         const location_x: u16 = @intCast(footer_right - displayWidth(ctx, shown_location));
         const problem = if (is_hub) "hub" else if (s) |snap| (if (snap.brief) |brief| brief.problem orelse snap.title else snap.title) else "connecting";
         const problem_line = problem[0 .. std.mem.indexOfScalar(u8, problem, '\n') orelse problem.len];
-        const task_label = try std.fmt.allocPrint(ctx.arena, "{s} {s}", .{ if (s) |snap| rune(snap) else "·", problem_line });
+        const problem_width = (location_x -| 2) -| symbol_width;
+        const task_label = try std.fmt.allocPrint(ctx.arena, "{s} {s}", .{ symbol, try animatedText(ctx, problem_line, problem_width, self.animation(.problem)) });
         lineLimit(ctx, surface, 1, h - 2, task_label, Theme.orange, null, 0, location_x -| 1);
         lineLimit(ctx, surface, location_x, h - 2, shown_location, dim, null, 0, footer_right);
         const status = try std.fmt.allocPrint(ctx.arena, "{s} [{s}]", .{ if (s) |snap| snap.model else "model —", if (self.settings()) |settings_value| @tagName(settings_value.selection.thinkingLevel) else "thinking —" });
         // Reserve room for uncertainty even with long model names.
-        const warning = if (!self.online) try std.fmt.allocPrint(ctx.arena, "STALE · {s}", .{self.shown_transport.text()}) else if (self.command_mode or self.shown_transport == .waiting or self.shown_transport == .fenced) self.shown_transport.text() else "";
+        const warning = if (self.shown_transport == .fenced) "STALE · client fenced" else if (!self.online) "STALE" else if (self.command_mode and self.shown_transport == .idle) self.shown_transport.text() else "";
         const warning_width = @min(footer_right - 2, displayWidth(ctx, warning));
         const model_width = @min(displayWidth(ctx, status), if (self.command_mode or warning_width > 0) footer_right / 2 else footer_right - 1);
         const model_x: u16 = @intCast(footer_right - model_width);
@@ -1474,6 +1515,10 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     if (hub_id) |id| bridge.hub_id = try init.gpa.dupe(u8, id);
     if (chat_id) |id| bridge.chat_id = try init.gpa.dupe(u8, id);
     var model: Model = .{ .a = init.gpa, .bridge = &bridge, .editor = Editor.init(init.gpa) };
+    var animation_seed: [8]u8 = undefined;
+    init.io.random(&animation_seed);
+    model.animations.random_state = std.mem.readInt(u64, &animation_seed, .little);
+    model.animation_epoch = std.Io.Timestamp.now(init.io, .awake);
     model.editor.mode = .insert;
     model.home = init.environ_map.get("HOME");
     defer model.deinit();
@@ -1515,7 +1560,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
         if (!model.external_edit or stopping.load(.monotonic)) break;
         model.external_edit = false;
         model.online = false;
-        model.busy_started = null;
+        model.animations.mode = .idle;
         const edited = ExternalEditor.run(.{ .io = init.io, .environ = init.minimal.environ }, init.gpa, init.environ_map, model.editor.text.items, &stopping) catch |err| {
             var message: [256]u8 = undefined;
             model.note(std.fmt.bufPrint(&message, "Editor failed ({s}); prompt unchanged. Set $EDITOR to an executable with optional arguments.", .{@errorName(err)}) catch "Editor failed; prompt unchanged.");
@@ -1610,20 +1655,21 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
         }
     }
     model.sidebar_override = null;
-    model.name_started = 0;
+    model.animations.attach(0, true);
     model.frame = 0;
-    try std.testing.expectEqual(@as(?u64, 0), model.animation());
+    try std.testing.expectEqual(@as(u64, 0), model.animation(.sidebar).?.step);
     model.frame = 18;
-    try std.testing.expect(model.animation() == null);
+    try std.testing.expect(model.animation(.sidebar) == null);
     model.online = true;
+    model.snapshot.?.value.case0.snapshot.activityKnown = true;
+    model.snapshot.?.value.case0.snapshot.busy = true;
     model.activity_seen = 160;
-    model.busy_started = 0;
     model.frame = 160;
-    try std.testing.expectEqual(@as(?u64, 0), model.animation());
-    model.frame = 320;
-    try std.testing.expect(model.animation() == null); // stale busy never animates
-    model.name_started = null;
-    model.busy_started = null;
+    model.animations.advance(model.frame, model.freshBusy());
+    try std.testing.expect(model.animating());
+    model.frame = 260;
+    try std.testing.expect(!model.animating()); // stale busy never animates
+    model.animations.mode = .idle;
     model.online = false;
     var large = draw_ctx;
     large.max = .{ .width = 500, .height = 500 };
@@ -1637,7 +1683,7 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     var footer: std.ArrayList(u8) = .empty;
     defer footer.deinit(a);
     for (waiting_surface.buffer[500 * 119 ..]) |cell| try footer.appendSlice(a, cell.char.grapheme);
-    try std.testing.expect(std.mem.indexOf(u8, footer.items, "client waiting") != null);
+    try std.testing.expect(std.mem.indexOf(u8, footer.items, "client waiting") == null);
     try std.testing.expect(std.mem.indexOf(u8, footer.items, "STALE") != null);
     bridge.pending = null;
     model.snapshot.?.value.case0.snapshot.draft = .{ .kind = .input, .requestId = "saved", .text = "preview", .clipped = false, .saved = false };
@@ -1724,7 +1770,7 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     try std.testing.expect(model.external_edit and ctx.quit);
 }
 
-test "transport display suppresses quick polls but shows slow reads and explicit actions" {
+test "transport tracks admission state without displaying a waiting label" {
     // Repeated healthy background observations keep exactly the same label.
     for (0..20) |_| {
         try std.testing.expectEqual(TransportStatus.quiet, TransportStatus.observe(null, .zero, false, false));
@@ -1732,6 +1778,7 @@ test "transport display suppresses quick polls but shows slow reads and explicit
         try std.testing.expectEqual(TransportStatus.quiet, TransportStatus.observe(null, .fromMilliseconds(499), false, false));
     }
     try std.testing.expectEqualStrings("client", TransportStatus.quiet.text());
+    try std.testing.expectEqualStrings("", TransportStatus.waiting.text());
     try std.testing.expectEqual(TransportStatus.waiting, TransportStatus.observe(.poll, .fromMilliseconds(500), false, false));
     try std.testing.expectEqual(TransportStatus.quiet, TransportStatus.observe(null, .fromMilliseconds(1000), false, false));
     for ([_]Action{ .send, .retry, .discard, .stop, .older, .latest, .models, .configure }) |action|
@@ -2144,4 +2191,121 @@ test "bash runs stop at messages, other tools and notices, including multiple re
         try std.testing.expectEqualStrings("last", rendered.items[rendered.items.len - 1].text);
         for (rendered.items) |row| try std.testing.expect(displayWidth(ctx, row.text) <= width);
     }
+}
+
+test "runic reveals preserve Unicode widths, clipping and monotonic randomized settlement" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    fw.DrawContext.init(.unicode);
+    const ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
+    const unicode = "A 界👩🏽‍💻é task";
+    for (0..21) |width| {
+        const plain = try animatedText(ctx, unicode, @intCast(width), null);
+        for (0..19) |step| {
+            const animated = try animatedText(ctx, unicode, @intCast(width), .{ .step = step, .duration = 18, .seed = 42 });
+            try std.testing.expect(std.unicode.utf8ValidateSlice(animated));
+            try std.testing.expectEqual(displayWidth(ctx, plain), displayWidth(ctx, animated));
+            if (step == 18) try std.testing.expectEqualStrings(plain, animated);
+        }
+    }
+    try std.testing.expectEqualStrings(unicode, try animatedText(ctx, unicode, 140, null));
+    const ascii = "abcdefghijklmnopqrstuvwxyz";
+    var landed: [ascii.len]bool = @splat(false);
+    for (0..19) |step| {
+        const animated = try animatedText(ctx, ascii, 140, .{ .step = step, .duration = 18, .seed = 42 });
+        var it = vaxis.unicode.graphemeIterator(animated);
+        var count: usize = 0;
+        for (ascii, 0..) |_, index| {
+            const is_original = std.mem.eql(u8, it.next().?.bytes(animated), ascii[index..][0..1]);
+            if (landed[index]) try std.testing.expect(is_original);
+            landed[index] = is_original;
+            if (is_original) count += 1;
+        }
+        try std.testing.expect(it.next() == null);
+        try std.testing.expectEqual(step * ascii.len / 18, count);
+        if (step == 9) {
+            try std.testing.expect(!std.mem.allEqual(bool, landed[0..13], true));
+            try std.testing.expect(!std.mem.allEqual(bool, landed[13..], false));
+        }
+    }
+}
+
+test "busy sidebar and problem animate independently; waiting stays silent and real warnings remain" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    var model: Model = .{ .a = a, .bridge = &bridge, .editor = .init(a), .online = true, .snapshot = .{
+        .arena = try a.create(std.heap.ArenaAllocator),
+        .value = .{ .case0 = .{ .version = 1, .id = "1", .ok = true, .snapshot = .{
+            .clientMode = .task,
+            .hubChatId = "1",
+            .hubId = "hub",
+            .chatId = "2",
+            .title = "Title fallback",
+            .brief = .{ .problem = "Fix the actual task problem\nnot in footer" },
+            .agentName = "wintermute",
+            .agentRune = "ᚦ",
+            .model = "mock",
+            .tools = "offline",
+            .activityKnown = true,
+            .busy = true,
+            .queued = 0,
+            .entries = &.{},
+            .hasOlder = false,
+            .historical = false,
+            .preview = "",
+            .notice = "",
+            .draft = null,
+        } } },
+    } };
+    model.snapshot.?.arena.* = std.heap.ArenaAllocator.init(a);
+    defer model.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    fw.DrawContext.init(.unicode);
+    var ctx: fw.DrawContext = .{ .arena = alloc, .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
+    for ([_]bool{ true, false }) |sidebar| {
+        model.sidebar_override = sidebar;
+        for ([_]Theme.Target{ .sidebar, .problem }) |target| {
+            model.animations = .{ .mode = .busy, .target = target, .started = 0 };
+            const text = try testSurfaceText(alloc, try Model.draw(&model, ctx));
+            try std.testing.expectEqual(target == .sidebar, std.mem.indexOf(u8, text, "Fix the actual task problem") != null);
+            try std.testing.expectEqual(sidebar and target == .problem, std.mem.indexOf(u8, text, "wintermute") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "not in footer") == null);
+        }
+    }
+    model.animations.mode = .idle;
+    bridge.pending = .{ .version = 1, .id = "read", .action = .poll };
+    model.pending_since = std.Io.Timestamp.now(bridge.io, .awake).subDuration(.fromMilliseconds(501));
+    for ([_]bool{ false, true }) |commands| {
+        model.command_mode = commands;
+        const text = try testSurfaceText(alloc, try Model.draw(&model, ctx));
+        try std.testing.expect(std.mem.indexOf(u8, text, "client waiting") == null);
+        try std.testing.expect(std.mem.indexOf(u8, text, "STALE") == null);
+    }
+    model.command_mode = false;
+    model.online = false;
+    try std.testing.expect(std.mem.indexOf(u8, try testSurfaceText(alloc, try Model.draw(&model, ctx)), "STALE") != null);
+    bridge.failed = true;
+    try std.testing.expect(std.mem.indexOf(u8, try testSurfaceText(alloc, try Model.draw(&model, ctx)), "client fenced") != null);
+    // Narrow viewports and Unicode problems keep the fixed rune and directory safe.
+    bridge.failed = false;
+    model.online = true;
+    model.snapshot.?.value.case0.snapshot.brief.?.problem = "A 界👩🏽‍💻é task";
+    for ([_]u16{ 10, 20, 40, 80, 140 }) |width| {
+        ctx.max.width = width;
+        model.animations = .{ .mode = .busy, .target = .problem };
+        const surface = try Model.draw(&model, ctx);
+        try std.testing.expectEqual(@as(usize, width) * 40, surface.buffer.len);
+        const text = try testSurfaceText(alloc, surface);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(text));
+    }
+    model.online = false;
+    try std.testing.expect(!model.animating());
+    model.online = true;
+    model.snapshot.?.value.case0.snapshot.activityKnown = false;
+    try std.testing.expect(!model.animating());
+    model.snapshot.?.value.case0.snapshot.activityKnown = true;
+    model.snapshot.?.value.case0.snapshot.busy = false;
+    try std.testing.expect(!model.animating());
 }
