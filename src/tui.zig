@@ -13,6 +13,7 @@ const TerminalStatus = @import("tui_status.zig");
 const Theme = @import("tui_theme.zig");
 const Markdown = @import("tui_markdown.zig");
 const Filter = @import("tui_filter.zig");
+const Scrollback = @import("tui_scrollback.zig");
 const Action = @FieldType(wire.TuiRequest, "action");
 var stopping: std.atomic.Value(bool) = .init(false);
 fn signal(_: std.posix.SIG) callconv(.c) void {
@@ -28,7 +29,8 @@ const help =
     \\Mouse wheel          scroll chat in any editing mode
     \\Shift-drag           terminal selection; use terminal Copy/Paste
     \\:mouse-toggle        opt out of wheel reporting for native selection
-    \\:older, :latest       bounded canonical history pages
+    \\Scroll to chat top    fetch older history without moving your view
+    \\:older, :latest       previous page / return to live messages
     \\
     \\Prompt i a I A o O    enter Insert mode; Esc returns to Normal
     \\h j k l, w b e W B E  grapheme / line / word motions
@@ -356,6 +358,12 @@ fn chatRows(ctx: fw.DrawContext, chat: *std.ArrayList(Row), entries: []const wir
     }
     try bash.flush(ctx, chat, width, assistant);
 }
+fn historyPageRows(ctx: fw.DrawContext, chat: *std.ArrayList(Row), entries: []const wire.TuiEntry, width: u16, assistant: []const u8) !usize {
+    var page: std.ArrayList(Row) = .empty;
+    try chatRows(ctx, &page, entries, width, assistant);
+    try chat.appendSlice(ctx.arena, page.items);
+    return page.items.len;
+}
 fn shortDirectory(a: std.mem.Allocator, directory: []const u8, home: ?[]const u8) ![]const u8 {
     if (home) |prefix| if (prefix.len > 0 and std.mem.startsWith(u8, directory, prefix) and (directory.len == prefix.len or directory[prefix.len] == '/')) return std.fmt.allocPrint(a, "~{s}", .{directory[prefix.len..]});
     return directory;
@@ -586,6 +594,18 @@ const Model = struct {
     scroll: usize = 0,
     scroll_max: usize = 0,
     chat_height: usize = 10,
+    scrollback: Scrollback = .{},
+    page_rows: usize = 0,
+    rendered_rows: usize = 0,
+    history_browsing: bool = false,
+    pad_newest: bool = false,
+    pin_top: bool = false,
+    older_wanted: bool = false,
+    auto_older: bool = false,
+    older_failed: bool = false,
+    older_budget: u8 = 0, // At most four invisible pages per upward gesture.
+    older_check_rows: ?usize = null,
+    older_started: u64 = 0,
     ticks: u64 = 0,
     frame: u64 = 0, // Monotonic 50ms quanta, not a count of rendered frames.
     animation_epoch: std.Io.Timestamp = .zero,
@@ -600,6 +620,9 @@ const Model = struct {
     online: bool = false,
     notice: [1024]u8 = undefined,
     notice_len: usize = 0,
+    fn loadingOlder(self: *Model) bool {
+        return self.auto_older and self.frame -| self.older_started >= 5;
+    }
     fn freshActivity(self: *Model) bool {
         return self.online and !self.bridge.failed and self.frame -| self.activity_seen < 100;
     }
@@ -622,6 +645,7 @@ const Model = struct {
     }
     fn deinit(self: *Model) void {
         if (self.snapshot) |s| s.deinit();
+        self.scrollback.clear(self.a);
         self.editor.deinit();
         self.command.deinit(self.a);
         self.paste_buffer.deinit(self.a);
@@ -631,6 +655,82 @@ const Model = struct {
     }
     fn state(self: *Model) ?wire.TuiSnapshot {
         return if (self.snapshot) |s| s.value.case0.snapshot else null;
+    }
+    fn chatVisible(self: *Model) bool {
+        return !self.tools_view and !self.help_visible and !self.brief_view and !self.model_picker and !self.task_picker and !self.hosts_view and !self.rex_view and !self.task_form;
+    }
+    fn resetHistory(self: *Model) void {
+        self.scrollback.clear(self.a);
+        self.history_browsing = false;
+        self.pad_newest = false;
+        self.pin_top = false;
+        self.older_wanted = false;
+        self.older_failed = false;
+        self.older_budget = 0;
+        self.older_check_rows = null;
+    }
+    fn scrollChat(self: *Model, up: bool, amount: usize) void {
+        if (!up) {
+            self.scroll -|= amount;
+            self.older_wanted = false;
+            self.older_budget = 0;
+            self.pin_top = false;
+            self.older_check_rows = null;
+            return;
+        }
+        self.scroll = @min(self.scroll_max, self.scroll +| amount);
+        if (self.scroll < self.scroll_max) return;
+        const s = self.state() orelse return;
+        if (!self.history_browsing) self.pad_newest = self.scroll_max == 0;
+        self.history_browsing = true;
+        self.pin_top = true; // Account for the scroll notice taking one row.
+        self.older_failed = false;
+        if (!s.hasOlder or self.auto_older) return;
+        self.older_wanted = true;
+        self.older_budget = 4;
+    }
+    fn flushOlder(self: *Model) !void {
+        if (!self.older_wanted or self.auto_older or self.pin_top or self.older_check_rows != null) return;
+        if (self.bridge.failed or self.older_budget == 0) {
+            self.older_wanted = false;
+            return;
+        }
+        if (self.bridge.pending != null or self.queued_send or !self.chatVisible() or self.command_mode or self.leader or self.paste_mode) return;
+        const s = self.state() orelse return;
+        if (!s.hasOlder or self.scroll < self.scroll_max) {
+            self.older_wanted = false;
+            return;
+        }
+        if (try self.bridge.request(.older, null, null)) {
+            self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake);
+            self.older_started = self.frame;
+            self.older_wanted = false;
+            self.auto_older = true;
+            self.older_budget -= 1;
+        }
+    }
+    fn acceptOlder(self: *Model, next: wire.TuiSnapshot) !void {
+        self.auto_older = false;
+        self.older_wanted = false;
+        self.pin_top = false;
+        self.older_failed = false;
+        const prior = self.state() orelse return;
+        // Empty/no-progress reads retain the current page; never duplicate it.
+        if (next.entries.len == 0 or prior.entries.len == 0 or next.entries[next.entries.len - 1].id >= prior.entries[0].id) return;
+        const expected_pages = self.scrollback.pages.items.len + 1;
+        const newest_rows = if (self.scrollback.pages.items.len > 0) self.scrollback.pages.items[0].rows else self.page_rows;
+        const old_padding = if (self.pad_newest) self.chat_height -| newest_rows else 0;
+        const dropped = try self.scrollback.retain(self.a, prior.entries, self.page_rows);
+        const trimmed = self.scrollback.pages.items.len < expected_pages;
+        // Padding belongs only to the original short newest page. Retiring
+        // that page must not attach fresh padding to another cached page.
+        if (trimmed) self.pad_newest = false;
+        self.scroll -|= dropped + (if (trimmed) old_padding else 0);
+        self.scroll_max -|= dropped + (if (trimmed) old_padding else 0);
+        self.rendered_rows -|= dropped;
+        // Independent page layout keeps old Markdown/bash groups and margins
+        // identical. Keeping the bottom-relative offset anchors the viewport.
+        if (self.older_budget > 0) self.older_check_rows = self.rendered_rows;
     }
     fn note(self: *Model, text: []const u8) void {
         var n = @min(text.len, self.notice.len);
@@ -838,7 +938,11 @@ const Model = struct {
             self.note("Message queued locally; Esc cancels before sending.");
             return;
         }
-        if (try self.bridge.request(action, if (action == .send) self.editor.text.items else null, if (action == .poll) self.scroll > 0 else null)) {
+        if (action == .latest or action == .older or action == .send) {
+            self.older_wanted = false;
+            self.older_budget = 0;
+        }
+        if (try self.bridge.request(action, if (action == .send) self.editor.text.items else null, if (action == .poll) (self.scroll > 0 or self.history_browsing) else null)) {
             self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake);
             if (action == .rexStatus or action == .rexInspect or action == .rexOpen) self.rex_view = true;
             if (action == .send or action == .retry or action == .stop or action == .rexOpen) {
@@ -1048,7 +1152,7 @@ const Model = struct {
         const down = key.matches(vaxis.Key.page_down, .{}) or (normal and (key.matches('d', .{ .ctrl = true }) or key.matches('f', .{ .ctrl = true })));
         if (up or down) {
             const amount = @max(1, if (key.matches('u', .{ .ctrl = true }) or key.matches('d', .{ .ctrl = true })) self.chat_height / 2 else self.chat_height);
-            self.scroll = if (up) @min(self.scroll_max, self.scroll + amount) else self.scroll -| amount;
+            self.scrollChat(up, amount);
             return;
         }
         if (self.focus == .chat) {
@@ -1059,11 +1163,11 @@ const Model = struct {
             }
             const count = @max(1, self.chat_count);
             self.chat_count = 0;
-            if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) self.scroll = @min(self.scroll_max, self.scroll + count) else if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) self.scroll -|= count else if (key.matches('G', .{})) {
+            if (key.matches('k', .{}) or key.matches(vaxis.Key.up, .{})) self.scrollChat(true, count) else if (key.matches('j', .{}) or key.matches(vaxis.Key.down, .{})) self.scrollChat(false, count) else if (key.matches('G', .{})) {
                 self.scroll = 0;
                 try self.issue(.latest);
             } else if (key.matches('g', .{})) {
-                if (self.chat_g) self.scroll = self.scroll_max;
+                if (self.chat_g) self.scrollChat(true, self.scroll_max);
                 self.chat_g = !self.chat_g;
                 return;
             } else if (key.matches('i', .{})) {
@@ -1097,9 +1201,10 @@ const Model = struct {
             .tick => {
                 const was_animated = self.animating();
                 const was_fresh = self.freshActivity();
+                const was_loading = self.loadingOlder();
                 self.frame = @intCast(@divFloor(@max(0, self.animation_epoch.durationTo(std.Io.Timestamp.now(ctx.io, .awake)).nanoseconds), 50 * std.time.ns_per_ms));
                 self.animations.advance(self.frame, self.freshBusy());
-                if (was_animated or self.animating() or was_fresh != self.freshActivity()) ctx.redraw = true;
+                if (was_animated or self.animating() or was_fresh != self.freshActivity() or was_loading != self.loadingOlder()) ctx.redraw = true;
                 if (stopping.load(.monotonic)) {
                     ctx.quit = true;
                     return;
@@ -1110,6 +1215,9 @@ const Model = struct {
                     if (self.terminal_status) |status| status.presentation.invalidate();
                     self.note(if (self.queued_send) "Client bridge lost; queued message not sent. Prompt preserved; detach with :q!." else "Client bridge lost; outcome unconfirmed. Saved drafts remain. Detach with :q.");
                     self.queued_send = false;
+                    self.older_wanted = false;
+                    self.auto_older = false;
+                    self.older_check_rows = null;
                     ctx.redraw = true;
                     try ctx.tick(50, self.widget());
                     return;
@@ -1120,6 +1228,11 @@ const Model = struct {
                     self.ticks = 0;
                     ctx.redraw = true;
                     if (response.value == .case1) {
+                        if (self.auto_older and action == .older) self.older_failed = true;
+                        self.auto_older = false;
+                        self.older_wanted = false;
+                        self.older_budget = 0;
+                        self.older_check_rows = null;
                         if (self.queued_send) {
                             const message = try std.fmt.allocPrint(self.a, "Queued message not sent; prompt preserved. {s}", .{response.value.case1.@"error"});
                             defer self.a.free(message);
@@ -1133,6 +1246,9 @@ const Model = struct {
                         response.deinit();
                     } else {
                         const s = response.value.case0.snapshot;
+                        const automatic_older = action == .older and self.auto_older;
+                        if (automatic_older) try self.acceptOlder(s);
+                        if (action == .select or action == .latest or (action == .older and !automatic_older) or action == .send or action == .retry) self.resetHistory();
                         if (self.snapshot == null or action == .select) self.animations.attach(self.frame, !std.mem.eql(u8, s.chatId, s.hubChatId));
                         if (action == .poll or action == .latest or action == .select) self.activity_seen = self.frame;
                         if (self.terminal_status) |status| if (s.cwd) |cwd| try status.identity(rune(s), cwd);
@@ -1190,7 +1306,7 @@ const Model = struct {
                             try self.editor.set("");
                             self.scroll = 0;
                         }
-                        if (action == .older or action == .latest) self.scroll = 0;
+                        if ((action == .older and !automatic_older) or action == .latest) self.scroll = 0;
                         if (action != .poll or self.snapshot == null) self.note(s.notice);
                         if (self.snapshot) |old| old.deinit();
                         self.snapshot = response;
@@ -1199,6 +1315,7 @@ const Model = struct {
                         try self.flushQueuedSend(); // Explicit sends take priority over background polling.
                     }
                 }
+                try self.flushOlder(); // Only explicit upward intent; never a polling crawl.
                 self.ticks += 1;
                 if (self.ticks % 10 == 0 and self.bridge.pending == null and !self.command_mode and !self.leader and !self.paste_mode and !self.model_picker and !self.task_picker and !self.hosts_view and !self.brief_view and !self.rex_view) {
                     try self.issue(.poll);
@@ -1251,7 +1368,9 @@ const Model = struct {
                 if (self.terminal_status) |status| status.presentation.acknowledge();
                 if (self.tools_view) {
                     if (mouse.button == .wheel_up) self.tools_scroll -|= 3 else if (mouse.button == .wheel_down) self.tools_scroll = @min(self.tools_max, self.tools_scroll + 3);
-                } else if (mouse.button == .wheel_up) self.scroll = @min(self.scroll_max, self.scroll + 3) else if (mouse.button == .wheel_down) self.scroll -|= 3;
+                } else if (self.chatVisible() and !self.command_mode and !self.paste_mode) {
+                    if (mouse.button == .wheel_up) self.scrollChat(true, 3) else if (mouse.button == .wheel_down) self.scrollChat(false, 3);
+                }
                 ctx.consumeAndRedraw();
             },
             else => {},
@@ -1414,17 +1533,35 @@ const Model = struct {
         const prompt_y = h - 3 - prompt_h;
         const upper = prompt_y - 1;
         const historical = if (s) |snap| snap.historical else false;
-        const away = self.scroll > 0 or historical;
+        const away = self.scroll > 0 or historical or self.history_browsing;
         // Give the scroll indicator its own last chat line; do not cover an
         // error/admission notice or a retained message with it.
         const notice_y = upper - 1 - @as(u16, if (away) 1 else 0);
         const chat_h = notice_y;
         self.chat_height = chat_h;
         var chat: std.ArrayList(Row) = .empty;
-        if (s) |snap| try chatRows(ctx, &chat, snap.entries, layout.body, rune(snap));
+        if (s) |snap| {
+            self.page_rows = try historyPageRows(ctx, &chat, snap.entries, layout.body, rune(snap));
+            var i = self.scrollback.pages.items.len;
+            while (i > 0) {
+                i -= 1;
+                const page = &self.scrollback.pages.items[i];
+                page.rows = try historyPageRows(ctx, &chat, page.entries(), layout.body, rune(snap));
+            }
+        }
+        self.rendered_rows = chat.items.len;
+        if (self.pad_newest) {
+            const newest_rows = if (self.scrollback.pages.items.len > 0) self.scrollback.pages.items[0].rows else self.page_rows;
+            try chat.appendNTimes(ctx.arena, .{}, chat_h -| newest_rows);
+        }
         if (chat.items.len == 0) try rows(ctx, &chat, if (s == null) (if (self.bridge.failed) "Selected hub connection failed; no local fallback." else if (self.worker_transport) "Connecting to the selected hub via this worker…" else "Connecting to the selected hub…") else if (self.readOnly()) "Read-only inspection · :rex open to participate" else "Enter to send · Esc for Normal mode · :help", layout.body, dim);
         self.scroll_max = chat.items.len -| chat_h;
-        self.scroll = @min(self.scroll, self.scroll_max);
+        self.scroll = if (self.pin_top) self.scroll_max else @min(self.scroll, self.scroll_max);
+        self.pin_top = false;
+        if (self.older_check_rows) |before| {
+            self.older_check_rows = null;
+            if (self.rendered_rows == before and self.scroll == self.scroll_max and self.older_budget > 0 and (if (s) |snap| snap.hasOlder else false)) self.older_wanted = true;
+        }
         const first = self.scroll_max - self.scroll;
         for (chat.items[first..@min(chat.items.len, first + chat_h)], 0..) |row, y| {
             if (row.user) for (0..layout.main) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = Theme.user });
@@ -1442,7 +1579,10 @@ const Model = struct {
                 }
             } else lineLimit(ctx, surface, layout.x, @intCast(y), row.text, row.style, null, 0, layout.x + layout.body);
         }
-        if (self.scroll > 0 or historical) lineLimit(ctx, surface, 1, upper - 1, if (historical) "Older history · :latest to return" else "Scrolled up · :latest to follow new messages", accent, null, 0, right);
+        if (away) {
+            const history_notice = if (self.loadingOlder()) "Loading older history…" else if (self.older_failed) "Older history unavailable · scroll up to retry" else if (self.history_browsing and self.scroll == self.scroll_max and !(if (s) |snap| snap.hasOlder else true)) "Start of history · :latest to return" else if (self.scrollback.newer_omitted) "Older history · newer pages trimmed · :latest to return" else if (historical or self.history_browsing) "Older history · :latest to return" else "Scrolled up · :latest to follow new messages";
+            lineLimit(ctx, surface, 1, upper - 1, history_notice, accent, null, 0, right);
+        }
         const sending = if (self.bridge.pending) |pending| pending.action == .send else false;
         const mode = if (self.readOnly()) "READ ONLY" else if (self.queued_send) "SEND QUEUED" else if (sending) "SENDING" else if (s != null and s.?.draft != null and !s.?.draft.?.saved) "LOCKED UNSAVED" else if (s != null and s.?.draft != null and s.?.draft.?.clipped) "SAVED PREVIEW" else if (s != null and s.?.draft != null and s.?.draft.?.saved) "SAVED LOCKED" else if (self.locked()) "LOCKED" else "";
         for (0..layout.main) |x| surface.writeCell(@intCast(x), upper, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = Theme.rule });
@@ -2710,4 +2850,110 @@ test "subagent sidebar coexists with inventory, marks stale samples, and stays b
         try std.testing.expect(std.mem.indexOf(u8, hidden, "SUBAGENTS") == null);
     };
     try std.testing.expect(bridge.pending == null);
+}
+
+test "automatic scrollback anchors Markdown and bash page boundaries through prepend, resize and eviction" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    defer bridge.output.deinit(a);
+    var model = try testChatModel(a, &bridge);
+    defer model.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    fw.DrawContext.init(.unicode);
+    var ctx: fw.DrawContext = .{ .arena = alloc, .min = .{}, .max = .{ .width = 100, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
+    const entries = [_]wire.TuiEntry{
+        .{ .id = 100, .role = .tool, .text = "bash\nold result\nlast line" },
+        .{ .id = 101, .role = .assistant, .text = "# Heading\n\n| Task | State |\n| --- | --- |\n| 界 | ready |\n\n```zig\nconst x = 1;\n```" },
+        .{ .id = 102, .role = .user, .text = "Keep my position" },
+    };
+    model.snapshot.?.value.case0.snapshot.entries = &entries;
+    model.snapshot.?.value.case0.snapshot.hasOlder = true;
+    try model.editor.set("unsent prompt");
+    _ = try Model.draw(&model, ctx);
+    model.scrollChat(true, 9999);
+    const before = try Model.draw(&model, ctx);
+    try model.flushOlder();
+    try std.testing.expect(model.auto_older);
+    try std.testing.expectEqual(Action.older, bridge.pending.?.action);
+    // Resizing while the request is pending recalculates each page's rows.
+    ctx.max = .{ .width = 60, .height = 24 };
+    const resized = try Model.draw(&model, ctx);
+    const original_scroll = model.scroll;
+    var next = model.state().?;
+    next.entries = &.{.{ .id = 99, .role = .tool, .text = "bash\nnewly loaded result" }};
+    next.historical = true;
+    bridge.pending = null;
+    try model.acceptOlder(next);
+    model.snapshot.?.value.case0.snapshot = next;
+    const after = try Model.draw(&model, ctx);
+    try std.testing.expectEqual(original_scroll, model.scroll);
+    for (0..model.chat_height) |y| try std.testing.expectEqualStrings(try testSurfaceRowText(alloc, resized, y, 0), try testSurfaceRowText(alloc, after, y, 0));
+    try std.testing.expectEqualStrings("unsent prompt", model.editor.text.items);
+    try std.testing.expectEqual(1, model.scrollback.pages.items.len);
+    try std.testing.expect(before.buffer.len > after.buffer.len);
+    // Load beyond the cache cap. Evict newer pages, not the visible oldest
+    // page; subtract their row counts so its anchor survives every trim.
+    for (0..Scrollback.max_pages + 3) |i| {
+        model.scrollChat(true, 9999);
+        const anchored = try Model.draw(&model, ctx);
+        var older = model.state().?;
+        const item = [_]wire.TuiEntry{.{ .id = @intCast(98 - i), .role = .assistant, .text = "Older page\n\nPreserve my viewport" }};
+        older.entries = &item;
+        try model.acceptOlder(older);
+        // Keep the current entry in the snapshot arena, like real replies.
+        const owned = model.snapshot.?.arena.allocator();
+        older.entries = try owned.dupe(wire.TuiEntry, &item);
+        model.snapshot.?.value.case0.snapshot = older;
+        const drawn = try Model.draw(&model, ctx);
+        for (0..model.chat_height) |y| try std.testing.expectEqualStrings(try testSurfaceRowText(alloc, anchored, y, 0), try testSurfaceRowText(alloc, drawn, y, 0));
+    }
+    try std.testing.expectEqual(Scrollback.max_pages, model.scrollback.pages.items.len);
+    try std.testing.expect(model.scrollback.newer_omitted);
+    model.resetHistory();
+    try std.testing.expectEqual(0, model.scrollback.pages.items.len);
+    try std.testing.expect(!model.history_browsing and !model.pad_newest and !model.older_wanted);
+}
+
+test "automatic older intent waits for the slot, yields to sends, cancels on down and stays out of dialogs" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined, .pending = .{ .version = 1, .id = "poll", .action = .poll } };
+    defer bridge.output.deinit(a);
+    var model = try testChatModel(a, &bridge);
+    defer model.deinit();
+    model.snapshot.?.value.case0.snapshot.hasOlder = true;
+    model.scroll_max = 10;
+    model.scrollChat(true, 10);
+    model.pin_top = false; // Draw acknowledges the reached boundary.
+    try model.flushOlder();
+    try std.testing.expect(model.older_wanted and bridge.sequence == 0);
+    model.scrollChat(false, 1);
+    bridge.pending = null;
+    try model.flushOlder();
+    try std.testing.expect(!model.older_wanted and bridge.sequence == 0);
+    model.scrollChat(true, 1);
+    model.pin_top = false;
+    model.queued_send = true;
+    try model.flushOlder();
+    try std.testing.expect(bridge.sequence == 0);
+    model.queued_send = false;
+    for ([_]*bool{ &model.help_visible, &model.tools_view, &model.model_picker, &model.task_picker, &model.hosts_view, &model.rex_view, &model.brief_view, &model.task_form, &model.command_mode, &model.leader, &model.paste_mode }) |flag| {
+        flag.* = true;
+        try model.flushOlder();
+        try std.testing.expect(bridge.sequence == 0);
+        flag.* = false;
+    }
+    try model.flushOlder();
+    try std.testing.expect(model.auto_older and !model.older_wanted);
+    try std.testing.expectEqual(1, bridge.sequence);
+    model.frame = model.older_started + 4;
+    try std.testing.expect(!model.loadingOlder());
+    model.frame += 3; // A delayed event loop can skip the exact five-tick boundary.
+    try std.testing.expect(model.loadingOlder());
+    for (0..5) |_| {
+        model.scrollChat(true, 3);
+        try model.flushOlder();
+    }
+    try std.testing.expectEqual(1, bridge.sequence);
 }

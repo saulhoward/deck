@@ -275,3 +275,18 @@ test("real PTY: consecutive bash results show one multiplier and only the latest
     await closed; await f.close();
   }
 });
+
+test("submitting from older history returns to live polling without replaying input", async () => {
+  const f = await fixture();
+  try {
+    await f.act("poll");
+    assert.equal((await f.act("older")).historical, true);
+    const sent = await f.act("send", { text: "Continue from this history view" });
+    assert.equal(sent.historical, false);
+    const next = await f.act("poll");
+    assert.equal(next.entries.at(-1)!.text, followup);
+    assert.equal(f.requests.filter(request => request.command === "admit").length, 1);
+    assert.equal(f.requests.at(-1).command, "history");
+    assert.equal(f.requests.at(-1).args.before, undefined);
+  } finally { await f.close(); }
+});

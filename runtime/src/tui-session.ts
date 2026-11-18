@@ -222,7 +222,10 @@ export class TuiSession {
     const ack = await this.command(method, { requestId, ...args, ...(kind === "input" ? { chatId } : {}) }, this.hubId);
     this.activeSaved = false;
     await this.store!.remove(requestId); this.active = undefined;
-    if (kind === "input") this.state!.notice = "Input admitted; completion not yet confirmed";
+    if (kind === "input") {
+      this.state!.historical = false; // The next unheld poll follows the new conversation turn.
+      this.state!.notice = "Input admitted; completion not yet confirmed";
+    }
     else {
       // Creation is acknowledged and the exact draft is cleared before this
       // separate best-effort terminal attempt. Losing its reply must not turn
