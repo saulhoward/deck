@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { clampThinkingLevel, getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai/models";
 import { agentStatus } from "./agent-status.js";
+import { validAgentName, validAgentRune, type SubagentSnapshot } from "./generated/contracts.js";
 import { sameSelection } from "./model-settings-contracts.js";
 import { validSetModelSettingsArgs, type ModelRef, type ModelSelection, type ModelSettingsSnapshot, type ModelSettingsAck, type SetModelSettingsArgs } from "./generated/contracts.js";
 import { AgentDoc, createRegistry, configure as configureAgent, defineDoc, defineDocFamily, Harness, LiveDoc, InboxDoc, type ConversationId, type Conversation, type AgentChange, type Cursor, type TaskId } from "@earendil-works/pi-durable";
@@ -705,7 +706,44 @@ export class DeckRuntime {
     const chat = await this.chat(id);
     return projectProgress(String(chat.id), await this.harness.snapshot(LiveDoc, chat.id, context));
   }
-  async activity(id: string, includeAgentStatus = false): Promise<ActivitySnapshot> {
+  private async subagents(parentId: ConversationId): Promise<SubagentSnapshot> {
+    // Ownership, not Deck's display hints, defines the scope. Scan once; never
+    // refill a sparse page with a global scan or walk an unbounded child tree.
+    const page = await this.harness.commit(async (tx) => {
+      const scanned = await tx.scanConversations({ ownerConversationId: parentId, order: "descending" }, 16);
+      const items = []; let hasMore = !!scanned.next;
+      for (const record of scanned.items) {
+        const owner = record.owner;
+        if (!owner || owner.conversationId !== parentId || (await tx.task(owner.taskId))?.conversationId !== parentId) { hasMore = true; continue; }
+        items.push(record);
+      }
+      return { items, hasMore };
+    }, context);
+    const result: SubagentSnapshot = { chatId: String(parentId), items: [], hasMore: page.hasMore };
+    for (const record of page.items) {
+      // snapshot is deliberately outside commit: tx.doc would create metadata
+      // on unmanaged Pi children, and snapshot itself must not nest a commit.
+      const metadata = await this.harness.snapshot(ChatDoc, record.id, context);
+      if (!metadata || metadata.kind !== "subagent" || metadata.parentChatId !== String(parentId) || metadata.ownerTaskId !== String(record.owner!.taskId) || typeof metadata.title !== "string" || !metadata.title.isWellFormed()) {
+        result.hasMore = true; continue;
+      }
+      const item: SubagentSnapshot["items"][number] = {
+        chatId: String(record.id), title: prefixUnits(metadata.title, 160),
+        ...(validAgentName(metadata.agentName) ? { agentName: metadata.agentName } : {}),
+        ...(validAgentRune(metadata.agentRune) && metadata.agentRune !== "Δ" ? { agentRune: metadata.agentRune } : {}),
+      };
+      try {
+        const inbox = await this.harness.snapshot(InboxDoc, record.id, context);
+        item.status = await this.harness.commit(tx => agentStatus(tx, record.id, (inbox?.items.length ?? 0) > 0), context);
+      } catch { /* An unavailable status is unknown (absent), never invented idle. */ }
+      result.items.push(item);
+    }
+    // Immutable ownership makes separate document/status samples safe to scope;
+    // their observations can still be superseded by concurrent child work.
+    return result;
+  }
+
+  async activity(id: string, includeAgentStatus = false, includeSubagents = false): Promise<ActivitySnapshot> {
     const chat = await this.chat(id);
     const [live, inbox] = await Promise.all([
       this.harness.snapshot(LiveDoc, chat.id, context), this.harness.snapshot(InboxDoc, chat.id, context),
@@ -717,6 +755,7 @@ export class DeckRuntime {
     return {
       chatId: String(chat.id), busy: !!live?.run, queued: inbox?.items.length ?? 0,
       ...(includeAgentStatus ? { agentStatus: await chat.commit((tx) => agentStatus(tx, chat.id, (inbox?.items.length ?? 0) > 0), context) } : {}),
+      ...(includeSubagents ? { subagents: await this.subagents(chat.id) } : {}),
       ...(live?.run ? { runTaskId: String(live.run.taskId) } : {}),
       ...(live?.generation ? { generation: { attempt: live.generation.attempt, phase: live.generation.retry ? "retrying" : live.generation.deferred ? "deferred" : "generating" } } : {}),
       tools: tools.slice(0, 32).map((tool) => ({ callId: prefixUnits(tool.callId, 128), name: prefixUnits(tool.name, 80), status: tool.status, ...(tool.taskId === undefined ? {} : { taskId: String(tool.taskId) }), nested: "parentTaskId" in tool })),

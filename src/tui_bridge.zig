@@ -224,6 +224,7 @@ pub fn validReply(value: std.json.Value, expected: []const u8, hub_id: ?[]const 
         if (rex.object.get("inspection")) |inspection| if (!@import("rex_open.zig").validReply("rex_inspect", args, s.object.get("hubId").?, inspection)) return false;
     }
     if (s.object.get("agentStatus")) |status| if (!@import("views.zig").validAgentStatus(status)) return false;
+    if (s.object.get("subagents")) |children| if (!@import("views.zig").validSubagents(children, s.object.get("chatId"))) return false;
     if (s.object.get("modelSettings")) |settings| {
         if (!model_settings.validSnapshot(settings) or !std.mem.eql(u8, settings.object.get("hubId").?.string, s.object.get("hubId").?.string) or !std.mem.eql(u8, settings.object.get("chatId").?.string, chat)) return false;
     }
@@ -576,5 +577,56 @@ test "structured content matches flat text and byte bounds before renderer displ
         const encoded = try std.json.Stringify.valueAlloc(a, entries[0..length], .{});
         try snapshot.object.put(a, "entries", (try std.json.parseFromSlice(std.json.Value, a, encoded, .{})).value);
         try std.testing.expectEqual(length == 16, validReply(response, "1", "hub", "1"));
+    }
+}
+
+test "renderer subagent samples validate nested semantics and selected-chat scope before display" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var response = (try std.json.parseFromSlice(std.json.Value, a,
+        \\{"version":1,"id":"1","ok":true,"snapshot":{"clientMode":"hub","hubChatId":"1","hubId":"hub","chatId":"1","title":"Task","model":"mock","tools":"offline","activityKnown":false,"busy":false,"queued":0,"entries":[],"hasOlder":false,"historical":false,"preview":"","notice":"","draft":null}}
+    , .{})).value;
+    const snapshot = response.object.getPtr("snapshot").?;
+    // Reuse the shared semantic corpus at the final native renderer boundary.
+    // Request-shape and outer-request scope cases belong to the live-view guard.
+    const fixtures = try std.json.parseFromSlice(std.json.Value, a, @embedFile("views.test.json"), .{});
+    for (fixtures.value.array.items) |fixture| {
+        if (!std.mem.startsWith(u8, fixture.object.get("name").?.string, "subagents ")) continue;
+        const args = fixture.object.get("args").?;
+        if (!@import("views.zig").validArgs("activity", args)) continue;
+        const activity = fixture.object.get("result").?;
+        const chat = activity.object.get("chatId").?;
+        if (args == .object) if (args.object.get("chatId")) |requested| {
+            if (!std.mem.eql(u8, requested.string, chat.string)) continue;
+        };
+        try snapshot.object.put(a, "chatId", chat);
+        _ = snapshot.object.swapRemove("subagents");
+        if (activity.object.get("subagents")) |children| try snapshot.object.put(a, "subagents", children);
+        const expected = fixture.object.get("valid").?.bool;
+        // Even on first reply without an externally pinned chat, nested samples
+        // must bind to the containing snapshot, never an arbitrary parent.
+        if (validReply(response, "1", "hub", null) != expected or validReply(response, "1", "hub", chat.string) != expected) {
+            std.debug.print("renderer subagent fixture failed: {s}\n", .{fixture.object.get("name").?.string});
+            return error.InvalidSubagentContract;
+        }
+    }
+    // A selected task's children are scoped to that task, not the hub chat.
+    try snapshot.object.put(a, "chatId", .{ .string = "2" });
+    for ([_][]const u8{ "hub", "task" }) |mode| {
+        try snapshot.object.put(a, "clientMode", .{ .string = mode });
+        for ([_]struct { parent: []const u8, valid: bool }{
+            .{ .parent = "2", .valid = true },
+            .{ .parent = "1", .valid = false },
+            .{ .parent = "3", .valid = false },
+        }) |case| {
+            var children = (try std.json.parseFromSlice(std.json.Value, a,
+                \\{"chatId":"2","items":[{"chatId":"4","title":"Child","status":{"state":"working"}}],"hasMore":false}
+            , .{})).value;
+            try children.object.put(a, "chatId", .{ .string = case.parent });
+            try snapshot.object.put(a, "subagents", children);
+            try std.testing.expectEqual(case.valid, validReply(response, "1", "hub", "2"));
+            try std.testing.expectEqual(case.valid, validReply(response, "1", "hub", null));
+        }
     }
 }

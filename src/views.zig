@@ -42,9 +42,25 @@ pub fn validAgentStatus(value: std.json.Value) bool {
     if (std.mem.eql(u8, state, "done") or std.mem.eql(u8, state, "error")) return if (id) |v| safeId(v) else false;
     return id == null;
 }
+pub fn validSubagents(value: std.json.Value, chat: ?std.json.Value) bool {
+    if (!wire.validSubagentSnapshot(value) or !same(value.object.get("chatId").?, chat)) return false;
+    const parent = std.fmt.parseInt(u64, value.object.get("chatId").?.string, 10) catch return false;
+    var previous: u64 = std.math.maxInt(u64);
+    for (value.object.get("items").?.array.items) |child| {
+        const id = child.object.get("chatId").?;
+        if (!safeId(id)) return false;
+        const n = std.fmt.parseInt(u64, id.string, 10) catch return false;
+        if (n <= parent or n >= previous or !unitsWithin(child.object.get("title").?, 160)) return false;
+        if (child.object.get("agentRune")) |rune| if (std.mem.eql(u8, rune.string, "Δ")) return false;
+        if (child.object.get("status")) |status| if (!validAgentStatus(status)) return false;
+        previous = n;
+    }
+    return true;
+}
 fn activity(value: std.json.Value, chat: ?std.json.Value) bool {
     if (!wire.validActivitySnapshot(value) or !same(value.object.get("chatId").?, chat)) return false;
     if (value.object.get("agentStatus")) |status| if (!validAgentStatus(status)) return false;
+    if (value.object.get("subagents")) |children| if (!validSubagents(children, value.object.get("chatId"))) return false;
     if (value.object.get("runTaskId")) |id| if (!safeId(id)) return false;
     for (value.object.get("tools").?.array.items) |tool| {
         if (!unitsWithin(tool.object.get("callId").?, 128) or !unitsWithin(tool.object.get("name").?, 80)) return false;

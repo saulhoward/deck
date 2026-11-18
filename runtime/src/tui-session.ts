@@ -6,7 +6,7 @@ import { validInventoryFields } from "./tool-inventory-contracts.js";
 import { localGitBranch } from "./tui-workspace.js";
 import { canParticipate, requireParticipation, requireNavigation, requireCreation, inspectOnly } from "./client-access.js";
 import type { TuiClientMode } from "./generated/contracts.js";
-import { validAgentStatus } from "./view-contracts.js";
+import { validAgentStatus, validSubagents } from "./view-contracts.js";
 import { validRexReply } from "./rex-open-contracts.js";
 import { sameSelection, validModelSettingsSnapshot } from "./model-settings-contracts.js";
 import { randomUUID } from "node:crypto";
@@ -56,6 +56,7 @@ export function validReply(value: unknown, id: string, hubId?: string, chatId?: 
   if (s.rex && (!validRexReply({ command: "rex_status", args: { chatId: s.chatId }, hubId: s.hubId }, s.rex.status) || (s.rex.inspection && !validRexReply({ command: "rex_inspect", args: { chatId: s.chatId }, hubId: s.hubId }, s.rex.inspection)))) return false;
   if (!validInventoryFields(s)) return false;
   if (s.agentStatus && !validAgentStatus(s.agentStatus)) return false;
+  if (s.subagents !== undefined && !validSubagents(s.subagents, s.chatId)) return false;
   if (s.modelSettings && (!validModelSettingsSnapshot(s.modelSettings) || s.modelSettings.hubId !== s.hubId || s.modelSettings.chatId !== s.chatId)) return false;
   if (s.entries.reduce((bytes, item) => bytes + Buffer.byteLength(item.text), 0) > 128 * 1024) return false;
   return s.entries.every((item, i) => Buffer.byteLength(item.text) <= entryBytes &&
@@ -172,7 +173,7 @@ export class TuiSession {
   private async history(before?: string) {
     let limit = 80;
     for (;;) {
-      try { return await this.command("history", { chatId: this.chatId, limit, ...(before ? { before } : {}), includeActivity: true, includeAgentStatus: true, includeProgress: true }, this.hubId); }
+      try { return await this.command("history", { chatId: this.chatId, limit, ...(before ? { before } : {}), includeActivity: true, includeAgentStatus: true, includeSubagents: true, includeProgress: true }, this.hubId); }
       catch (error) { if (!(error instanceof HubError) || error.policy.action !== "reduce_page" || limit === 1) throw error; limit = Math.max(1, Math.floor(limit / 2)); }
     }
   }
@@ -199,6 +200,8 @@ export class TuiSession {
   private sample(page: any) {
     // Absence is unknown, never a fresh replay of an old completion/idle sample.
     delete this.state!.agentStatus;
+    delete this.state!.subagents;
+    if (page.activity?.subagents) this.state!.subagents = { ...page.activity.subagents, items: page.activity.subagents.items.map((item: import("./generated/contracts.js").SubagentItem) => ({ ...item, title: displayText(item.title, 160).replace(/\n/g, " ") })) };
     if (page.activity?.agentStatus) this.state!.agentStatus = page.activity.agentStatus;
     if (page.activity) { this.state!.activityKnown = true; this.state!.busy = page.activity.busy; this.state!.queued = page.activity.queued; }
     if (page.progress) this.state!.preview = displayText([page.progress.generation?.text ?? "", ...(page.progress.tools ?? []).map((tool: any) => `[${tool.name}] ${tool.text}`)].filter(Boolean).join("\n"), 4096);
@@ -329,7 +332,7 @@ export class TuiSession {
           state.entries = rendered.entries; this.before = rendered.next; state.hasOlder = !!rendered.next; state.historical = false; this.sample(page);
         } else {
           // Keep a scrolled/history window stable; samples never replace it.
-          const activity = await this.command("activity", { chatId: this.chatId, includeAgentStatus: true }, this.hubId);
+          const activity = await this.command("activity", { chatId: this.chatId, includeAgentStatus: true, includeSubagents: true }, this.hubId);
           const progress = await this.command("progress", { chatId: this.chatId }, this.hubId);
           this.sample({ activity, progress });
         }

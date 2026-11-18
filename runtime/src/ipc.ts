@@ -85,7 +85,7 @@ export async function dispatch(runtime: DeckRuntime, request: Record<string, unk
     case "progress": {
       if (!validLiveArgs(args)) throw new DeckError("invalid", "Invalid live view arguments");
       const id = args.chatId ?? String(runtime.main.id);
-      return request.command === "activity" ? runtime.activity(id, args.includeAgentStatus === true) : runtime.progress(id);
+      return request.command === "activity" ? runtime.activity(id, args.includeAgentStatus === true, args.includeSubagents === true) : runtime.progress(id);
     }
     case "mcp_catalog":
     case "tool_profiles":
@@ -131,7 +131,7 @@ export async function dispatch(runtime: DeckRuntime, request: Record<string, unk
       if (!validHistoryArgs(args)) throw new DeckError("invalid", "Invalid history arguments");
       const id = args.chatId;
       const page = await runtime.history(id, { ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.before === undefined ? {} : { before: args.before }), ...(args.after === undefined ? {} : { after: args.after }) });
-      const canonical = { ...page, ...(args.includeActivity ? { activity: await runtime.activity(id, args.includeAgentStatus === true) } : {}) };
+      const canonical = { ...page, ...(args.includeActivity ? { activity: await runtime.activity(id, args.includeAgentStatus === true, args.includeSubagents === true) } : {}) };
       if (!args.includeProgress && !args.includeInstructions) return canonical;
       const combined = { ...canonical, ...(args.includeProgress ? { progress: await runtime.progress(id) } : {}), ...(args.includeInstructions ? { instructions: await runtime.instructionsStatus(id) } : {}) };
       // Optional previews/instruction samples never make fitting canonical history fail.

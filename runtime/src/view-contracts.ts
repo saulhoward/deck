@@ -21,9 +21,23 @@ export function validAgentStatus(value: unknown): value is wire.AgentStatus {
     && (value.state === "done" || value.state === "error" ? validSafePiId(value.taskId) : value.taskId === undefined)
     && (value.settledTaskId === undefined || (value.state === "working" && validSafePiId(value.settledTaskId)));
 }
+export function validSubagents(value: unknown, chatId?: string): value is wire.SubagentSnapshot {
+  if (!wire.validSubagentSnapshot(value) || !scope(value.chatId, chatId)) return false;
+  const parent = Number(value.chatId);
+  let previous = Infinity;
+  for (const child of value.items) {
+    if (!validSafePiId(child.chatId)) return false;
+    const id = Number(child.chatId);
+    if (id <= parent || id >= previous || child.title.length > 160 || child.agentRune === "Δ") return false;
+    if (child.status !== undefined && !validAgentStatus(child.status)) return false;
+    previous = id;
+  }
+  return true;
+}
 export function validActivity(value: unknown, chatId?: string): value is wire.ActivitySnapshot {
   return wire.validActivitySnapshot(value) && scope(value.chatId, chatId)
     && (value.agentStatus === undefined || validAgentStatus(value.agentStatus))
+    && (value.subagents === undefined || validSubagents(value.subagents, value.chatId))
     && (value.runTaskId === undefined || validSafePiId(value.runTaskId))
     && value.tools.every((tool) => tool.callId.length <= 128 && tool.name.length <= 80 && (tool.taskId === undefined || validSafePiId(tool.taskId)));
 }

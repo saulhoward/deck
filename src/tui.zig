@@ -1,5 +1,6 @@
 //! Local chat renderer. No Pi runtime, transcript store, admission queue,
-//! retry timer, or implicit terminal creation lives here.
+//! retry timer, or implicit terminal creation lives here. A single explicit
+//! send can wait locally in the locked prompt for the bridge request slot.
 const std = @import("std");
 const vaxis = @import("vaxis");
 const fw = vaxis.vxfw;
@@ -24,8 +25,9 @@ const help =
     \\Ctrl-W k / j          focus chat / prompt
     \\Chat j/k, gg/G        scroll / oldest loaded / latest
     \\Ctrl-U/D, Ctrl-B/F    half / full page (Normal mode)
-    \\Mouse drag           terminal selection; use terminal Copy/Paste
-    \\:mouse-toggle        opt into wheel reporting (Shift-drag to select)
+    \\Mouse wheel          scroll chat in any editing mode
+    \\Shift-drag           terminal selection; use terminal Copy/Paste
+    \\:mouse-toggle        opt out of wheel reporting for native selection
     \\:older, :latest       bounded canonical history pages
     \\
     \\Prompt i a I A o O    enter Insert mode; Esc returns to Normal
@@ -36,7 +38,8 @@ const help =
     \\v                     edit prompt in $EDITOR (Normal mode)
     \\V, u, Ctrl-R          linewise visual selection, undo / redo
     \\Space t / m / n       tasks / models / new task (Normal mode)
-    \\Enter                 send; Shift-Enter (or Insert Ctrl-J) newline
+    \\Enter                 send (waits for request slot); Esc cancels wait
+    \\Shift-Enter/Ctrl-J     newline in Insert mode
     \\:sidebar-toggle       override responsive right sidebar visibility
     \\:tools                full tool inventory; j/k, PgUp/PgDn, g/G, Esc
     \\
@@ -405,6 +408,39 @@ test "task display groups children without changing the canonical page or IDs" {
     try std.testing.expectEqualStrings("3", page.items[1].chatId);
     try std.testing.expectEqualStrings("10", page.next.?);
 }
+// A bounded sample of direct Pi-owned children, never a second task tracker.
+// Keep status visible even when a name/title is too wide for the sidebar.
+fn subagentRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), sample: ?wire.SubagentSnapshot, width: u16, budget: usize, stale: bool) !void {
+    if (budget == 0) return;
+    const children = sample orelse {
+        try list.append(ctx.arena, .{ .text = "Unavailable", .style = dim });
+        return;
+    };
+    if (children.items.len == 0) {
+        try list.append(ctx.arena, .{ .text = if (children.hasMore) "Children omitted" else "None", .style = dim });
+        return;
+    }
+    const overflow = children.hasMore or children.items.len > budget;
+    const count = @min(children.items.len, budget - @intFromBool(overflow));
+    for (children.items[0..count]) |child| {
+        const status = if (child.status) |value| @tagName(value.state) else "unknown";
+        const style = if (stale) dim else if (child.status) |value| switch (value.state) {
+            .working => base,
+            .done => Theme.green,
+            .@"error" => Theme.orange,
+            .idle => dim,
+        } else dim;
+        const label = try std.fmt.allocPrint(ctx.arena, "{s} {s}", .{ child.agentRune orelse "·", child.agentName orelse child.title });
+        const status_width = @min(width, displayWidth(ctx, status));
+        const shown = try animatedText(ctx, label, @intCast(width -| (status_width + 1)), null);
+        var text: std.ArrayList(u8) = .empty;
+        try text.appendSlice(ctx.arena, shown);
+        try text.appendNTimes(ctx.arena, ' ', width - status_width - displayWidth(ctx, shown));
+        try text.appendSlice(ctx.arena, status);
+        try list.append(ctx.arena, .{ .text = text.items, .style = style });
+    }
+    if (overflow) try list.append(ctx.arena, .{ .text = try std.fmt.allocPrint(ctx.arena, "{d}{s} more", .{ children.items.len - count, if (children.hasMore) "+" else "" }), .style = dim });
+}
 // Compact sidebar and expanded inventory share one projection. Compact rows
 // never claim clipped data is complete: the sidebar links to the scrollable view.
 fn inventoryRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), snapshot: ?wire.TuiSnapshot, width: u16, compact: bool) !void {
@@ -504,7 +540,8 @@ const Model = struct {
     model_picker: bool = false,
     model_index: usize = 0,
     filter: Filter = .{},
-    mouse_tracking: bool = false,
+    mouse_tracking: bool = true,
+    queued_send: bool = false, // One local send intent; exact bytes stay locked in editor.
     home: ?[]const u8 = null,
     task_picker: bool = false,
     task_index: usize = 0,
@@ -546,8 +583,11 @@ const Model = struct {
     online: bool = false,
     notice: [1024]u8 = undefined,
     notice_len: usize = 0,
+    fn freshActivity(self: *Model) bool {
+        return self.online and !self.bridge.failed and self.frame -| self.activity_seen < 100;
+    }
     fn freshBusy(self: *Model) bool {
-        if (!self.online or self.bridge.failed or self.frame -| self.activity_seen >= 100) return false;
+        if (!self.freshActivity()) return false;
         const s = self.state() orelse return false;
         return s.activityKnown and (s.busy or s.queued > 0);
     }
@@ -582,6 +622,7 @@ const Model = struct {
         self.notice_len = n;
     }
     fn locked(self: *Model) bool {
+        if (self.queued_send) return true;
         if (self.state()) |s| if (s.draft != null) return true;
         if (self.bridge.pending) |p| if (p.action == .send or p.action == .retry or p.action == .discard or p.action == .create or p.action == .select) return true;
         return self.uncertain or self.snapshot == null or self.bridge.failed;
@@ -756,6 +797,7 @@ const Model = struct {
         if (started) self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake) else self.note("Client request in flight; task creation not queued.");
     }
     fn issue(self: *Model, action: Action) !void {
+        if (action == .send and self.queued_send) return; // Repeated Enter is not another message.
         if (action == .hosts and !self.canList()) return;
         if (action == .send and self.task_form) return self.submitTaskForm();
         if ((action == .send or action == .retry or action == .discard or action == .stop or action == .configure) and !self.canWrite()) return;
@@ -772,6 +814,13 @@ const Model = struct {
             return;
         }
         if (action == .send and std.mem.trim(u8, self.editor.text.items, " \t\r\n").len == 0) return;
+        if (action == .send and self.bridge.pending != null) {
+            // No request ID/admission yet. Keep one immutable prompt locally,
+            // then recheck the normal guards after the outstanding reply.
+            self.queued_send = true;
+            self.note("Message queued locally; Esc cancels before sending.");
+            return;
+        }
         if (try self.bridge.request(action, if (action == .send) self.editor.text.items else null, if (action == .poll) self.scroll > 0 else null)) {
             self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake);
             if (action == .rexStatus or action == .rexInspect or action == .rexOpen) self.rex_view = true;
@@ -780,7 +829,14 @@ const Model = struct {
             }
         } else self.note("Client request in flight; action not queued. Try again after its reply.");
     }
+    fn flushQueuedSend(self: *Model) !void {
+        if (!self.queued_send or self.bridge.pending != null) return;
+        self.queued_send = false;
+        try self.issue(.send); // Rechecks drafts, settings, authority and the fenced bridge.
+        if (self.bridge.pending) |pending| if (pending.action == .send) self.note("Sending message; awaiting acknowledgement.");
+    }
     fn quit(self: *Model, ctx: *fw.EventContext, force: bool) void {
+        self.queued_send = false; // A detach attempt must not send later while protecting unsaved text.
         const saved = if (self.state()) |s| (if (s.draft) |draft| draft.saved and (draft.kind == .input or (self.task_form and draft.kind == .task)) else false) else false;
         if (!force and self.editor.text.items.len > 0 and !saved) {
             self.note("Prompt has no confirmed saved draft. :send / :retry, or :q! to detach without it.");
@@ -833,6 +889,12 @@ const Model = struct {
         }
         if (key.matches('c', .{ .ctrl = true })) {
             self.quit(ctx, false);
+            return;
+        }
+        if (self.queued_send and !self.command_mode and key.matches(vaxis.Key.escape, .{})) {
+            self.queued_send = false;
+            self.editor.mode = .normal;
+            self.note("Queued send cancelled; prompt preserved.");
             return;
         }
         if (self.tools_view) {
@@ -1008,8 +1070,8 @@ const Model = struct {
         };
         switch (ev) {
             .init => {
-                // vxfw enables tracking during startup. Release it by default
-                // so the terminal owns drag selection and its normal Copy action.
+                // Wheel reporting stays enabled across focus/mode changes and
+                // editor re-entry unless the user explicitly opts out.
                 if (self.terminal_status) |status| try status.vx.setMouseMode(status.writer, self.mouse_tracking);
                 try ctx.requestFocus(self.widget());
                 try self.issue(.poll);
@@ -1017,9 +1079,10 @@ const Model = struct {
             },
             .tick => {
                 const was_animated = self.animating();
+                const was_fresh = self.freshActivity();
                 self.frame = @intCast(@divFloor(@max(0, self.animation_epoch.durationTo(std.Io.Timestamp.now(ctx.io, .awake)).nanoseconds), 50 * std.time.ns_per_ms));
                 self.animations.advance(self.frame, self.freshBusy());
-                if (was_animated or self.animating()) ctx.redraw = true;
+                if (was_animated or self.animating() or was_fresh != self.freshActivity()) ctx.redraw = true;
                 if (stopping.load(.monotonic)) {
                     ctx.quit = true;
                     return;
@@ -1028,7 +1091,8 @@ const Model = struct {
                 const received = self.bridge.poll() catch {
                     self.online = false;
                     if (self.terminal_status) |status| status.presentation.invalidate();
-                    self.note("Client bridge lost; outcome unconfirmed. Saved drafts remain. Detach with :q.");
+                    self.note(if (self.queued_send) "Client bridge lost; queued message not sent. Prompt preserved; detach with :q!." else "Client bridge lost; outcome unconfirmed. Saved drafts remain. Detach with :q.");
+                    self.queued_send = false;
                     ctx.redraw = true;
                     try ctx.tick(50, self.widget());
                     return;
@@ -1039,7 +1103,12 @@ const Model = struct {
                     self.ticks = 0;
                     ctx.redraw = true;
                     if (response.value == .case1) {
-                        self.note(response.value.case1.@"error");
+                        if (self.queued_send) {
+                            const message = try std.fmt.allocPrint(self.a, "Queued message not sent; prompt preserved. {s}", .{response.value.case1.@"error"});
+                            defer self.a.free(message);
+                            self.note(message);
+                            self.queued_send = false;
+                        } else self.note(response.value.case1.@"error");
                         self.online = false;
                         if (self.terminal_status) |status| status.presentation.invalidate();
                         if (action == .send or action == .retry or action == .create) self.uncertain = true;
@@ -1110,6 +1179,7 @@ const Model = struct {
                         self.snapshot = response;
                         self.online = true;
                         self.animations.advance(self.frame, self.freshBusy());
+                        try self.flushQueuedSend(); // Explicit sends take priority over background polling.
                     }
                 }
                 self.ticks += 1;
@@ -1326,7 +1396,12 @@ const Model = struct {
         const prompt_h: u16 = @intCast(@min(@max(2, @min(h / 2, h - 7)), @max(2, prompt.items.len)));
         const prompt_y = h - 3 - prompt_h;
         const upper = prompt_y - 1;
-        const chat_h = upper - 1;
+        const historical = if (s) |snap| snap.historical else false;
+        const away = self.scroll > 0 or historical;
+        // Give the scroll indicator its own last chat line; do not cover an
+        // error/admission notice or a retained message with it.
+        const notice_y = upper - 1 - @as(u16, if (away) 1 else 0);
+        const chat_h = notice_y;
         self.chat_height = chat_h;
         var chat: std.ArrayList(Row) = .empty;
         if (s) |snap| try chatRows(ctx, &chat, snap.entries, layout.body, rune(snap));
@@ -1350,7 +1425,9 @@ const Model = struct {
                 }
             } else lineLimit(ctx, surface, layout.x, @intCast(y), row.text, row.style, null, 0, layout.x + layout.body);
         }
-        const mode = if (self.readOnly()) "READ ONLY" else if (s != null and s.?.draft != null and !s.?.draft.?.saved) "LOCKED UNSAVED" else if (s != null and s.?.draft != null and s.?.draft.?.clipped) "SAVED PREVIEW" else if (s != null and s.?.draft != null and s.?.draft.?.saved) "SAVED LOCKED" else if (self.locked()) "LOCKED" else "";
+        if (self.scroll > 0 or historical) lineLimit(ctx, surface, 1, upper - 1, if (historical) "Older history · :latest to return" else "Scrolled up · :latest to follow new messages", accent, null, 0, right);
+        const sending = if (self.bridge.pending) |pending| pending.action == .send else false;
+        const mode = if (self.readOnly()) "READ ONLY" else if (self.queued_send) "SEND QUEUED" else if (sending) "SENDING" else if (s != null and s.?.draft != null and !s.?.draft.?.saved) "LOCKED UNSAVED" else if (s != null and s.?.draft != null and s.?.draft.?.clipped) "SAVED PREVIEW" else if (s != null and s.?.draft != null and s.?.draft.?.saved) "SAVED LOCKED" else if (self.locked()) "LOCKED" else "";
         for (0..layout.main) |x| surface.writeCell(@intCast(x), upper, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = Theme.rule });
         for (0..w) |x| surface.writeCell(@intCast(x), h - 3, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = Theme.rule });
         const border = try std.fmt.allocPrint(ctx.arena, " {s}{s} ", .{ if (self.task_form) "TASK BRIEF " else "", mode });
@@ -1375,17 +1452,17 @@ const Model = struct {
         const warning_x: u16 = @intCast(right - @min(right - 1, displayWidth(ctx, warning)));
         const notice_right = if (self.command_mode and warning.len > 0) warning_x -| 1 else right;
         const notice = self.notice[0..self.notice_len];
-        lineLimit(ctx, surface, 1, upper - 1, notice, dim, null, 0, notice_right);
+        lineLimit(ctx, surface, 1, notice_y, notice, dim, null, 0, notice_right);
         if (notice.len == 0) if (s) |snap| {
             const preview = snap.preview[0 .. std.mem.indexOfScalar(u8, snap.preview, '\n') orelse snap.preview.len];
-            if (preview.len > 0) lineLimit(ctx, surface, layout.x, upper - 1, try std.fmt.allocPrint(ctx.arena, "live · {s}", .{preview}), dim, null, 0, notice_right);
+            if (preview.len > 0) lineLimit(ctx, surface, layout.x, notice_y, try std.fmt.allocPrint(ctx.arena, "live · {s}", .{preview}), dim, null, 0, notice_right);
         };
         var cursor_row: usize = 0;
         for (prompt.items, 0..) |row, i| if (self.editor.cursor >= row.offset) {
             cursor_row = i;
         };
         const start = (cursor_row + 1) -| prompt_h;
-        for (prompt.items[start..@min(prompt.items.len, start + prompt_h)], 0..) |row, y| lineLimit(ctx, surface, layout.x, @intCast(prompt_y + y), row.text, base, self.editor.selection(), row.offset, layout.x + layout.body);
+        for (prompt.items[start..@min(prompt.items.len, start + prompt_h)], 0..) |row, y| lineLimit(ctx, surface, layout.x, @intCast(prompt_y + y), row.text, if (self.queued_send or sending) dim else base, if (self.queued_send or sending) null else self.editor.selection(), row.offset, layout.x + layout.body);
         if (self.focus == .prompt and !self.command_mode and !self.locked() and !self.readOnly()) {
             const row = prompt.items[cursor_row];
             const end = @min(self.editor.cursor - row.offset, row.text.len);
@@ -1406,11 +1483,22 @@ const Model = struct {
             lineLimit(ctx, surface, identity_x, 2, identity, Theme.orange, null, 0, w - 1);
             lineLimit(ctx, surface, role_x, 4, role, dim, null, 0, w - 1);
             if (h >= 12) {
-                lineLimit(ctx, surface, layout.main + 2, 6, if (self.online) "TOOLS" else "TOOLS · STALE", if (self.online) accent else Theme.orange, null, 0, w - 1);
+                var tools_y: u16 = 6;
+                // Leave room for the tool heading, inventory and full-view hint.
+                // Tiny terminals keep the existing compact inventory layout.
+                if (h >= 16) {
+                    const stale = !self.freshActivity();
+                    lineLimit(ctx, surface, layout.main + 2, 6, if (stale) "SUBAGENTS · STALE" else "SUBAGENTS", if (stale) Theme.orange else accent, null, 0, w - 1);
+                    var children: std.ArrayList(Row) = .empty;
+                    try subagentRows(ctx, &children, if (s) |snap| snap.subagents else null, available, @min(6, (h - 14) / 2), stale);
+                    for (children.items, 0..) |row, index| lineLimit(ctx, surface, layout.main + 2, @intCast(7 + index), row.text, row.style, null, 0, w - 1);
+                    tools_y = @intCast(8 + children.items.len);
+                }
+                lineLimit(ctx, surface, layout.main + 2, tools_y, if (self.online) "TOOLS" else "TOOLS · STALE", if (self.online) accent else Theme.orange, null, 0, w - 1);
                 var inventory: std.ArrayList(Row) = .empty;
                 try inventoryRows(ctx, &inventory, s, available, true);
-                const count: usize = h - 11;
-                for (inventory.items[0..@min(count, inventory.items.len)], 0..) |row, index| lineLimit(ctx, surface, layout.main + 2, @intCast(7 + index), row.text, row.style, null, 0, w - 1);
+                const count: usize = h - tools_y - 5;
+                for (inventory.items[0..@min(count, inventory.items.len)], 0..) |row, index| lineLimit(ctx, surface, layout.main + 2, @intCast(tools_y + 1 + index), row.text, row.style, null, 0, w - 1);
                 const more = inventory.items.len -| count;
                 const hint = if (more > 0) try std.fmt.allocPrint(ctx.arena, ":tools · +{d} rows", .{more}) else ":tools · full inventory";
                 lineLimit(ctx, surface, layout.main + 2, h - 4, hint, accent, null, 0, w - 1);
@@ -1449,7 +1537,7 @@ const Model = struct {
             lineLimit(ctx, surface, 1, h - 1, command_text[start_byte..], accent, null, 0, command_right);
             surface.cursor = .{ .row = h - 1, .col = @intCast(@min(command_right, 1 + remaining)), .shape = .beam };
             // Keep slot/fence information observable without displacing commands.
-            if (warning_width > 0) lineLimit(ctx, surface, warning_x, upper - 1, warning, if (self.online) dim else Theme.orange, null, 0, right);
+            if (warning_width > 0) lineLimit(ctx, surface, warning_x, notice_y, warning, if (self.online) dim else Theme.orange, null, 0, right);
         } else if (warning_width > 0) lineLimit(ctx, surface, 1, h - 1, warning, Theme.orange, null, 0, command_right);
         return surface;
     }
@@ -2037,7 +2125,7 @@ test "user panels pad full chat width, task footer uses brief, and filters canno
     var zero_text: std.ArrayList(u8) = .empty;
     for (zero.buffer) |cell| try zero_text.appendSlice(arena.allocator(), cell.char.grapheme);
     try std.testing.expect(std.mem.indexOf(u8, zero_text.items, "[thinking:") == null);
-    try std.testing.expect(!model.mouse_tracking);
+    try std.testing.expect(model.mouse_tracking);
     var event_ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
     defer event_ctx.cmds.deinit(a);
     model.model_picker = true;
@@ -2398,4 +2486,191 @@ test "busy sidebar and problem animate independently; waiting stays silent and r
     model.snapshot.?.value.case0.snapshot.activityKnown = true;
     model.snapshot.?.value.case0.snapshot.busy = false;
     try std.testing.expect(!model.animating());
+}
+
+fn testChatModel(a: std.mem.Allocator, bridge: *Bridge) !Model {
+    var model: Model = .{ .a = a, .bridge = bridge, .editor = .init(a), .online = true, .snapshot = try std.json.parseFromSlice(wire.TuiResponse, a,
+        \\{"version":1,"id":"1","ok":true,"snapshot":{"hubId":"hub","chatId":"1","clientMode":"hub","hubChatId":"1","title":"Hub","model":"mock","tools":"offline","activityKnown":false,"busy":false,"queued":0,"entries":[],"hasOlder":false,"historical":false,"preview":"","notice":"","draft":null}}
+    , .{ .allocate = .alloc_always }) };
+    model.editor.mode = .insert;
+    return model;
+}
+
+test "one queued send freezes the prompt, rechecks admission guards and never duplicates input" {
+    const a = std.testing.allocator;
+    const text = "  Exact queued 👩🏽‍💻 é\nmessage  \n";
+    for ([_][]const u8{ "ready", "settings", "draft", "readonly", "fenced", "uncertain", "escape", "detach", "quit" }) |outcome| {
+        var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined, .pending = .{ .version = 1, .id = "poll", .action = .poll } };
+        defer bridge.output.deinit(a);
+        var model = try testChatModel(a, &bridge);
+        defer model.deinit();
+        var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
+        defer ctx.cmds.deinit(a);
+        try model.editor.set(text);
+        try model.issue(.send);
+        try std.testing.expect(model.queued_send and model.locked());
+        try model.issue(.send);
+        try model.press(&ctx, .{ .codepoint = 'x', .text = "not appended" });
+        try model.press(&ctx, .{ .codepoint = vaxis.Key.enter, .mods = .{ .shift = true } });
+        try Model.event(&model, &ctx, .paste_start);
+        try model.press(&ctx, .{ .codepoint = 'x', .text = "not pasted" });
+        try Model.event(&model, &ctx, .paste_end);
+        try std.testing.expectEqualStrings(text, model.editor.text.items);
+        try std.testing.expectEqual(0, bridge.output.items.len);
+        try std.testing.expect(!model.canNavigate());
+        if (std.mem.eql(u8, outcome, "escape")) try model.press(&ctx, .{ .codepoint = vaxis.Key.escape });
+        if (std.mem.eql(u8, outcome, "detach")) model.quit(&ctx, true);
+        if (std.mem.eql(u8, outcome, "quit")) {
+            model.quit(&ctx, false);
+            try std.testing.expect(!ctx.quit); // Still protects unsaved text, but cancels the wait.
+        }
+        bridge.pending = null; // Successful reply frees the one transport slot.
+        if (std.mem.eql(u8, outcome, "settings")) model.settings_uncertain = true;
+        if (std.mem.eql(u8, outcome, "draft")) model.snapshot.?.value.case0.snapshot.draft = .{ .kind = .input, .requestId = "existing", .text = "existing bytes", .saved = true, .clipped = false };
+        if (std.mem.eql(u8, outcome, "readonly")) model.snapshot.?.value.case0.snapshot.chatId = "2";
+        if (std.mem.eql(u8, outcome, "fenced")) bridge.failed = true;
+        if (std.mem.eql(u8, outcome, "uncertain")) model.uncertain = true;
+        try model.flushQueuedSend();
+        try std.testing.expect(!model.queued_send);
+        try std.testing.expectEqualStrings(text, model.editor.text.items);
+        if (std.mem.eql(u8, outcome, "ready")) {
+            try std.testing.expectEqual(Action.send, bridge.pending.?.action);
+            const request = try wire.parseTuiRequest(a, bridge.output.items[4..]);
+            defer request.deinit();
+            try std.testing.expectEqualStrings(text, request.value.text.?);
+            try model.flushQueuedSend();
+            try model.issue(.send);
+            try std.testing.expectEqual(1, bridge.sequence);
+            try std.testing.expect(model.locked());
+        } else {
+            try std.testing.expect(bridge.pending == null);
+            try std.testing.expectEqual(0, bridge.sequence);
+        }
+    }
+}
+
+test "bridge loss cancels an unsent queue without admitting or clearing the prompt" {
+    const a = std.testing.allocator;
+    const pipe = try Native.pipe();
+    defer Native.close(pipe[0]);
+    Native.close(pipe[1]); // EOF on the helper reply channel.
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = .{ .id = null, .thread_handle = {}, .stdin = null, .stdout = .{ .handle = pipe[0], .flags = .{ .nonblocking = false } }, .stderr = null, .request_resource_usage_statistics = false }, .pending = .{ .version = 1, .id = "poll", .action = .poll } };
+    var model = try testChatModel(a, &bridge);
+    defer model.deinit();
+    var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
+    defer ctx.cmds.deinit(a);
+    try model.editor.set("preserve on bridge loss");
+    try model.issue(.send);
+    stopping.store(false, .monotonic);
+    try Model.event(&model, &ctx, .tick);
+    try std.testing.expect(bridge.failed and !model.queued_send);
+    try std.testing.expectEqualStrings("preserve on bridge loss", model.editor.text.items);
+    try std.testing.expect(std.mem.indexOf(u8, model.notice[0..model.notice_len], "queued message not sent") != null);
+    try model.flushQueuedSend();
+    try std.testing.expectEqual(0, bridge.sequence);
+    try std.testing.expectEqual(0, bridge.output.items.len);
+}
+
+test "subagent sidebar rows preserve statuses, unknowns, and explicit overflow within their budget" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    fw.DrawContext.init(.unicode);
+    const ctx: fw.DrawContext = .{ .arena = a, .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
+    const sample: wire.SubagentSnapshot = .{ .chatId = "1", .hasMore = false, .items = &.{
+        .{ .chatId = "6", .title = "Review", .agentName = "wintermute", .agentRune = "ᚠ", .status = .{ .state = .working } },
+        .{ .chatId = "5", .title = "Tests", .agentName = "glasscut", .status = .{ .state = .done, .taskId = "10" } },
+        .{ .chatId = "4", .title = "Audit", .agentName = "staticdrift", .status = .{ .state = .@"error", .taskId = "11" } },
+        .{ .chatId = "3", .title = "Stopped", .status = .{ .state = .idle } },
+        .{ .chatId = "2", .title = "Unknown 界 👩🏽‍💻 helper" },
+    } };
+    var list: std.ArrayList(Row) = .empty;
+    try subagentRows(ctx, &list, sample, 26, 6, false);
+    try std.testing.expectEqual(5, list.items.len);
+    for (list.items, [_][]const u8{ "working", "done", "error", "idle", "unknown" }) |row, status| {
+        try std.testing.expect(std.mem.endsWith(u8, row.text, status));
+        try std.testing.expectEqual(26, displayWidth(ctx, row.text));
+    }
+    try std.testing.expect(std.mem.startsWith(u8, list.items[0].text, "ᚠ wintermute"));
+    try std.testing.expectEqualDeep(Theme.green, list.items[1].style);
+    try std.testing.expectEqualDeep(Theme.orange, list.items[2].style);
+    list.clearRetainingCapacity();
+    try subagentRows(ctx, &list, sample, 12, 3, true);
+    try std.testing.expectEqual(3, list.items.len);
+    try std.testing.expect(std.mem.endsWith(u8, list.items[0].text, "working"));
+    try std.testing.expectEqualDeep(dim, list.items[0].style);
+    try std.testing.expectEqualStrings("3 more", list.items[2].text);
+    list.clearRetainingCapacity();
+    var more = sample;
+    more.hasMore = true;
+    try subagentRows(ctx, &list, more, 26, 1, false);
+    try std.testing.expectEqualStrings("5+ more", list.items[0].text);
+    list.clearRetainingCapacity();
+    try subagentRows(ctx, &list, .{ .chatId = "1", .items = &.{}, .hasMore = false }, 26, 2, false);
+    try std.testing.expectEqualStrings("None", list.items[0].text);
+    list.clearRetainingCapacity();
+    try subagentRows(ctx, &list, null, 26, 2, false);
+    try std.testing.expectEqualStrings("Unavailable", list.items[0].text);
+}
+
+test "subagent sidebar coexists with inventory, marks stale samples, and stays bounded on resize" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    var model: Model = .{ .a = a, .bridge = &bridge, .editor = .init(a), .online = true, .snapshot = .{
+        .arena = try a.create(std.heap.ArenaAllocator),
+        .value = .{ .case0 = .{ .version = 1, .id = "1", .ok = true, .snapshot = .{
+            .clientMode = .task,
+            .hubChatId = "1",
+            .hubId = "hub",
+            .chatId = "2",
+            .title = "Parent",
+            .model = "mock",
+            .tools = "offline",
+            .activityKnown = true,
+            .busy = false,
+            .queued = 0,
+            .entries = &.{},
+            .hasOlder = false,
+            .historical = false,
+            .preview = "",
+            .notice = "",
+            .draft = null,
+            .subagents = .{ .chatId = "2", .hasMore = false, .items = &.{.{ .chatId = "3", .title = "Review", .agentName = "wintermute", .status = .{ .state = .working } }} },
+        } } },
+    } };
+    model.snapshot.?.arena.* = std.heap.ArenaAllocator.init(a);
+    defer model.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    fw.DrawContext.init(.unicode);
+    var ctx: fw.DrawContext = .{ .arena = alloc, .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
+    const fresh = try testSurfaceText(alloc, try Model.draw(&model, ctx));
+    for ([_][]const u8{ "SUBAGENTS", "wintermute", "working", "TOOLS", "Inventory unavailable", ":tools" }) |text| try std.testing.expect(std.mem.indexOf(u8, fresh, text) != null);
+    try std.testing.expect(std.mem.indexOf(u8, fresh, "STALE") == null);
+    model.frame = 100;
+    try std.testing.expect(std.mem.indexOf(u8, try testSurfaceText(alloc, try Model.draw(&model, ctx)), "SUBAGENTS · STALE") != null);
+    model.frame = 0;
+    model.online = false;
+    try std.testing.expect(std.mem.indexOf(u8, try testSurfaceText(alloc, try Model.draw(&model, ctx)), "SUBAGENTS · STALE") != null);
+    model.online = true;
+    const snap = &model.snapshot.?.value.case0.snapshot;
+    snap.subagents = .{ .chatId = "2", .items = &.{}, .hasMore = false };
+    const empty = try testSurfaceText(alloc, try Model.draw(&model, ctx));
+    try std.testing.expect(std.mem.indexOf(u8, empty, "None") != null);
+    try std.testing.expect(std.mem.indexOf(u8, empty, "wintermute") == null);
+    snap.subagents = null;
+    try std.testing.expect(std.mem.indexOf(u8, try testSurfaceText(alloc, try Model.draw(&model, ctx)), "Unavailable") != null);
+    var children: [16]wire.SubagentItem = undefined;
+    for (&children) |*child| child.* = .{ .chatId = "3", .title = "界 👩🏽‍💻 very long child name that must never push status offscreen", .status = .{ .state = .working } };
+    snap.subagents = .{ .chatId = "2", .items = &children, .hasMore = true };
+    for ([_]u16{ 20, 60, 100, 112, 140, 512 }) |width| for ([_]u16{ 9, 12, 16, 24, 120 }) |height| {
+        ctx.max = .{ .width = width, .height = height };
+        model.sidebar_override = true;
+        _ = try Model.draw(&model, ctx);
+        model.sidebar_override = false;
+        const hidden = try testSurfaceText(alloc, try Model.draw(&model, ctx));
+        try std.testing.expect(std.mem.indexOf(u8, hidden, "SUBAGENTS") == null);
+    };
+    try std.testing.expect(bridge.pending == null);
 }

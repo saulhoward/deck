@@ -15,7 +15,17 @@ import type { ActivitySnapshot, ModelSettingsChange, ModelSettingsSnapshot, TuiR
 
 async function fixture(withSettings = false, withProgramStatus = false, withStyle = false, withTools = false) {
   const local = await clientEnv(); const requests: any[] = []; let loss = false, malformed = false, oversized = false, hang = false;
-  let settingsLoss = false, settingsInvalid = false;
+  let settingsLoss = false, settingsInvalid = false, plainHistory = false;
+  // One-shot gates make a request genuinely in-flight until a PTY checkpoint
+  // releases it; tests never guess the background poll timing with sleeps.
+  const gates = new Map<string, { entered: ReturnType<typeof Promise.withResolvers<any>>, reply: ReturnType<typeof Promise.withResolvers<"ok" | "fail">> }>();
+  const pendingGates = new Set<ReturnType<typeof Promise.withResolvers<"ok" | "fail">>>();
+  const holdNext = (command: string) => {
+    assert.ok(!gates.has(command), `Already holding ${command}`);
+    const entered = Promise.withResolvers<any>(), reply = Promise.withResolvers<"ok" | "fail">();
+    gates.set(command, { entered, reply }); pendingGates.add(reply);
+    return { entered: entered.promise, release: (outcome: "ok" | "fail" = "ok") => reply.resolve(outcome) };
+  };
   const settings: ModelSettingsSnapshot = { hubId: "tui-test", chatId: "1", selection: { provider: "mock", modelId: "echo", thinkingLevel: "medium" }, defaultModel: { provider: "mock", modelId: "echo" }, models: ["echo", "zeta"].map((modelId) => ({ provider: "mock", modelId, name: modelId, thinkingLevels: ["off", "low", "medium", "high"], defaultThinkingLevel: "medium" })) };
   let statusReads = 0, statusOutcome: "done" | "error" = "done", statusId = 0;
   const activity: ActivitySnapshot = { ...(withProgramStatus ? { agentStatus: { state: "idle" as const } } : {}), chatId: "1", busy: false, queued: 0, tools: [], omittedTools: 0, compactions: 0, compactionFailed: false };
@@ -24,6 +34,12 @@ async function fixture(withSettings = false, withProgramStatus = false, withStyl
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const value = JSON.parse(Buffer.concat(chunks).toString()); requests.push(value);
     const { id, command, args } = value; let result;
+    const gate = gates.get(command);
+    if (gate) {
+      gates.delete(command); gate.entered.resolve(value);
+      const outcome = await gate.reply.promise; pendingGates.delete(gate.reply);
+      if (outcome === "fail") { response.end(JSON.stringify({ version: 1, id, ok: false, error: { code: "internal", message: "Delayed fixture read failed" } })); return; }
+    }
     if (withProgramStatus && (command === "history" || command === "activity") && activity.agentStatus?.state === "working" && ++statusReads >= 3) {
       activity.agentStatus = { state: statusOutcome, taskId: String(statusId) }; activity.busy = false;
     }
@@ -44,7 +60,7 @@ async function fixture(withSettings = false, withProgramStatus = false, withStyl
       if (hang) return;
       if (oversized && args.limit > 1) { response.end(JSON.stringify({ version: 1, id, ok: false, error: { code: "too_large", message: "Page too large" } })); return; }
       const newest = args.before ? Number(args.before) - 1 : 120;
-      const items = withStyle ? [{ id: 2, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "text", text: "# Report\n**Ready** with `code`\n\n| Task | Status |\n| :--- | ---: |\n| Unicode 界 | done |\n| Rendering | ready |" }] }] }, { id: 1, kind: "deck.input", data: { text: "Please render this cleanly." } }] : Array.from({ length: Math.min(args.limit, 20) }, (_, i) => ({ id: newest - i, kind: "deck.input", data: { text: `line ${newest - i}\nretained 👩🏽‍💻 é\n\x1b]52;c;DO_NOT_RENDER\x07safe` } }));
+      const items = withStyle ? [{ id: 2, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "text", text: "# Report\n**Ready** with `code`\n\n| Task | Status |\n| :--- | ---: |\n| Unicode 界 | done |\n| Rendering | ready |" }] }] }, { id: 1, kind: "deck.input", data: { text: "Please render this cleanly." } }] : Array.from({ length: Math.min(args.limit, 20) }, (_, i) => ({ id: newest - i, kind: "deck.input", data: { text: `line ${newest - i}\nretained ${plainHistory ? "text" : "👩🏽‍💻 é"}\n\x1b]52;c;DO_NOT_RENDER\x07safe` } }));
       result = { items, next: String(items.at(-1)!.id), ...(args.includeActivity ? { activity } : {}), ...(args.includeProgress ? { progress } : {}) };
     } else if (command === "activity") result = activity;
     else if (command === "progress") result = progress;
@@ -60,7 +76,7 @@ async function fixture(withSettings = false, withProgramStatus = false, withStyl
   const session = new TuiSession((name, args, expected) => hubCommand(address.port, name, args, expected), undefined, undefined, local.env.DECK_CLIENT_STATE_DIRECTORY);
   let sequence = 0;
   const action = (action: TuiRequest["action"], text?: string, hold?: boolean, configuration?: ModelSettingsChange) => session.handle({ version: 1, id: String(++sequence), action, ...(text !== undefined ? { text } : {}), ...(hold !== undefined ? { hold } : {}), ...(configuration ? { configuration } : {}) });
-  return { local, requests, port: address.port, action, busy: (value: boolean) => { activity.busy = value; }, settingsLoss: (value: boolean) => { settingsLoss = value; }, settingsInvalid: (value: boolean) => { settingsInvalid = value; }, loss: (value: boolean) => { loss = value; }, malformed: (value: boolean) => { malformed = value; }, oversized: () => { oversized = true; }, hang: () => { hang = true; }, close: async () => { server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); await local.close(); } };
+  return { local, requests, port: address.port, action, holdNext, plainHistory: () => { plainHistory = true; }, subagents: (value: ActivitySnapshot["subagents"]) => { if (value === undefined) delete activity.subagents; else activity.subagents = value; }, busy: (value: boolean) => { activity.busy = value; }, settingsLoss: (value: boolean) => { settingsLoss = value; }, settingsInvalid: (value: boolean) => { settingsInvalid = value; }, loss: (value: boolean) => { loss = value; }, malformed: (value: boolean) => { malformed = value; }, oversized: () => { oversized = true; }, hang: () => { hang = true; }, close: async () => { for (const reply of pendingGates) reply.resolve("fail"); server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); await local.close(); } };
 }
 
 test("TUI adapter holds bounded canonical pages, samples independently, reduces only validated too-large reads", async () => {
@@ -193,16 +209,78 @@ test("real PTY: :model and Shift-Tab change settings without losing the prompt o
     assert.ok(!f.requests.some((r) => r.command === "stop" || r.command === "create_task"));
   } finally { await f.close(); }
 });
-async function pty(port: number, env: NodeJS.ProcessEnv, steps: unknown[], screens?: Record<string, string>) {
+type PtyCheckpoints = Record<string, () => unknown | Promise<unknown>>;
+async function pty(port: number, env: NodeJS.ProcessEnv, steps: unknown[], screens?: Record<string, string>, checkpoints?: PtyCheckpoints) {
   assert.ok(testBinary); const binary = resolve(testBinary);
   const driver = fileURLToPath(new URL("../../scripts/tui-pty-test.py", import.meta.url));
-  const child = spawn("python3", [driver, binary, "agent", "--tui", "--port", String(port)], { env: { ...env, DECK_NODE: process.execPath } });
-  const closed = once(child, "close"); let output = "", errors = "";
-  child.stdout.on("data", (chunk) => { output += chunk; }); child.stderr.on("data", (chunk) => { errors += chunk; }); child.stdin.end(JSON.stringify(steps));
-  assert.equal((await closed)[0], 0, errors);
-  const result = JSON.parse(output); assert.equal(result.restored, true);
-  if (screens) Object.assign(screens, result.screens);
-  const terminal = Buffer.from(result.output, "base64").toString(); assert.doesNotMatch(terminal, /DO_NOT_RENDER/); return terminal;
+  const checkpointErrors: string[] = [];
+  const control = checkpoints ? createServer(async (request, response) => {
+    try {
+      const name = decodeURIComponent(request.url!.slice(1));
+      assert.ok(Object.hasOwn(checkpoints, name), `Unknown PTY checkpoint ${name}`);
+      await checkpoints[name]!(); response.end("ok");
+    } catch (error) { checkpointErrors.push(String(error)); response.statusCode = 500; response.end(String(error)); }
+  }) : undefined;
+  try {
+    let args = [driver, binary, "agent", "--tui", "--port", String(port)];
+    if (control) {
+      control.listen(0, "127.0.0.1"); await once(control, "listening");
+      const address = control.address(); assert.ok(address && typeof address !== "string");
+      // Reuse the unchanged driver and its waits, capture, cleanup and terminal
+      // assertions. A lazy action iterator adds loopback test checkpoints only;
+      // the real terminal/client never sees these coordination requests.
+      const wrapper = `import json, runpy, sys, urllib.request, urllib.parse
+original_load = json.load
+def coordinated_steps(stream):
+    actions = original_load(stream)
+    def iterate():
+        for step in actions:
+            if "checkpoint" in step:
+                url = "http://127.0.0.1:${address.port}/" + urllib.parse.quote(step["checkpoint"])
+                with urllib.request.urlopen(url, timeout=6) as response:
+                    assert response.read() == b"ok"
+            else:
+                yield step
+    return iterate()
+json.load = coordinated_steps
+driver = sys.argv.pop(1)
+runpy.run_path(driver, run_name="__main__")
+`;
+      args = ["-c", wrapper, ...args];
+    }
+    // Pin the companion bridge to this build, not an installed Deck inherited
+    // from the test runner (which may have older closed wire contracts).
+    const child = spawn("python3", args, { env: { ...env, DECK_NODE: process.execPath, DECK_RUNTIME_ROOT: fileURLToPath(new URL("../../", import.meta.url)) } });
+    const closed = once(child, "close"); let output = "", errors = "";
+    child.stdout.on("data", (chunk) => { output += chunk; }); child.stderr.on("data", (chunk) => { errors += chunk; }); child.stdin.end(JSON.stringify(steps));
+    assert.equal((await closed)[0], 0, [errors, ...checkpointErrors].join("\n"));
+    const result = JSON.parse(output); assert.equal(result.restored, true);
+    if (screens) Object.assign(screens, result.screens);
+    const terminal = Buffer.from(result.output, "base64").toString(); assert.doesNotMatch(terminal, /DO_NOT_RENDER/); return terminal;
+  } finally {
+    if (control) { control.closeAllConnections(); await new Promise<void>((resolve) => control.close(() => resolve())); }
+  }
+}
+function promptRegion(screen: string) {
+  const rows = screen.split("\n"), rules = rows.flatMap((row, i) => row.startsWith("─") ? [i] : []);
+  assert.equal(rules.length, 2, screen);
+  return { rows, upper: rules[0]!, prompt: rows.slice(rules[0]! + 1, rules[1]) };
+}
+function textColors(terminal: string, text: string) {
+  let foreground = "default"; const colors = new Set<string>();
+  for (const part of terminal.split(/(\x1b\[[0-9:;]*m)/)) {
+    if (/^\x1b\[[0-9:;]*m$/.test(part)) {
+      if (/^\x1b\[(?:0|39)?m$/.test(part)) foreground = "default";
+      const rgb = part.match(/38[:;]2[:;](\d+)[:;](\d+)[:;](\d+)/);
+      if (rgb) foreground = rgb.slice(1).join(",");
+    } else if (part.includes(text)) colors.add(foreground);
+  }
+  return colors;
+}
+function assertScrollNotice(screen: string, text: string) {
+  const { rows, upper } = promptRegion(screen);
+  assert.equal(rows[upper - 1]!.trim(), text, "Scroll notice belongs immediately above the prompt upper rule");
+  assert.equal(rows.filter(row => row.includes(text)).length, 1);
 }
 test("real PTY: Rex title and program status track agent work without polling flicker or stale completion", { skip: !testBinary, timeout: 25_000 }, async () => {
   const f = await fixture(false, true);
@@ -263,6 +341,120 @@ test("real PTY: uncertain input stays locked, survives detach and retries only b
     assert.deepEqual(await store.list(), []);
   } finally { await f.close(); }
 });
+test("real PTY: a send queued behind a delayed poll freezes exact input and dispatches once before another poll", { skip: !testBinary, timeout: 15000 }, async () => {
+  const f = await fixture(), screens: Record<string, string> = {};
+  const store = new DraftStore("tui-test", f.local.env.DECK_CLIENT_STATE_DIRECTORY);
+  const text = "  queued 👩🏽‍💻 é\nsecond line  \n";
+  let poll: ReturnType<typeof f.holdNext>, admission: ReturnType<typeof f.holdNext>, followingPoll: ReturnType<typeof f.holdNext>;
+  let heldRequest: any;
+  try {
+    const output = await pty(f.port, f.local.env, [
+      { wait: "mock/echo" }, { keys: `\x1b[200~${text}\x1b[201~` }, { wait: "second line" }, { capture: "original" },
+      { checkpoint: "hold poll" }, { keys: "\r" }, { wait: "SEND QUEUED" },
+      { wait: "Message queued locally; Esc cancels before sending." }, { capture: "queued" },
+      { keys: "XXXXX\x7f\x1b[13;2u" }, { keys: "\x1b[200~rejected\npaste :q!\x1b[201~" }, { keys: "\r\r\x13" }, { capture: "frozen" },
+      // Locked mode must still let the wheel inspect the chat, keeping both notices.
+      { keys: "\x1b[<64;4;6M" }, { wait: "Scrolled up · :latest to follow new messages" }, { capture: "lockedUp" },
+      { keys: "\x1b[<65;4;6M" }, { capture: "lockedDown" },
+      { checkpoint: "dispatch" }, { wait: "SENDING" }, { capture: "sending" },
+      { keys: "YYYYY\r\r\x13" }, { capture: "sendingFrozen" },
+      { checkpoint: "acknowledge" }, { wait: "Input admitted" }, { capture: "admitted" },
+      { checkpoint: "following poll" }, { keys: "\x1b" }, { keys: ":q\r" },
+    ], screens, {
+      "hold poll": async () => { poll = f.holdNext("history"); heldRequest = await poll.entered; },
+      dispatch: async () => {
+        assert.equal(f.requests.filter(r => r.command === "admit").length, 0);
+        assert.deepEqual(await store.list(), [], "A local queue must not create a durable admission draft");
+        admission = f.holdNext("admit"); poll.release(); await admission.entered;
+        assert.deepEqual(f.requests.slice(f.requests.indexOf(heldRequest) + 1).map(r => r.command), ["admit"], "Queued input takes the next request slot before any background poll");
+      },
+      acknowledge: () => { followingPoll = f.holdNext("history"); admission.release(); },
+      "following poll": async () => { await followingPoll.entered; assert.equal(f.requests.filter(r => r.command === "admit").length, 1); followingPoll.release(); },
+    });
+    assert.ok(textColors(output, "second line").has("160,160,160"), "Queued/pending input is rendered dim");
+    const original = promptRegion(screens.original!).prompt;
+    for (const name of ["queued", "frozen", "lockedUp", "lockedDown", "sending", "sendingFrozen"]) assert.deepEqual(promptRegion(screens[name]!).prompt, original, name);
+    for (const name of ["queued", "frozen", "lockedUp", "lockedDown"]) {
+      const { rows, upper } = promptRegion(screens[name]!);
+      assert.match(rows[upper]!, /SEND QUEUED/); assert.match(screens[name]!, /Message queued locally; Esc cancels before sending\./);
+    }
+    assertScrollNotice(screens.lockedUp!, "Scrolled up · :latest to follow new messages");
+    assert.doesNotMatch(screens.lockedDown!, /Scrolled up/);
+    for (const name of ["sending", "sendingFrozen"]) {
+      const { rows, upper } = promptRegion(screens[name]!); assert.match(rows[upper]!, /SENDING/); assert.doesNotMatch(rows[upper]!, /SEND QUEUED/);
+    }
+    assert.ok(promptRegion(screens.admitted!).prompt.every(row => row.trim() === ""));
+    assert.doesNotMatch(screens.admitted!, /SEND QUEUED|SENDING/);
+    const admits = f.requests.filter(r => r.command === "admit");
+    assert.equal(admits.length, 1); assert.equal(admits[0].args.text, text); assert.deepEqual(await store.list(), []);
+    assert.ok(!f.requests.some(r => ["stop", "create_task"].includes(r.command)));
+  } finally { await f.close(); }
+});
+
+for (const outcome of ["escape", "read failure"] as const) {
+  test(`real PTY: queued send ${outcome} cancels locally, preserves the prompt and never sends on read recovery`, { skip: !testBinary, timeout: 15000 }, async () => {
+    const f = await fixture(), screens: Record<string, string> = {};
+    const text = "keep cancelled bytes 👩🏽‍💻\n  second line  ";
+    let poll: ReturnType<typeof f.holdNext>, recovery: ReturnType<typeof f.holdNext>;
+    try {
+      const cancel = outcome === "escape" ? [{ keys: "\x1b" }, { wait: "Queued send cancelled; prompt preserved." }, { checkpoint: "release poll" }] : [{ checkpoint: "release poll" }, { wait: "Queued message not sent; prompt preserved." }];
+      const output = await pty(f.port, f.local.env, [
+        { wait: "mock/echo" }, { keys: `\x1b[200~${text}\x1b[201~` }, { wait: "second line" }, { capture: "original" },
+        { checkpoint: "hold poll" }, { keys: "\r" }, { wait: "SEND QUEUED" }, ...cancel, { capture: "cancelled" },
+        { checkpoint: "recovery poll" }, { capture: "recovered" },
+        // Both paths unlock editing. Escape cancellation is Normal mode; failed
+        // reads preserve Insert mode. No Enter here: no new send is authorized.
+        { keys: outcome === "escape" ? "A+editable" : "+editable" }, { wait: "+editable" }, { capture: "editable" },
+        { keys: "\x1b" }, { keys: ":q!\r" },
+      ], screens, {
+        "hold poll": async () => { poll = f.holdNext("history"); await poll.entered; },
+        "release poll": () => { recovery = f.holdNext("history"); poll.release(outcome === "escape" ? "ok" : "fail"); },
+        "recovery poll": async () => {
+          await recovery.entered; const next = f.holdNext("history"); recovery.release();
+          await next.entered; assert.equal(f.requests.filter(r => r.command === "admit").length, 0); next.release();
+        },
+      });
+      assert.ok(textColors(output, "second line").has("160,160,160"), "Locally queued input is dim even though it never dispatches");
+      for (const name of ["cancelled", "recovered"]) {
+        assert.deepEqual(promptRegion(screens[name]!).prompt, promptRegion(screens.original!).prompt);
+        assert.doesNotMatch(screens[name]!, /SEND QUEUED|SENDING/);
+      }
+      assert.match(screens.cancelled!, outcome === "escape" ? /Queued send cancelled; prompt preserved\./ : /Queued message not sent; prompt preserved\./);
+      assert.notDeepEqual(promptRegion(screens.editable!).prompt, promptRegion(screens.original!).prompt);
+      assert.equal(f.requests.filter(r => r.command === "admit").length, 0);
+      assert.deepEqual(await new DraftStore("tui-test", f.local.env.DECK_CLIENT_STATE_DIRECTORY).list(), []);
+      assert.ok(!f.requests.some(r => ["stop", "create_task"].includes(r.command)));
+    } finally { await f.close(); }
+  });
+}
+
+test("real PTY: an uncertain queued admission remains saved and locked without automatic retry", { skip: !testBinary, timeout: 15000 }, async () => {
+  const f = await fixture(), screens: Record<string, string> = {};
+  const text = "queued admission must not replay 👩🏽‍💻";
+  let poll: ReturnType<typeof f.holdNext>, recovery: ReturnType<typeof f.holdNext>;
+  try {
+    await pty(f.port, f.local.env, [
+      { wait: "mock/echo" }, { keys: text }, { wait: "queued admission must not replay" }, { capture: "original" },
+      { checkpoint: "hold poll" }, { keys: "\r" }, { wait: "SEND QUEUED" }, { checkpoint: "lose admission" },
+      { wait: "unconfirmed" }, { wait: "LOCKED" },
+      { keys: "XXXXX\r\r\x13" }, { keys: "\x1b[200~rejected paste\x1b[201~" },
+      { checkpoint: "recovery poll" }, { wait: "SAVED LOCKED" }, { capture: "locked" }, { keys: "\x1b" }, { keys: ":q\r" },
+    ], screens, {
+      "hold poll": async () => { poll = f.holdNext("history"); await poll.entered; },
+      "lose admission": () => { f.loss(true); recovery = f.holdNext("history"); poll.release(); },
+      "recovery poll": async () => {
+        await recovery.entered; const next = f.holdNext("history"); recovery.release();
+        await next.entered; assert.equal(f.requests.filter(r => r.command === "admit").length, 1); next.release();
+      },
+    });
+    assert.deepEqual(promptRegion(screens.locked!).prompt, promptRegion(screens.original!).prompt);
+    assert.doesNotMatch(screens.locked!, /SEND QUEUED|SENDING/);
+    const admits = f.requests.filter(r => r.command === "admit"); assert.equal(admits.length, 1); assert.equal(admits[0].args.text, text);
+    const store = new DraftStore("tui-test", f.local.env.DECK_CLIENT_STATE_DIRECTORY), saved = await store.list(); assert.equal(saved.length, 1);
+    assert.deepEqual((await store.load(saved[0]!.requestId)).request, { kind: "input", ...admits[0].args });
+  } finally { await f.close(); }
+});
+
 test("real PTY: detach remains responsive while HTTP history is stalled", { skip: !testBinary, timeout: 15_000 }, async () => {
   const f = await fixture(); f.hang();
   try { await pty(f.port, f.local.env, [{ wait: "STALE" }, { sleep: .3 }, { keys: ":q\r" }]); assert.ok(f.requests.some((v) => v.command === "history")); assert.ok(!f.requests.some((v) => v.command === "stop")); }
@@ -381,17 +573,65 @@ test("real PTY: prompt word-wrap survives resize without changing admitted bytes
   } finally { await f.close(); }
 });
 
-test("real PTY: native mouse selection is default and wheel reporting is explicitly toggled", { skip: !testBinary, timeout: 15000 }, async () => {
+test("real PTY: mouse wheel reporting is enabled by default with an explicit native-selection opt-out", { skip: !testBinary, timeout: 15000 }, async () => {
   const f = await fixture();
   try {
     const output = await pty(f.port, f.local.env, [
-      { wait: "mock/echo" }, { keys: "\x1b" }, { keys: ":mouse-toggle\r" }, { wait: "Mouse wheel reporting enabled" },
-      { keys: ":mouse-toggle\r" }, { wait: "Terminal mouse selection enabled" }, { keys: ":q\r" },
+      { wait: "mock/echo" }, { keys: "\x1b" }, { keys: ":mouse-toggle\r" }, { wait: "Terminal mouse selection enabled" },
+      { keys: ":mouse-toggle\r" }, { wait: "Mouse wheel reporting enabled" }, { keys: ":q\r" },
     ]);
     const enable = "\x1b[?1002;1003;1004;1006h", disable = "\x1b[?1002;1003;1004;1006;1016l";
-    assert.ok(output.indexOf(enable) >= 0 && output.indexOf(disable) > output.indexOf(enable));
-    assert.ok(output.indexOf(enable, output.indexOf(enable) + 1) > output.indexOf(disable));
+    const initialEnable = output.indexOf(enable), optOut = output.indexOf(disable), optIn = output.indexOf(enable, optOut + disable.length);
+    // Vaxis enables mouse reporting during setup; model initialization must
+    // retain it rather than immediately issuing the old default disable.
+    assert.ok(initialEnable >= 0 && output.indexOf(enable, initialEnable + enable.length) < optOut);
+    assert.equal(output.slice(0, optOut).split(enable).length - 1, 2);
+    assert.ok(optIn > optOut, "The second toggle restores wheel reporting");
+    assert.ok(output.indexOf(disable, optIn + enable.length) > optIn, "Detach disables mouse reporting again");
     assert.ok(!f.requests.some(r => ["admit", "stop", "create_task"].includes(r.command)));
+  } finally { await f.close(); }
+});
+
+test("real PTY: SGR wheel scrolls in Insert and chat focus, keeps the prompt, and places history notices above its rule", { skip: !testBinary, timeout: 15000 }, async () => {
+  const f = await fixture(), screens: Record<string, string> = {};
+  const scrolled = "Scrolled up · :latest to follow new messages", historical = "Older history · :latest to return";
+  const up = "\x1b[<64;4;6M", down = "\x1b[<65;4;6M";
+  try {
+    await pty(f.port, f.local.env, [
+      { wait: "mock/echo" }, { keys: "keep mouse input" }, { wait: "keep mouse input" }, { capture: "latest" },
+      // No Esc/Tab: wheel reports must work while the prompt is in Insert mode.
+      { keys: up.repeat(4) }, { wait: scrolled }, { capture: "insertUp" },
+      { keys: " + insert" }, { wait: "keep mouse input + insert" },
+      { keys: down.repeat(4) }, { capture: "insertDown" },
+      // A report over the prompt also scrolls the main chat, without stealing focus.
+      { keys: "\x1b[<64;4;36M" }, { wait: scrolled }, { capture: "overPrompt" },
+      { keys: "\x1b[<65;4;36M" }, { keys: "\x1b" }, { keys: "\t" },
+      { keys: up.repeat(4) }, { wait: scrolled }, { capture: "chatUp" },
+      { keys: down.repeat(4) }, { capture: "chatDown" },
+      { keys: ":older" }, { wait: "client idle" }, { keys: "\r" }, { wait: historical }, { wait: "line 100" }, { capture: "older" },
+      { keys: up }, { keys: down.repeat(30) }, { capture: "olderBottom" },
+      { keys: ":latest" }, { wait: "client idle" }, { keys: "\r" }, { wait: "line 120" }, { capture: "returned" },
+      { keys: "\x13" }, { wait: "Input admitted" }, { keys: ":q\r" },
+    ], screens);
+    for (const name of ["insertUp", "overPrompt", "chatUp"]) assertScrollNotice(screens[name]!, scrolled);
+    for (const name of ["older", "olderBottom"]) assertScrollNotice(screens[name]!, historical);
+    for (const name of ["latest", "insertDown", "chatDown", "returned"]) assert.doesNotMatch(screens[name]!, /Scrolled up|Older history/);
+    // pyte does not fully emulate ZWJ emoji repainting. Compare the retained
+    // message IDs and their row positions, not its rendering of those clusters.
+    const chat = (name: string) => {
+      const { rows, upper } = promptRegion(screens[name]!);
+      return rows.slice(0, upper - 1).flatMap((row, i) => { const id = row.match(/line \d+/)?.[0]; return id ? [[i, id]] : []; });
+    };
+    assert.notDeepEqual(chat("insertUp"), chat("latest"), "Wheel-up must move retained messages, not only show a notice");
+    assert.deepEqual(chat("insertDown"), chat("latest"));
+    assert.deepEqual(chat("chatUp"), chat("insertUp"));
+    assert.deepEqual(chat("chatDown"), chat("latest"));
+    for (const [name, screen] of Object.entries(screens)) {
+      assert.equal(promptRegion(screen).prompt.map(row => row.trim()).join("\n").trim(), ["latest", "insertUp"].includes(name) ? "keep mouse input" : "keep mouse input + insert");
+    }
+    const admits = f.requests.filter(r => r.command === "admit");
+    assert.equal(admits.length, 1); assert.equal(admits[0].args.text, "keep mouse input + insert");
+    assert.ok(f.requests.some(r => r.command === "history" && r.args.before));
   } finally { await f.close(); }
 });
 
@@ -488,5 +728,43 @@ test("real PTY: busy sidebar and footer take turns revealing runes without a wai
     assert.ok(sidebarSeen && problemSeen, "Both labels should animate frequently while busy");
     assert.doesNotMatch(output, /client waiting/);
     assert.ok(!f.requests.some(r => ["admit", "stop", "create_task"].includes(r.command)));
+  } finally { await f.close(); }
+});
+
+test("real PTY: subagent sidebar updates working/done/error and unknown, reports overflow and stale reads", { skip: !testBinary, timeout: 30_000 }, async () => {
+  const f = await fixture(); const screens: Record<string, string> = {};
+  const children: NonNullable<ActivitySnapshot["subagents"]> = { chatId: "1", items: [{ chatId: "2", title: "Review", agentName: "wintermute", agentRune: "ᚠ", status: { state: "working" } }], hasMore: false };
+  // pyte predates joined-emoji widths; keep this sidebar/layout capture ASCII.
+  f.plainHistory(); f.subagents({ chatId: "1", items: [], hasMore: false });
+  try {
+    await pty(f.port, f.local.env, [
+      { wait: "mock/echo" }, { resize: [40, 140] }, { wait_row: { row: 6, text: "SUBAGENTS" } }, { wait_row: { row: 7, text: "None" } },
+      { checkpoint: "working" }, { wait_row: { row: 7, text: "wintermute" } }, { wait_row: { row: 7, text: "working" } }, { capture: "working" },
+      { keys: "\x1b" }, { keys: ":older\r" }, { wait: "Older history" },
+      { checkpoint: "done" }, { wait_row: { row: 7, text: "done" } }, { capture: "done" },
+      { checkpoint: "error" }, { wait_row: { row: 7, text: "error" } },
+      { checkpoint: "unknown" }, { wait_row: { row: 7, text: "unknown" } },
+      { checkpoint: "overflow" }, { wait: "11+ more" }, { capture: "overflow" },
+      { resize: [24, 112] }, { wait: "12+ more" }, { capture: "small" },
+      { resize: [40, 140] }, { checkpoint: "unavailable" }, { wait_row: { row: 7, text: "Unavailable" } },
+      { checkpoint: "working" }, { wait_row: { row: 7, text: "wintermute" } },
+      { checkpoint: "failRead" }, { wait: "SUBAGENTS · STALE" }, { capture: "stale" },
+      { keys: ":q!\r" },
+    ], screens, {
+      working: () => f.subagents(children),
+      done: () => { children.items[0]!.status = { state: "done", taskId: "10" }; },
+      error: () => { children.items[0]!.status = { state: "error", taskId: "11" }; },
+      unknown: () => { delete children.items[0]!.status; },
+      overflow: () => f.subagents({ chatId: "1", items: Array.from({ length: 16 }, (_, i) => ({ chatId: String(17 - i), title: "Helper", agentName: `helper-${i}`, status: { state: "working" as const } })), hasMore: true }),
+      unavailable: () => f.subagents(undefined),
+      failRead: async () => { const pending = f.holdNext("activity"); await pending.entered; pending.release("fail"); f.hang(); },
+    });
+    for (const name of ["working", "done", "overflow", "small", "stale"]) {
+      assert.match(screens[name]!, /SUBAGENTS/); assert.match(screens[name]!, /TOOLS/); assert.match(screens[name]!, /:tools/);
+    }
+    assert.match(screens.done!, /Older history/);
+    assert.doesNotMatch(screens.small!, /Inventory unavailable.*working/);
+    assert.ok(f.requests.filter(r => r.command === "history" || r.command === "activity").every(r => r.args.includeSubagents === true));
+    assert.ok(f.requests.every(r => ["status", "history", "activity", "progress"].includes(r.command)));
   } finally { await f.close(); }
 });

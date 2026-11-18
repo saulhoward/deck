@@ -3015,6 +3015,7 @@ pub fn parseChatListPage(allocator: std.mem.Allocator, encoded: []const u8) !std
 pub const LiveViewArgs = struct {
     chatId: ?PiId = null,
     includeAgentStatus: ?bool = null,
+    includeSubagents: ?bool = null,
     // Omit absent nonnullable fields. Encoding them as null would violate the
     // schema. Nullable optional fields retain their legacy null normalization.
     pub fn jsonStringify(self: @This(), writer: anytype) !void {
@@ -3025,6 +3026,10 @@ pub const LiveViewArgs = struct {
         }
         if (self.includeAgentStatus) |value| {
             try writer.objectField("includeAgentStatus");
+            try writer.write(value);
+        }
+        if (self.includeSubagents) |value| {
+            try writer.objectField("includeSubagents");
             try writer.write(value);
         }
         try writer.endObject();
@@ -3058,7 +3063,7 @@ pub const InstructionStatusArgs = struct {
     }
 };
 pub fn validInstructionStatusArgs(x: std.json.Value) bool {
-    return v765(x);
+    return v766(x);
 }
 pub fn parseInstructionStatusArgs(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(InstructionStatusArgs) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3068,7 +3073,7 @@ pub fn parseInstructionStatusArgs(allocator: std.mem.Allocator, encoded: []const
 }
 pub const ViewCount = i64;
 pub fn validViewCount(x: std.json.Value) bool {
-    return v768(x);
+    return v769(x);
 }
 pub fn parseViewCount(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(ViewCount) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3078,7 +3083,7 @@ pub fn parseViewCount(allocator: std.mem.Allocator, encoded: []const u8) !std.js
 }
 pub const GenerationPhase = enum { generating, retrying, deferred };
 pub fn validGenerationPhase(x: std.json.Value) bool {
-    return v769(x);
+    return v770(x);
 }
 pub fn parseGenerationPhase(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(GenerationPhase) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3088,7 +3093,7 @@ pub fn parseGenerationPhase(allocator: std.mem.Allocator, encoded: []const u8) !
 }
 pub const GenerationAttempt = i64;
 pub fn validGenerationAttempt(x: std.json.Value) bool {
-    return v770(x);
+    return v771(x);
 }
 pub fn parseGenerationAttempt(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(GenerationAttempt) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3101,7 +3106,7 @@ pub const ActivityGeneration = struct {
     phase: GenerationPhase,
 };
 pub fn validActivityGeneration(x: std.json.Value) bool {
-    return v771(x);
+    return v772(x);
 }
 pub fn parseActivityGeneration(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(ActivityGeneration) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3111,7 +3116,7 @@ pub fn parseActivityGeneration(allocator: std.mem.Allocator, encoded: []const u8
 }
 pub const ActivityToolStatus = enum { pending, running, done };
 pub fn validActivityToolStatus(x: std.json.Value) bool {
-    return v774(x);
+    return v775(x);
 }
 pub fn parseActivityToolStatus(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(ActivityToolStatus) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3145,7 +3150,7 @@ pub const ActivityTool = struct {
     }
 };
 pub fn validActivityTool(x: std.json.Value) bool {
-    return v775(x);
+    return v776(x);
 }
 pub fn parseActivityTool(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(ActivityTool) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3175,13 +3180,65 @@ pub const AgentStatus = struct {
     }
 };
 pub fn validAgentStatus(x: std.json.Value) bool {
-    return v781(x);
+    return v782(x);
 }
 pub fn parseAgentStatus(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(AgentStatus) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
     defer raw.deinit();
     if (!validAgentStatus(raw.value)) return error.InvalidContract;
     return std.json.parseFromSlice(AgentStatus, allocator, encoded, .{ .ignore_unknown_fields = true });
+}
+pub const SubagentItem = struct {
+    chatId: PiId,
+    title: []const u8,
+    agentName: ?AgentName = null,
+    agentRune: ?AgentRune = null,
+    status: ?AgentStatus = null,
+    // Omit absent nonnullable fields. Encoding them as null would violate the
+    // schema. Nullable optional fields retain their legacy null normalization.
+    pub fn jsonStringify(self: @This(), writer: anytype) !void {
+        try writer.beginObject();
+        try writer.objectField("chatId");
+        try writer.write(self.chatId);
+        try writer.objectField("title");
+        try writer.write(self.title);
+        if (self.agentName) |value| {
+            try writer.objectField("agentName");
+            try writer.write(value);
+        }
+        if (self.agentRune) |value| {
+            try writer.objectField("agentRune");
+            try writer.write(value);
+        }
+        if (self.status) |value| {
+            try writer.objectField("status");
+            try writer.write(value);
+        }
+        try writer.endObject();
+    }
+};
+pub fn validSubagentItem(x: std.json.Value) bool {
+    return v786(x);
+}
+pub fn parseSubagentItem(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(SubagentItem) {
+    const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
+    defer raw.deinit();
+    if (!validSubagentItem(raw.value)) return error.InvalidContract;
+    return std.json.parseFromSlice(SubagentItem, allocator, encoded, .{ .ignore_unknown_fields = true });
+}
+pub const SubagentSnapshot = struct {
+    chatId: PiId,
+    items: []const SubagentItem,
+    hasMore: bool,
+};
+pub fn validSubagentSnapshot(x: std.json.Value) bool {
+    return v792(x);
+}
+pub fn parseSubagentSnapshot(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(SubagentSnapshot) {
+    const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
+    defer raw.deinit();
+    if (!validSubagentSnapshot(raw.value)) return error.InvalidContract;
+    return std.json.parseFromSlice(SubagentSnapshot, allocator, encoded, .{ .ignore_unknown_fields = true });
 }
 pub const ActivitySnapshot = struct {
     chatId: PiId,
@@ -3194,6 +3251,7 @@ pub const ActivitySnapshot = struct {
     compactions: ViewCount,
     compactionFailed: bool,
     agentStatus: ?AgentStatus = null,
+    subagents: ?SubagentSnapshot = null,
     // Omit absent nonnullable fields. Encoding them as null would violate the
     // schema. Nullable optional fields retain their legacy null normalization.
     pub fn jsonStringify(self: @This(), writer: anytype) !void {
@@ -3224,11 +3282,15 @@ pub const ActivitySnapshot = struct {
             try writer.objectField("agentStatus");
             try writer.write(value);
         }
+        if (self.subagents) |value| {
+            try writer.objectField("subagents");
+            try writer.write(value);
+        }
         try writer.endObject();
     }
 };
 pub fn validActivitySnapshot(x: std.json.Value) bool {
-    return v785(x);
+    return v797(x);
 }
 pub fn parseActivitySnapshot(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(ActivitySnapshot) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3269,7 +3331,7 @@ pub const ProgressGeneration = struct {
     }
 };
 pub fn validProgressGeneration(x: std.json.Value) bool {
-    return v797(x);
+    return v810(x);
 }
 pub fn parseProgressGeneration(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(ProgressGeneration) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3305,7 +3367,7 @@ pub const ProgressTool = struct {
     }
 };
 pub fn validProgressTool(x: std.json.Value) bool {
-    return v804(x);
+    return v817(x);
 }
 pub fn parseProgressTool(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(ProgressTool) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3351,7 +3413,7 @@ pub const ProgressSnapshot = struct {
     }
 };
 pub fn validProgressSnapshot(x: std.json.Value) bool {
-    return v810(x);
+    return v823(x);
 }
 pub fn parseProgressSnapshot(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(ProgressSnapshot) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3391,7 +3453,7 @@ pub const InstructionSourceView = struct {
     }
 };
 pub fn validInstructionSourceView(x: std.json.Value) bool {
-    return v819(x);
+    return v832(x);
 }
 pub fn parseInstructionSourceView(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(InstructionSourceView) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3401,7 +3463,7 @@ pub fn parseInstructionSourceView(allocator: std.mem.Allocator, encoded: []const
 }
 pub const InstructionTaskState = enum { pending, running, waiting, sleeping, completing, terminal };
 pub fn validInstructionTaskState(x: std.json.Value) bool {
-    return v827(x);
+    return v840(x);
 }
 pub fn parseInstructionTaskState(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(InstructionTaskState) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3411,7 +3473,7 @@ pub fn parseInstructionTaskState(allocator: std.mem.Allocator, encoded: []const 
 }
 pub const InstructionOutcome = enum { completed, failed, aborted, orphaned };
 pub fn validInstructionOutcome(x: std.json.Value) bool {
-    return v828(x);
+    return v841(x);
 }
 pub fn parseInstructionOutcome(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(InstructionOutcome) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3421,7 +3483,7 @@ pub fn parseInstructionOutcome(allocator: std.mem.Allocator, encoded: []const u8
 }
 pub const InstructionRejection = enum { offline, unavailable, read_failed, effect_uncertain, invalid, too_large, settings_changed, busy };
 pub fn validInstructionRejection(x: std.json.Value) bool {
-    return v829(x);
+    return v842(x);
 }
 pub fn parseInstructionRejection(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(InstructionRejection) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3434,7 +3496,7 @@ pub const InstructionAppliedView = struct {
     source: InstructionSourceView,
 };
 pub fn validInstructionAppliedView(x: std.json.Value) bool {
-    return v830(x);
+    return v843(x);
 }
 pub fn parseInstructionAppliedView(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(InstructionAppliedView) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3447,7 +3509,7 @@ pub const InstructionRejectedView = struct {
     reason: InstructionRejection,
 };
 pub fn validInstructionRejectedView(x: std.json.Value) bool {
-    return v833(x);
+    return v846(x);
 }
 pub fn parseInstructionRejectedView(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(InstructionRejectedView) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3459,7 +3521,7 @@ pub const InstructionAbortedView = struct {
     status: []const u8,
 };
 pub fn validInstructionAbortedView(x: std.json.Value) bool {
-    return v836(x);
+    return v849(x);
 }
 pub fn parseInstructionAbortedView(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(InstructionAbortedView) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3477,9 +3539,9 @@ pub const InstructionResultView = union(enum) {
     pub fn jsonParseFromValue(allocator: std.mem.Allocator, value: std.json.Value, options: std.json.ParseOptions) !@This() {
         var decode = options;
         decode.ignore_unknown_fields = true;
-        if (v839(value)) return .{ .case0 = try std.json.innerParseFromValue(@FieldType(@This(), "case0"), allocator, value, decode) };
-        if (v840(value)) return .{ .case1 = try std.json.innerParseFromValue(@FieldType(@This(), "case1"), allocator, value, decode) };
-        if (v841(value)) return .{ .case2 = try std.json.innerParseFromValue(@FieldType(@This(), "case2"), allocator, value, decode) };
+        if (v852(value)) return .{ .case0 = try std.json.innerParseFromValue(@FieldType(@This(), "case0"), allocator, value, decode) };
+        if (v853(value)) return .{ .case1 = try std.json.innerParseFromValue(@FieldType(@This(), "case1"), allocator, value, decode) };
+        if (v854(value)) return .{ .case2 = try std.json.innerParseFromValue(@FieldType(@This(), "case2"), allocator, value, decode) };
         return error.UnexpectedToken;
     }
     pub fn jsonStringify(self: @This(), writer: anytype) !void {
@@ -3491,7 +3553,7 @@ pub const InstructionResultView = union(enum) {
     }
 };
 pub fn validInstructionResultView(x: std.json.Value) bool {
-    return v838(x);
+    return v851(x);
 }
 pub fn parseInstructionResultView(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(InstructionResultView) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3534,7 +3596,7 @@ pub const InstructionTaskView = struct {
     }
 };
 pub fn validInstructionTaskView(x: std.json.Value) bool {
-    return v842(x);
+    return v855(x);
 }
 pub fn parseInstructionTaskView(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(InstructionTaskView) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3568,7 +3630,7 @@ pub const InstructionSnapshot = struct {
     }
 };
 pub fn validInstructionSnapshot(x: std.json.Value) bool {
-    return v849(x);
+    return v862(x);
 }
 pub fn parseInstructionSnapshot(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(InstructionSnapshot) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3578,7 +3640,7 @@ pub fn parseInstructionSnapshot(allocator: std.mem.Allocator, encoded: []const u
 }
 pub const HistoryAfter = []const u8;
 pub fn validHistoryAfter(x: std.json.Value) bool {
-    return v859(x);
+    return v872(x);
 }
 pub fn parseHistoryAfter(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(HistoryAfter) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3593,6 +3655,7 @@ pub const HistoryArgs = struct {
     after: ?HistoryAfter = null,
     includeActivity: ?bool = null,
     includeAgentStatus: ?bool = null,
+    includeSubagents: ?bool = null,
     includeProgress: ?bool = null,
     includeInstructions: ?bool = null,
     // Omit absent nonnullable fields. Encoding them as null would violate the
@@ -3621,6 +3684,10 @@ pub const HistoryArgs = struct {
             try writer.objectField("includeAgentStatus");
             try writer.write(value);
         }
+        if (self.includeSubagents) |value| {
+            try writer.objectField("includeSubagents");
+            try writer.write(value);
+        }
         if (self.includeProgress) |value| {
             try writer.objectField("includeProgress");
             try writer.write(value);
@@ -3633,7 +3700,7 @@ pub const HistoryArgs = struct {
     }
 };
 pub fn validHistoryArgs(x: std.json.Value) bool {
-    return v860(x);
+    return v873(x);
 }
 pub fn parseHistoryArgs(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(HistoryArgs) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3643,7 +3710,7 @@ pub fn parseHistoryArgs(allocator: std.mem.Allocator, encoded: []const u8) !std.
 }
 pub const HistoryText = []const u8;
 pub fn validHistoryText(x: std.json.Value) bool {
-    return v869(x);
+    return v883(x);
 }
 pub fn parseHistoryText(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(HistoryText) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3668,7 +3735,7 @@ pub const HistoryInputData = struct {
     }
 };
 pub fn validHistoryInputData(x: std.json.Value) bool {
-    return v870(x);
+    return v884(x);
 }
 pub fn parseHistoryInputData(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(HistoryInputData) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3684,7 +3751,7 @@ pub const MessageChain = struct {
     replyToRequestId: DurableRequestId,
 };
 pub fn validMessageChain(x: std.json.Value) bool {
-    return v873(x);
+    return v887(x);
 }
 pub fn parseMessageChain(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(MessageChain) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3715,7 +3782,7 @@ pub const HistoryAgentOrigin = struct {
     }
 };
 pub fn validHistoryAgentOrigin(x: std.json.Value) bool {
-    return v879(x);
+    return v893(x);
 }
 pub fn parseHistoryAgentOrigin(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(HistoryAgentOrigin) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3745,7 +3812,7 @@ pub const HistoryContentPart = struct {
     }
 };
 pub fn validHistoryContentPart(x: std.json.Value) bool {
-    return v884(x);
+    return v898(x);
 }
 pub fn parseHistoryContentPart(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(HistoryContentPart) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3792,7 +3859,7 @@ pub const HistoryMessage = struct {
     }
 };
 pub fn validHistoryMessage(x: std.json.Value) bool {
-    return v888(x);
+    return v902(x);
 }
 pub fn parseHistoryMessage(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(HistoryMessage) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3802,7 +3869,7 @@ pub fn parseHistoryMessage(allocator: std.mem.Allocator, encoded: []const u8) !s
 }
 pub const HistoryMessages = []const HistoryMessage;
 pub fn validHistoryMessages(x: std.json.Value) bool {
-    return v896(x);
+    return v910(x);
 }
 pub fn parseHistoryMessages(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(HistoryMessages) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3835,7 +3902,7 @@ pub const HistoryEntry = struct {
     }
 };
 pub fn validHistoryEntry(x: std.json.Value) bool {
-    return v898(x);
+    return v912(x);
 }
 pub fn parseHistoryEntry(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(HistoryEntry) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3875,7 +3942,7 @@ pub const HistoryPage = struct {
     }
 };
 pub fn validHistoryPage(x: std.json.Value) bool {
-    return v903(x);
+    return v917(x);
 }
 pub fn parseHistoryPage(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(HistoryPage) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3887,7 +3954,7 @@ pub const StopArgs = struct {
     chatId: PiId,
 };
 pub fn validStopArgs(x: std.json.Value) bool {
-    return v910(x);
+    return v924(x);
 }
 pub fn parseStopArgs(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(StopArgs) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3899,7 +3966,7 @@ pub const StopAck = struct {
     requested: bool,
 };
 pub fn validStopAck(x: std.json.Value) bool {
-    return v912(x);
+    return v926(x);
 }
 pub fn parseStopAck(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(StopAck) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3913,7 +3980,7 @@ pub const RexStartupArgs = struct {
     blockId: RexBlockId,
 };
 pub fn validRexStartupArgs(x: std.json.Value) bool {
-    return v914(x);
+    return v928(x);
 }
 pub fn parseRexStartupArgs(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(RexStartupArgs) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3923,7 +3990,7 @@ pub fn parseRexStartupArgs(allocator: std.mem.Allocator, encoded: []const u8) !s
 }
 pub const RexRegistrationObservation = enum { unbound, matched };
 pub fn validRexRegistrationObservation(x: std.json.Value) bool {
-    return v918(x);
+    return v932(x);
 }
 pub fn parseRexRegistrationObservation(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(RexRegistrationObservation) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -3943,7 +4010,7 @@ pub const RexStartupAck = struct {
     live: []const u8,
 };
 pub fn validRexStartupAck(x: std.json.Value) bool {
-    return v919(x);
+    return v933(x);
 }
 pub fn parseRexStartupAck(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(RexStartupAck) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4003,7 +4070,7 @@ pub fn parseChatId(allocator: std.mem.Allocator, encoded: []const u8) !std.json.
 }
 pub const NullableRexUuid = ?RexUuid;
 pub fn validNullableRexUuid(x: std.json.Value) bool {
-    return v929(x);
+    return v943(x);
 }
 pub fn parseNullableRexUuid(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(NullableRexUuid) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4050,7 +4117,7 @@ pub const RexTargetOptions = struct {
     }
 };
 pub fn validRexTargetOptions(x: std.json.Value) bool {
-    return v932(x);
+    return v946(x);
 }
 pub fn parseRexTargetOptions(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(RexTargetOptions) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4101,7 +4168,7 @@ pub const RexOpenArgs = struct {
     }
 };
 pub fn validRexOpenArgs(x: std.json.Value) bool {
-    return v937(x);
+    return v951(x);
 }
 pub fn parseRexOpenArgs(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(RexOpenArgs) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4113,7 +4180,7 @@ pub const RexReadArgs = struct {
     chatId: PiId,
 };
 pub fn validRexReadArgs(x: std.json.Value) bool {
-    return v943(x);
+    return v957(x);
 }
 pub fn parseRexReadArgs(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(RexReadArgs) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4255,7 +4322,7 @@ pub const RexBootstrapBinding = struct {
     pid: i64,
 };
 pub fn validRexBootstrapBinding(x: std.json.Value) bool {
-    return v945(x);
+    return v959(x);
 }
 pub fn parseRexBootstrapBinding(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(RexBootstrapBinding) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4270,7 +4337,7 @@ pub const RexBootstrapIndex = struct {
     machineId: MachineIdentity,
 };
 pub fn validRexBootstrapIndex(x: std.json.Value) bool {
-    return v950(x);
+    return v964(x);
 }
 pub fn parseRexBootstrapIndex(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(RexBootstrapIndex) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4332,7 +4399,7 @@ pub const RexBootstrapRecord = struct {
     }
 };
 pub fn validRexBootstrapRecord(x: std.json.Value) bool {
-    return v955(x);
+    return v969(x);
 }
 pub fn parseRexBootstrapRecord(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(RexBootstrapRecord) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4399,7 +4466,7 @@ pub const RexAllocationPlan = struct {
     }
 };
 pub fn validRexAllocationPlan(x: std.json.Value) bool {
-    return v970(x);
+    return v984(x);
 }
 pub fn parseRexAllocationPlan(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(RexAllocationPlan) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4421,7 +4488,7 @@ pub const RexCreation = struct {
     readiness: []const u8,
 };
 pub fn validRexCreation(x: std.json.Value) bool {
-    return v985(x);
+    return v999(x);
 }
 pub fn parseRexCreation(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(RexCreation) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4451,7 +4518,7 @@ pub const RexInspectionQuery = struct {
     scope: RexInspectionScope,
 };
 pub fn validRexInspectionQuery(x: std.json.Value) bool {
-    return v997(x);
+    return v1011(x);
 }
 pub fn parseRexInspectionQuery(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(RexInspectionQuery) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4530,7 +4597,7 @@ pub const RexAllocationReceiptQuery = struct {
     request: []const u8,
 };
 pub fn validRexAllocationReceiptQuery(x: std.json.Value) bool {
-    return v1000(x);
+    return v1014(x);
 }
 pub fn parseRexAllocationReceiptQuery(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(RexAllocationReceiptQuery) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4540,7 +4607,7 @@ pub fn parseRexAllocationReceiptQuery(allocator: std.mem.Allocator, encoded: []c
 }
 pub const RexAllocationReceiptState = enum { missing, accepted, allocated, not_allocated, conflict, inconclusive };
 pub fn validRexAllocationReceiptState(x: std.json.Value) bool {
-    return v1003(x);
+    return v1017(x);
 }
 pub fn parseRexAllocationReceiptState(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(RexAllocationReceiptState) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4556,7 +4623,7 @@ pub const RexAllocationReceipt = struct {
     creation: ?RexCreation,
 };
 pub fn validRexAllocationReceipt(x: std.json.Value) bool {
-    return v1004(x);
+    return v1018(x);
 }
 pub fn parseRexAllocationReceipt(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(RexAllocationReceipt) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4643,7 +4710,7 @@ pub const TaskCreationForm = struct {
     }
 };
 pub fn validTaskCreationForm(x: std.json.Value) bool {
-    return v1012(x);
+    return v1026(x);
 }
 pub fn parseTaskCreationForm(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(TaskCreationForm) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4679,7 +4746,7 @@ pub const TaskCreationTarget = struct {
     }
 };
 pub fn validTaskCreationTarget(x: std.json.Value) bool {
-    return v1018(x);
+    return v1032(x);
 }
 pub fn parseTaskCreationTarget(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(TaskCreationTarget) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4694,7 +4761,7 @@ pub const HostItem = struct {
     connection: enum { local, connected, offline, unknown },
 };
 pub fn validHostItem(x: std.json.Value) bool {
-    return v1024(x);
+    return v1038(x);
 }
 pub fn parseHostItem(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(HostItem) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4707,7 +4774,7 @@ pub const HostInventory = struct {
     items: []const HostItem,
 };
 pub fn validHostInventory(x: std.json.Value) bool {
-    return v1029(x);
+    return v1043(x);
 }
 pub fn parseHostInventory(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(HostInventory) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4761,7 +4828,7 @@ pub const AgentStartupDraft = struct {
     }
 };
 pub fn validAgentStartupDraft(x: std.json.Value) bool {
-    return v1033(x);
+    return v1047(x);
 }
 pub fn parseAgentStartupDraft(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(AgentStartupDraft) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4797,7 +4864,7 @@ pub const AgentWizardRequest = struct {
     }
 };
 pub fn validAgentWizardRequest(x: std.json.Value) bool {
-    return v1045(x);
+    return v1059(x);
 }
 pub fn parseAgentWizardRequest(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(AgentWizardRequest) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4810,7 +4877,7 @@ pub const AgentWizardReady = struct {
     allocationId: RexUuid,
 };
 pub fn validAgentWizardReady(x: std.json.Value) bool {
-    return v1051(x);
+    return v1065(x);
 }
 pub fn parseAgentWizardReady(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(AgentWizardReady) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4847,7 +4914,7 @@ pub const AgentWizardResponse = struct {
     }
 };
 pub fn validAgentWizardResponse(x: std.json.Value) bool {
-    return v1054(x);
+    return v1068(x);
 }
 pub fn parseAgentWizardResponse(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(AgentWizardResponse) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4908,7 +4975,7 @@ pub const TuiRequest = struct {
     }
 };
 pub fn validTuiRequest(x: std.json.Value) bool {
-    return v1061(x);
+    return v1075(x);
 }
 pub fn parseTuiRequest(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(TuiRequest) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4946,7 +5013,7 @@ pub const TuiPart = struct {
     }
 };
 pub fn validTuiPart(x: std.json.Value) bool {
-    return v1081(x);
+    return v1095(x);
 }
 pub fn parseTuiPart(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(TuiPart) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4982,7 +5049,7 @@ pub const TuiEntry = struct {
     }
 };
 pub fn validTuiEntry(x: std.json.Value) bool {
-    return v1087(x);
+    return v1101(x);
 }
 pub fn parseTuiEntry(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(TuiEntry) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -4998,7 +5065,7 @@ pub const TuiDraft = struct {
     clipped: bool,
 };
 pub fn validTuiDraft(x: std.json.Value) bool {
-    return v1094(x);
+    return v1108(x);
 }
 pub fn parseTuiDraft(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(TuiDraft) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -5060,7 +5127,7 @@ pub const TuiChat = struct {
     }
 };
 pub fn validTuiChat(x: std.json.Value) bool {
-    return v1100(x);
+    return v1114(x);
 }
 pub fn parseTuiChat(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(TuiChat) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -5090,7 +5157,7 @@ pub const TuiTasks = struct {
     }
 };
 pub fn validTuiTasks(x: std.json.Value) bool {
-    return v1112(x);
+    return v1126(x);
 }
 pub fn parseTuiTasks(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(TuiTasks) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -5115,7 +5182,7 @@ pub const TuiRex = struct {
     }
 };
 pub fn validTuiRex(x: std.json.Value) bool {
-    return v1117(x);
+    return v1131(x);
 }
 pub fn parseTuiRex(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(TuiRex) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -5125,7 +5192,7 @@ pub fn parseTuiRex(allocator: std.mem.Allocator, encoded: []const u8) !std.json.
 }
 pub const TuiClientMode = enum { hub, task };
 pub fn validTuiClientMode(x: std.json.Value) bool {
-    return v1120(x);
+    return v1134(x);
 }
 pub fn parseTuiClientMode(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(TuiClientMode) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -5155,6 +5222,7 @@ pub const TuiSnapshot = struct {
     model: []const u8,
     tools: []const u8,
     agentStatus: ?AgentStatus = null,
+    subagents: ?SubagentSnapshot = null,
     activityKnown: bool,
     busy: bool,
     queued: i64,
@@ -5238,6 +5306,10 @@ pub const TuiSnapshot = struct {
             try writer.objectField("agentStatus");
             try writer.write(value);
         }
+        if (self.subagents) |value| {
+            try writer.objectField("subagents");
+            try writer.write(value);
+        }
         try writer.objectField("activityKnown");
         try writer.write(self.activityKnown);
         try writer.objectField("busy");
@@ -5260,7 +5332,7 @@ pub const TuiSnapshot = struct {
     }
 };
 pub fn validTuiSnapshot(x: std.json.Value) bool {
-    return v1121(x);
+    return v1135(x);
 }
 pub fn parseTuiSnapshot(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(TuiSnapshot) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -5287,8 +5359,8 @@ pub const TuiResponse = union(enum) {
     pub fn jsonParseFromValue(allocator: std.mem.Allocator, value: std.json.Value, options: std.json.ParseOptions) !@This() {
         var decode = options;
         decode.ignore_unknown_fields = true;
-        if (v1173(value)) return .{ .case0 = try std.json.innerParseFromValue(@FieldType(@This(), "case0"), allocator, value, decode) };
-        if (v1178(value)) return .{ .case1 = try std.json.innerParseFromValue(@FieldType(@This(), "case1"), allocator, value, decode) };
+        if (v1188(value)) return .{ .case0 = try std.json.innerParseFromValue(@FieldType(@This(), "case0"), allocator, value, decode) };
+        if (v1193(value)) return .{ .case1 = try std.json.innerParseFromValue(@FieldType(@This(), "case1"), allocator, value, decode) };
         return error.UnexpectedToken;
     }
     pub fn jsonStringify(self: @This(), writer: anytype) !void {
@@ -5299,7 +5371,7 @@ pub const TuiResponse = union(enum) {
     }
 };
 pub fn validTuiResponse(x: std.json.Value) bool {
-    return v1172(x);
+    return v1187(x);
 }
 pub fn parseTuiResponse(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(TuiResponse) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -5309,7 +5381,7 @@ pub fn parseTuiResponse(allocator: std.mem.Allocator, encoded: []const u8) !std.
 }
 pub const ThinkingLevel = enum { off, minimal, low, medium, high, xhigh, max };
 pub fn validThinkingLevel(x: std.json.Value) bool {
-    return v1075(x);
+    return v1089(x);
 }
 pub fn parseThinkingLevel(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(ThinkingLevel) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -5319,7 +5391,7 @@ pub fn parseThinkingLevel(allocator: std.mem.Allocator, encoded: []const u8) !st
 }
 pub const ModelToken = []const u8;
 pub fn validModelToken(x: std.json.Value) bool {
-    return v1072(x);
+    return v1086(x);
 }
 pub fn parseModelToken(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(ModelToken) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -5332,7 +5404,7 @@ pub const ModelRef = struct {
     modelId: ModelToken,
 };
 pub fn validModelRef(x: std.json.Value) bool {
-    return v1142(x);
+    return v1156(x);
 }
 pub fn parseModelRef(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(ModelRef) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -5346,7 +5418,7 @@ pub const ModelSelection = struct {
     thinkingLevel: ThinkingLevel,
 };
 pub fn validModelSelection(x: std.json.Value) bool {
-    return v1070(x);
+    return v1084(x);
 }
 pub fn parseModelSelection(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(ModelSelection) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -5362,7 +5434,7 @@ pub const ModelOption = struct {
     defaultThinkingLevel: ThinkingLevel,
 };
 pub fn validModelOption(x: std.json.Value) bool {
-    return v1147(x);
+    return v1161(x);
 }
 pub fn parseModelOption(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(ModelOption) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -5374,7 +5446,7 @@ pub const ModelSettingsArgs = struct {
     chatId: PiId,
 };
 pub fn validModelSettingsArgs(x: std.json.Value) bool {
-    return v1183(x);
+    return v1198(x);
 }
 pub fn parseModelSettingsArgs(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(ModelSettingsArgs) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -5387,7 +5459,7 @@ pub const ModelSettingsChange = struct {
     selection: ModelSelection,
 };
 pub fn validModelSettingsChange(x: std.json.Value) bool {
-    return v1068(x);
+    return v1082(x);
 }
 pub fn parseModelSettingsChange(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(ModelSettingsChange) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -5401,7 +5473,7 @@ pub const SetModelSettingsArgs = struct {
     selection: ModelSelection,
 };
 pub fn validSetModelSettingsArgs(x: std.json.Value) bool {
-    return v1185(x);
+    return v1200(x);
 }
 pub fn parseSetModelSettingsArgs(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(SetModelSettingsArgs) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -5417,7 +5489,7 @@ pub const ModelSettingsSnapshot = struct {
     models: []const ModelOption,
 };
 pub fn validModelSettingsSnapshot(x: std.json.Value) bool {
-    return v1137(x);
+    return v1151(x);
 }
 pub fn parseModelSettingsSnapshot(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(ModelSettingsSnapshot) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -5431,7 +5503,7 @@ pub const ModelSettingsAck = struct {
     selection: ModelSelection,
 };
 pub fn validModelSettingsAck(x: std.json.Value) bool {
-    return v1189(x);
+    return v1204(x);
 }
 pub fn parseModelSettingsAck(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(ModelSettingsAck) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -5444,7 +5516,7 @@ pub const RexRuntimeReady = struct {
     hubId: RexUuid,
 };
 pub fn validRexRuntimeReady(x: std.json.Value) bool {
-    return v1193(x);
+    return v1208(x);
 }
 pub fn parseRexRuntimeReady(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(RexRuntimeReady) {
     const raw = try std.json.parseFromSlice(std.json.Value, allocator, encoded, .{});
@@ -10165,6 +10237,9 @@ fn v762(x: std.json.Value) bool {
     if (x.object.get("includeAgentStatus")) |value| {
         if (!v764(value)) return false;
     }
+    if (x.object.get("includeSubagents")) |value| {
+        if (!v765(value)) return false;
+    }
     return true;
 }
 fn v763(x: std.json.Value) bool {
@@ -10174,387 +10249,394 @@ fn v764(x: std.json.Value) bool {
     return x == .bool;
 }
 fn v765(x: std.json.Value) bool {
+    return x == .bool;
+}
+fn v766(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("chatId")) |value| {
-        if (!v766(value)) return false;
+        if (!v767(value)) return false;
     }
     if (x.object.get("taskId")) |value| {
-        if (!v767(value)) return false;
+        if (!v768(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "taskId"))) return false;
     }
     return true;
 }
-fn v766(x: std.json.Value) bool {
-    return v31(x);
-}
 fn v767(x: std.json.Value) bool {
     return v31(x);
 }
 fn v768(x: std.json.Value) bool {
-    return integer(x, 0, 9007199254740991);
+    return v31(x);
 }
 fn v769(x: std.json.Value) bool {
-    return x == .string and (std.mem.eql(u8, x.string, "generating") or std.mem.eql(u8, x.string, "retrying") or std.mem.eql(u8, x.string, "deferred"));
+    return integer(x, 0, 9007199254740991);
 }
 fn v770(x: std.json.Value) bool {
-    return integer(x, 1, 9007199254740991);
+    return x == .string and (std.mem.eql(u8, x.string, "generating") or std.mem.eql(u8, x.string, "retrying") or std.mem.eql(u8, x.string, "deferred"));
 }
 fn v771(x: std.json.Value) bool {
+    return integer(x, 1, 9007199254740991);
+}
+fn v772(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("attempt")) |value| {
-        if (!v772(value)) return false;
+        if (!v773(value)) return false;
     } else return false;
     if (x.object.get("phase")) |value| {
-        if (!v773(value)) return false;
+        if (!v774(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "attempt") or std.mem.eql(u8, key, "phase"))) return false;
     }
     return true;
 }
-fn v772(x: std.json.Value) bool {
-    return v770(x);
-}
 fn v773(x: std.json.Value) bool {
-    return v769(x);
+    return v771(x);
 }
 fn v774(x: std.json.Value) bool {
-    return x == .string and (std.mem.eql(u8, x.string, "pending") or std.mem.eql(u8, x.string, "running") or std.mem.eql(u8, x.string, "done"));
+    return v770(x);
 }
 fn v775(x: std.json.Value) bool {
+    return x == .string and (std.mem.eql(u8, x.string, "pending") or std.mem.eql(u8, x.string, "running") or std.mem.eql(u8, x.string, "done"));
+}
+fn v776(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("callId")) |value| {
-        if (!v776(value)) return false;
-    } else return false;
-    if (x.object.get("name")) |value| {
         if (!v777(value)) return false;
     } else return false;
-    if (x.object.get("status")) |value| {
+    if (x.object.get("name")) |value| {
         if (!v778(value)) return false;
     } else return false;
-    if (x.object.get("taskId")) |value| {
+    if (x.object.get("status")) |value| {
         if (!v779(value)) return false;
+    } else return false;
+    if (x.object.get("taskId")) |value| {
+        if (!v780(value)) return false;
     }
     if (x.object.get("nested")) |value| {
-        if (!v780(value)) return false;
+        if (!v781(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "callId") or std.mem.eql(u8, key, "name") or std.mem.eql(u8, key, "status") or std.mem.eql(u8, key, "taskId") or std.mem.eql(u8, key, "nested"))) return false;
     }
     return true;
 }
-fn v776(x: std.json.Value) bool {
+fn v777(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 128) return false;
     return true;
 }
-fn v777(x: std.json.Value) bool {
+fn v778(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 80) return false;
     return true;
 }
-fn v778(x: std.json.Value) bool {
-    return v774(x);
-}
 fn v779(x: std.json.Value) bool {
-    return v31(x);
+    return v775(x);
 }
 fn v780(x: std.json.Value) bool {
-    return x == .bool;
+    return v31(x);
 }
 fn v781(x: std.json.Value) bool {
+    return x == .bool;
+}
+fn v782(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("state")) |value| {
-        if (!v782(value)) return false;
+        if (!v783(value)) return false;
     } else return false;
     if (x.object.get("taskId")) |value| {
-        if (!v783(value)) return false;
+        if (!v784(value)) return false;
     }
     if (x.object.get("settledTaskId")) |value| {
-        if (!v784(value)) return false;
+        if (!v785(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "state") or std.mem.eql(u8, key, "taskId") or std.mem.eql(u8, key, "settledTaskId"))) return false;
     }
     return true;
 }
-fn v782(x: std.json.Value) bool {
-    return x == .string and (std.mem.eql(u8, x.string, "idle") or std.mem.eql(u8, x.string, "working") or std.mem.eql(u8, x.string, "done") or std.mem.eql(u8, x.string, "error"));
-}
 fn v783(x: std.json.Value) bool {
-    return v31(x);
+    return x == .string and (std.mem.eql(u8, x.string, "idle") or std.mem.eql(u8, x.string, "working") or std.mem.eql(u8, x.string, "done") or std.mem.eql(u8, x.string, "error"));
 }
 fn v784(x: std.json.Value) bool {
     return v31(x);
 }
 fn v785(x: std.json.Value) bool {
-    if (x != .object) return false;
-    if (x.object.get("chatId")) |value| {
-        if (!v786(value)) return false;
-    } else return false;
-    if (x.object.get("busy")) |value| {
-        if (!v787(value)) return false;
-    } else return false;
-    if (x.object.get("queued")) |value| {
-        if (!v788(value)) return false;
-    } else return false;
-    if (x.object.get("runTaskId")) |value| {
-        if (!v789(value)) return false;
-    }
-    if (x.object.get("generation")) |value| {
-        if (!v790(value)) return false;
-    }
-    if (x.object.get("tools")) |value| {
-        if (!v791(value)) return false;
-    } else return false;
-    if (x.object.get("omittedTools")) |value| {
-        if (!v793(value)) return false;
-    } else return false;
-    if (x.object.get("compactions")) |value| {
-        if (!v794(value)) return false;
-    } else return false;
-    if (x.object.get("compactionFailed")) |value| {
-        if (!v795(value)) return false;
-    } else return false;
-    if (x.object.get("agentStatus")) |value| {
-        if (!v796(value)) return false;
-    }
-    for (x.object.keys()) |key| {
-        if (!(std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "busy") or std.mem.eql(u8, key, "queued") or std.mem.eql(u8, key, "runTaskId") or std.mem.eql(u8, key, "generation") or std.mem.eql(u8, key, "tools") or std.mem.eql(u8, key, "omittedTools") or std.mem.eql(u8, key, "compactions") or std.mem.eql(u8, key, "compactionFailed") or std.mem.eql(u8, key, "agentStatus"))) return false;
-    }
-    return true;
+    return v31(x);
 }
 fn v786(x: std.json.Value) bool {
-    return v31(x);
-}
-fn v787(x: std.json.Value) bool {
-    return x == .bool;
-}
-fn v788(x: std.json.Value) bool {
-    return v768(x);
-}
-fn v789(x: std.json.Value) bool {
-    return v31(x);
-}
-fn v790(x: std.json.Value) bool {
-    return v771(x);
-}
-fn v791(x: std.json.Value) bool {
-    if (x != .array or x.array.items.len < 0 or x.array.items.len > 32) return false;
-    for (x.array.items) |value| {
-        if (!v792(value)) return false;
+    if (x != .object) return false;
+    if (x.object.get("chatId")) |value| {
+        if (!v787(value)) return false;
+    } else return false;
+    if (x.object.get("title")) |value| {
+        if (!v788(value)) return false;
+    } else return false;
+    if (x.object.get("agentName")) |value| {
+        if (!v789(value)) return false;
+    }
+    if (x.object.get("agentRune")) |value| {
+        if (!v790(value)) return false;
+    }
+    if (x.object.get("status")) |value| {
+        if (!v791(value)) return false;
+    }
+    for (x.object.keys()) |key| {
+        if (!(std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "title") or std.mem.eql(u8, key, "agentName") or std.mem.eql(u8, key, "agentRune") or std.mem.eql(u8, key, "status"))) return false;
     }
     return true;
 }
+fn v787(x: std.json.Value) bool {
+    return v31(x);
+}
+fn v788(x: std.json.Value) bool {
+    if (x != .string) return false;
+    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
+    if (length > 160) return false;
+    return true;
+}
+fn v789(x: std.json.Value) bool {
+    return v124(x);
+}
+fn v790(x: std.json.Value) bool {
+    return v122(x);
+}
+fn v791(x: std.json.Value) bool {
+    return v782(x);
+}
 fn v792(x: std.json.Value) bool {
-    return v775(x);
+    if (x != .object) return false;
+    if (x.object.get("chatId")) |value| {
+        if (!v793(value)) return false;
+    } else return false;
+    if (x.object.get("items")) |value| {
+        if (!v794(value)) return false;
+    } else return false;
+    if (x.object.get("hasMore")) |value| {
+        if (!v796(value)) return false;
+    } else return false;
+    for (x.object.keys()) |key| {
+        if (!(std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "items") or std.mem.eql(u8, key, "hasMore"))) return false;
+    }
+    return true;
 }
 fn v793(x: std.json.Value) bool {
-    return v768(x);
+    return v31(x);
 }
 fn v794(x: std.json.Value) bool {
-    return v768(x);
+    if (x != .array or x.array.items.len < 0 or x.array.items.len > 16) return false;
+    for (x.array.items) |value| {
+        if (!v795(value)) return false;
+    }
+    return true;
 }
 fn v795(x: std.json.Value) bool {
-    return x == .bool;
+    return v786(x);
 }
 fn v796(x: std.json.Value) bool {
-    return v781(x);
+    return x == .bool;
 }
 fn v797(x: std.json.Value) bool {
     if (x != .object) return false;
-    if (x.object.get("attempt")) |value| {
+    if (x.object.get("chatId")) |value| {
         if (!v798(value)) return false;
     } else return false;
-    if (x.object.get("phase")) |value| {
+    if (x.object.get("busy")) |value| {
         if (!v799(value)) return false;
     } else return false;
-    if (x.object.get("text")) |value| {
+    if (x.object.get("queued")) |value| {
         if (!v800(value)) return false;
     } else return false;
-    if (x.object.get("textClipped")) |value| {
+    if (x.object.get("runTaskId")) |value| {
         if (!v801(value)) return false;
     }
-    if (x.object.get("blocksOmitted")) |value| {
+    if (x.object.get("generation")) |value| {
         if (!v802(value)) return false;
     }
-    if (x.object.get("nonTextOmitted")) |value| {
+    if (x.object.get("tools")) |value| {
         if (!v803(value)) return false;
+    } else return false;
+    if (x.object.get("omittedTools")) |value| {
+        if (!v805(value)) return false;
+    } else return false;
+    if (x.object.get("compactions")) |value| {
+        if (!v806(value)) return false;
+    } else return false;
+    if (x.object.get("compactionFailed")) |value| {
+        if (!v807(value)) return false;
+    } else return false;
+    if (x.object.get("agentStatus")) |value| {
+        if (!v808(value)) return false;
+    }
+    if (x.object.get("subagents")) |value| {
+        if (!v809(value)) return false;
+    }
+    for (x.object.keys()) |key| {
+        if (!(std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "busy") or std.mem.eql(u8, key, "queued") or std.mem.eql(u8, key, "runTaskId") or std.mem.eql(u8, key, "generation") or std.mem.eql(u8, key, "tools") or std.mem.eql(u8, key, "omittedTools") or std.mem.eql(u8, key, "compactions") or std.mem.eql(u8, key, "compactionFailed") or std.mem.eql(u8, key, "agentStatus") or std.mem.eql(u8, key, "subagents"))) return false;
+    }
+    return true;
+}
+fn v798(x: std.json.Value) bool {
+    return v31(x);
+}
+fn v799(x: std.json.Value) bool {
+    return x == .bool;
+}
+fn v800(x: std.json.Value) bool {
+    return v769(x);
+}
+fn v801(x: std.json.Value) bool {
+    return v31(x);
+}
+fn v802(x: std.json.Value) bool {
+    return v772(x);
+}
+fn v803(x: std.json.Value) bool {
+    if (x != .array or x.array.items.len < 0 or x.array.items.len > 32) return false;
+    for (x.array.items) |value| {
+        if (!v804(value)) return false;
+    }
+    return true;
+}
+fn v804(x: std.json.Value) bool {
+    return v776(x);
+}
+fn v805(x: std.json.Value) bool {
+    return v769(x);
+}
+fn v806(x: std.json.Value) bool {
+    return v769(x);
+}
+fn v807(x: std.json.Value) bool {
+    return x == .bool;
+}
+fn v808(x: std.json.Value) bool {
+    return v782(x);
+}
+fn v809(x: std.json.Value) bool {
+    return v792(x);
+}
+fn v810(x: std.json.Value) bool {
+    if (x != .object) return false;
+    if (x.object.get("attempt")) |value| {
+        if (!v811(value)) return false;
+    } else return false;
+    if (x.object.get("phase")) |value| {
+        if (!v812(value)) return false;
+    } else return false;
+    if (x.object.get("text")) |value| {
+        if (!v813(value)) return false;
+    } else return false;
+    if (x.object.get("textClipped")) |value| {
+        if (!v814(value)) return false;
+    }
+    if (x.object.get("blocksOmitted")) |value| {
+        if (!v815(value)) return false;
+    }
+    if (x.object.get("nonTextOmitted")) |value| {
+        if (!v816(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "attempt") or std.mem.eql(u8, key, "phase") or std.mem.eql(u8, key, "text") or std.mem.eql(u8, key, "textClipped") or std.mem.eql(u8, key, "blocksOmitted") or std.mem.eql(u8, key, "nonTextOmitted"))) return false;
     }
     return true;
 }
-fn v798(x: std.json.Value) bool {
+fn v811(x: std.json.Value) bool {
+    return v771(x);
+}
+fn v812(x: std.json.Value) bool {
     return v770(x);
 }
-fn v799(x: std.json.Value) bool {
-    return v769(x);
-}
-fn v800(x: std.json.Value) bool {
+fn v813(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 2048) return false;
     return true;
 }
-fn v801(x: std.json.Value) bool {
+fn v814(x: std.json.Value) bool {
     return x == .bool and x.bool == true;
 }
-fn v802(x: std.json.Value) bool {
-    return v770(x);
+fn v815(x: std.json.Value) bool {
+    return v771(x);
 }
-fn v803(x: std.json.Value) bool {
+fn v816(x: std.json.Value) bool {
     return x == .bool and x.bool == true;
 }
-fn v804(x: std.json.Value) bool {
+fn v817(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("taskId")) |value| {
-        if (!v805(value)) return false;
+        if (!v818(value)) return false;
     } else return false;
     if (x.object.get("name")) |value| {
-        if (!v806(value)) return false;
+        if (!v819(value)) return false;
     } else return false;
     if (x.object.get("text")) |value| {
-        if (!v807(value)) return false;
+        if (!v820(value)) return false;
     } else return false;
     if (x.object.get("textClipped")) |value| {
-        if (!v808(value)) return false;
+        if (!v821(value)) return false;
     }
     if (x.object.get("lossyUtf8")) |value| {
-        if (!v809(value)) return false;
+        if (!v822(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "taskId") or std.mem.eql(u8, key, "name") or std.mem.eql(u8, key, "text") or std.mem.eql(u8, key, "textClipped") or std.mem.eql(u8, key, "lossyUtf8"))) return false;
     }
     return true;
 }
-fn v805(x: std.json.Value) bool {
+fn v818(x: std.json.Value) bool {
     return v31(x);
 }
-fn v806(x: std.json.Value) bool {
+fn v819(x: std.json.Value) bool {
     return x == .string and std.mem.eql(u8, x.string, "bash");
 }
-fn v807(x: std.json.Value) bool {
+fn v820(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 512) return false;
     return true;
 }
-fn v808(x: std.json.Value) bool {
+fn v821(x: std.json.Value) bool {
     return x == .bool and x.bool == true;
 }
-fn v809(x: std.json.Value) bool {
+fn v822(x: std.json.Value) bool {
     return x == .bool and x.bool == true;
 }
-fn v810(x: std.json.Value) bool {
+fn v823(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("version")) |value| {
-        if (!v811(value)) return false;
+        if (!v824(value)) return false;
     } else return false;
     if (x.object.get("chatId")) |value| {
-        if (!v812(value)) return false;
+        if (!v825(value)) return false;
     } else return false;
     if (x.object.get("provisional")) |value| {
-        if (!v813(value)) return false;
+        if (!v826(value)) return false;
     } else return false;
     if (x.object.get("runTaskId")) |value| {
-        if (!v814(value)) return false;
+        if (!v827(value)) return false;
     }
     if (x.object.get("generation")) |value| {
-        if (!v815(value)) return false;
+        if (!v828(value)) return false;
     }
     if (x.object.get("tools")) |value| {
-        if (!v816(value)) return false;
+        if (!v829(value)) return false;
     }
     if (x.object.get("toolSlotsOmitted")) |value| {
-        if (!v818(value)) return false;
+        if (!v831(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "version") or std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "provisional") or std.mem.eql(u8, key, "runTaskId") or std.mem.eql(u8, key, "generation") or std.mem.eql(u8, key, "tools") or std.mem.eql(u8, key, "toolSlotsOmitted"))) return false;
     }
     return true;
 }
-fn v811(x: std.json.Value) bool {
-    return integer(x, 1, 1);
-}
-fn v812(x: std.json.Value) bool {
-    return v31(x);
-}
-fn v813(x: std.json.Value) bool {
-    return x == .bool and x.bool == true;
-}
-fn v814(x: std.json.Value) bool {
-    return v31(x);
-}
-fn v815(x: std.json.Value) bool {
-    return v797(x);
-}
-fn v816(x: std.json.Value) bool {
-    if (x != .array or x.array.items.len < 0 or x.array.items.len > 4) return false;
-    for (x.array.items) |value| {
-        if (!v817(value)) return false;
-    }
-    return true;
-}
-fn v817(x: std.json.Value) bool {
-    return v804(x);
-}
-fn v818(x: std.json.Value) bool {
-    return x == .bool and x.bool == true;
-}
-fn v819(x: std.json.Value) bool {
-    if (x != .object) return false;
-    if (x.object.get("machineId")) |value| {
-        if (!v820(value)) return false;
-    } else return false;
-    if (x.object.get("cwd")) |value| {
-        if (!v821(value)) return false;
-    } else return false;
-    if (x.object.get("path")) |value| {
-        if (!v822(value)) return false;
-    } else return false;
-    if (x.object.get("sha256")) |value| {
-        if (!v823(value)) return false;
-    } else return false;
-    if (x.object.get("bytes")) |value| {
-        if (!v824(value)) return false;
-    } else return false;
-    if (x.object.get("taskId")) |value| {
-        if (!v825(value)) return false;
-    } else return false;
-    if (x.object.get("labelsClipped")) |value| {
-        if (!v826(value)) return false;
-    }
-    for (x.object.keys()) |key| {
-        if (!(std.mem.eql(u8, key, "machineId") or std.mem.eql(u8, key, "cwd") or std.mem.eql(u8, key, "path") or std.mem.eql(u8, key, "sha256") or std.mem.eql(u8, key, "bytes") or std.mem.eql(u8, key, "taskId") or std.mem.eql(u8, key, "labelsClipped"))) return false;
-    }
-    return true;
-}
-fn v820(x: std.json.Value) bool {
-    if (x != .string) return false;
-    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
-    if (length < 1 or length > 80) return false;
-    return true;
-}
-fn v821(x: std.json.Value) bool {
-    if (x != .string) return false;
-    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
-    if (length < 1 or length > 256) return false;
-    return true;
-}
-fn v822(x: std.json.Value) bool {
-    return x == .string and std.mem.eql(u8, x.string, "AGENTS.md");
-}
-fn v823(x: std.json.Value) bool {
-    return v44(x);
-}
 fn v824(x: std.json.Value) bool {
-    return integer(x, 0, 32768);
+    return integer(x, 1, 1);
 }
 fn v825(x: std.json.Value) bool {
     return v31(x);
@@ -10563,269 +10645,277 @@ fn v826(x: std.json.Value) bool {
     return x == .bool and x.bool == true;
 }
 fn v827(x: std.json.Value) bool {
-    return x == .string and (std.mem.eql(u8, x.string, "pending") or std.mem.eql(u8, x.string, "running") or std.mem.eql(u8, x.string, "waiting") or std.mem.eql(u8, x.string, "sleeping") or std.mem.eql(u8, x.string, "completing") or std.mem.eql(u8, x.string, "terminal"));
+    return v31(x);
 }
 fn v828(x: std.json.Value) bool {
-    return x == .string and (std.mem.eql(u8, x.string, "completed") or std.mem.eql(u8, x.string, "failed") or std.mem.eql(u8, x.string, "aborted") or std.mem.eql(u8, x.string, "orphaned"));
+    return v810(x);
 }
 fn v829(x: std.json.Value) bool {
-    return x == .string and (std.mem.eql(u8, x.string, "offline") or std.mem.eql(u8, x.string, "unavailable") or std.mem.eql(u8, x.string, "read_failed") or std.mem.eql(u8, x.string, "effect_uncertain") or std.mem.eql(u8, x.string, "invalid") or std.mem.eql(u8, x.string, "too_large") or std.mem.eql(u8, x.string, "settings_changed") or std.mem.eql(u8, x.string, "busy"));
+    if (x != .array or x.array.items.len < 0 or x.array.items.len > 4) return false;
+    for (x.array.items) |value| {
+        if (!v830(value)) return false;
+    }
+    return true;
 }
 fn v830(x: std.json.Value) bool {
+    return v817(x);
+}
+fn v831(x: std.json.Value) bool {
+    return x == .bool and x.bool == true;
+}
+fn v832(x: std.json.Value) bool {
+    if (x != .object) return false;
+    if (x.object.get("machineId")) |value| {
+        if (!v833(value)) return false;
+    } else return false;
+    if (x.object.get("cwd")) |value| {
+        if (!v834(value)) return false;
+    } else return false;
+    if (x.object.get("path")) |value| {
+        if (!v835(value)) return false;
+    } else return false;
+    if (x.object.get("sha256")) |value| {
+        if (!v836(value)) return false;
+    } else return false;
+    if (x.object.get("bytes")) |value| {
+        if (!v837(value)) return false;
+    } else return false;
+    if (x.object.get("taskId")) |value| {
+        if (!v838(value)) return false;
+    } else return false;
+    if (x.object.get("labelsClipped")) |value| {
+        if (!v839(value)) return false;
+    }
+    for (x.object.keys()) |key| {
+        if (!(std.mem.eql(u8, key, "machineId") or std.mem.eql(u8, key, "cwd") or std.mem.eql(u8, key, "path") or std.mem.eql(u8, key, "sha256") or std.mem.eql(u8, key, "bytes") or std.mem.eql(u8, key, "taskId") or std.mem.eql(u8, key, "labelsClipped"))) return false;
+    }
+    return true;
+}
+fn v833(x: std.json.Value) bool {
+    if (x != .string) return false;
+    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
+    if (length < 1 or length > 80) return false;
+    return true;
+}
+fn v834(x: std.json.Value) bool {
+    if (x != .string) return false;
+    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
+    if (length < 1 or length > 256) return false;
+    return true;
+}
+fn v835(x: std.json.Value) bool {
+    return x == .string and std.mem.eql(u8, x.string, "AGENTS.md");
+}
+fn v836(x: std.json.Value) bool {
+    return v44(x);
+}
+fn v837(x: std.json.Value) bool {
+    return integer(x, 0, 32768);
+}
+fn v838(x: std.json.Value) bool {
+    return v31(x);
+}
+fn v839(x: std.json.Value) bool {
+    return x == .bool and x.bool == true;
+}
+fn v840(x: std.json.Value) bool {
+    return x == .string and (std.mem.eql(u8, x.string, "pending") or std.mem.eql(u8, x.string, "running") or std.mem.eql(u8, x.string, "waiting") or std.mem.eql(u8, x.string, "sleeping") or std.mem.eql(u8, x.string, "completing") or std.mem.eql(u8, x.string, "terminal"));
+}
+fn v841(x: std.json.Value) bool {
+    return x == .string and (std.mem.eql(u8, x.string, "completed") or std.mem.eql(u8, x.string, "failed") or std.mem.eql(u8, x.string, "aborted") or std.mem.eql(u8, x.string, "orphaned"));
+}
+fn v842(x: std.json.Value) bool {
+    return x == .string and (std.mem.eql(u8, x.string, "offline") or std.mem.eql(u8, x.string, "unavailable") or std.mem.eql(u8, x.string, "read_failed") or std.mem.eql(u8, x.string, "effect_uncertain") or std.mem.eql(u8, x.string, "invalid") or std.mem.eql(u8, x.string, "too_large") or std.mem.eql(u8, x.string, "settings_changed") or std.mem.eql(u8, x.string, "busy"));
+}
+fn v843(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("status")) |value| {
-        if (!v831(value)) return false;
+        if (!v844(value)) return false;
     } else return false;
     if (x.object.get("source")) |value| {
-        if (!v832(value)) return false;
+        if (!v845(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "status") or std.mem.eql(u8, key, "source"))) return false;
     }
     return true;
 }
-fn v831(x: std.json.Value) bool {
+fn v844(x: std.json.Value) bool {
     return x == .string and std.mem.eql(u8, x.string, "applied");
 }
-fn v832(x: std.json.Value) bool {
-    return v819(x);
+fn v845(x: std.json.Value) bool {
+    return v832(x);
 }
-fn v833(x: std.json.Value) bool {
+fn v846(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("status")) |value| {
-        if (!v834(value)) return false;
+        if (!v847(value)) return false;
     } else return false;
     if (x.object.get("reason")) |value| {
-        if (!v835(value)) return false;
+        if (!v848(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "status") or std.mem.eql(u8, key, "reason"))) return false;
     }
     return true;
 }
-fn v834(x: std.json.Value) bool {
+fn v847(x: std.json.Value) bool {
     return x == .string and std.mem.eql(u8, x.string, "rejected");
 }
-fn v835(x: std.json.Value) bool {
-    return v829(x);
+fn v848(x: std.json.Value) bool {
+    return v842(x);
 }
-fn v836(x: std.json.Value) bool {
+fn v849(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("status")) |value| {
-        if (!v837(value)) return false;
+        if (!v850(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "status"))) return false;
     }
     return true;
 }
-fn v837(x: std.json.Value) bool {
+fn v850(x: std.json.Value) bool {
     return x == .string and std.mem.eql(u8, x.string, "aborted");
 }
-fn v838(x: std.json.Value) bool {
-    return v839(x) or v840(x) or v841(x);
+fn v851(x: std.json.Value) bool {
+    return v852(x) or v853(x) or v854(x);
 }
-fn v839(x: std.json.Value) bool {
-    return v830(x);
+fn v852(x: std.json.Value) bool {
+    return v843(x);
 }
-fn v840(x: std.json.Value) bool {
-    return v833(x);
+fn v853(x: std.json.Value) bool {
+    return v846(x);
 }
-fn v841(x: std.json.Value) bool {
-    return v836(x);
+fn v854(x: std.json.Value) bool {
+    return v849(x);
 }
-fn v842(x: std.json.Value) bool {
+fn v855(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("taskId")) |value| {
-        if (!v843(value)) return false;
+        if (!v856(value)) return false;
     } else return false;
     if (x.object.get("state")) |value| {
-        if (!v844(value)) return false;
+        if (!v857(value)) return false;
     } else return false;
     if (x.object.get("abortRequested")) |value| {
-        if (!v845(value)) return false;
+        if (!v858(value)) return false;
     }
     if (x.object.get("outcome")) |value| {
-        if (!v846(value)) return false;
+        if (!v859(value)) return false;
     }
     if (x.object.get("result")) |value| {
-        if (!v847(value)) return false;
+        if (!v860(value)) return false;
     }
     if (x.object.get("resultOmitted")) |value| {
-        if (!v848(value)) return false;
+        if (!v861(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "taskId") or std.mem.eql(u8, key, "state") or std.mem.eql(u8, key, "abortRequested") or std.mem.eql(u8, key, "outcome") or std.mem.eql(u8, key, "result") or std.mem.eql(u8, key, "resultOmitted"))) return false;
     }
     return true;
 }
-fn v843(x: std.json.Value) bool {
+fn v856(x: std.json.Value) bool {
     return v31(x);
 }
-fn v844(x: std.json.Value) bool {
-    return v827(x);
+fn v857(x: std.json.Value) bool {
+    return v840(x);
 }
-fn v845(x: std.json.Value) bool {
+fn v858(x: std.json.Value) bool {
     return x == .bool and x.bool == true;
 }
-fn v846(x: std.json.Value) bool {
-    return v828(x);
+fn v859(x: std.json.Value) bool {
+    return v841(x);
 }
-fn v847(x: std.json.Value) bool {
-    return v838(x);
+fn v860(x: std.json.Value) bool {
+    return v851(x);
 }
-fn v848(x: std.json.Value) bool {
+fn v861(x: std.json.Value) bool {
     return x == .bool and x.bool == true;
 }
-fn v849(x: std.json.Value) bool {
+fn v862(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("version")) |value| {
-        if (!v850(value)) return false;
+        if (!v863(value)) return false;
     } else return false;
     if (x.object.get("chatId")) |value| {
-        if (!v851(value)) return false;
+        if (!v864(value)) return false;
     } else return false;
     if (x.object.get("source")) |value| {
-        if (!v852(value)) return false;
+        if (!v865(value)) return false;
     } else return false;
     if (x.object.get("import")) |value| {
-        if (!v855(value)) return false;
+        if (!v868(value)) return false;
     } else return false;
     if (x.object.get("sourceOmitted")) |value| {
-        if (!v858(value)) return false;
+        if (!v871(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "version") or std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "source") or std.mem.eql(u8, key, "import") or std.mem.eql(u8, key, "sourceOmitted"))) return false;
     }
     return true;
 }
-fn v850(x: std.json.Value) bool {
+fn v863(x: std.json.Value) bool {
     return integer(x, 1, 1);
 }
-fn v851(x: std.json.Value) bool {
+fn v864(x: std.json.Value) bool {
     return v31(x);
 }
-fn v852(x: std.json.Value) bool {
-    return v853(x) or v854(x);
+fn v865(x: std.json.Value) bool {
+    return v866(x) or v867(x);
 }
-fn v853(x: std.json.Value) bool {
-    return v819(x);
+fn v866(x: std.json.Value) bool {
+    return v832(x);
 }
-fn v854(x: std.json.Value) bool {
+fn v867(x: std.json.Value) bool {
     return x == .null;
 }
-fn v855(x: std.json.Value) bool {
-    return v856(x) or v857(x);
+fn v868(x: std.json.Value) bool {
+    return v869(x) or v870(x);
 }
-fn v856(x: std.json.Value) bool {
-    return v842(x);
+fn v869(x: std.json.Value) bool {
+    return v855(x);
 }
-fn v857(x: std.json.Value) bool {
+fn v870(x: std.json.Value) bool {
     return x == .null;
 }
-fn v858(x: std.json.Value) bool {
+fn v871(x: std.json.Value) bool {
     return x == .bool and x.bool == true;
 }
-fn v859(x: std.json.Value) bool {
+fn v872(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     _ = length;
     return pattern(x.string, &.{.{ .chars = "0123456789", .min = 1, .max = 16 }});
 }
-fn v860(x: std.json.Value) bool {
-    if (x != .object) return false;
-    if (x.object.get("chatId")) |value| {
-        if (!v861(value)) return false;
-    } else return false;
-    if (x.object.get("limit")) |value| {
-        if (!v862(value)) return false;
-    }
-    if (x.object.get("before")) |value| {
-        if (!v863(value)) return false;
-    }
-    if (x.object.get("after")) |value| {
-        if (!v864(value)) return false;
-    }
-    if (x.object.get("includeActivity")) |value| {
-        if (!v865(value)) return false;
-    }
-    if (x.object.get("includeAgentStatus")) |value| {
-        if (!v866(value)) return false;
-    }
-    if (x.object.get("includeProgress")) |value| {
-        if (!v867(value)) return false;
-    }
-    if (x.object.get("includeInstructions")) |value| {
-        if (!v868(value)) return false;
-    }
-    return true;
-}
-fn v861(x: std.json.Value) bool {
-    return v31(x);
-}
-fn v862(x: std.json.Value) bool {
-    return integer(x, 1, 100);
-}
-fn v863(x: std.json.Value) bool {
-    return v31(x);
-}
-fn v864(x: std.json.Value) bool {
-    return v859(x);
-}
-fn v865(x: std.json.Value) bool {
-    return x == .bool;
-}
-fn v866(x: std.json.Value) bool {
-    return x == .bool;
-}
-fn v867(x: std.json.Value) bool {
-    return x == .bool;
-}
-fn v868(x: std.json.Value) bool {
-    return x == .bool;
-}
-fn v869(x: std.json.Value) bool {
-    if (x != .string) return false;
-    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
-    if (length > 1048576) return false;
-    return true;
-}
-fn v870(x: std.json.Value) bool {
-    if (x != .object) return false;
-    if (x.object.get("text")) |value| {
-        if (!v871(value)) return false;
-    } else return false;
-    if (x.object.get("origin")) |value| {
-        if (!v872(value)) return false;
-    }
-    return true;
-}
-fn v871(x: std.json.Value) bool {
-    return v869(x);
-}
-fn v872(x: std.json.Value) bool {
-    _ = x;
-    return true;
-}
 fn v873(x: std.json.Value) bool {
     if (x != .object) return false;
-    if (x.object.get("rootChatId")) |value| {
+    if (x.object.get("chatId")) |value| {
         if (!v874(value)) return false;
     } else return false;
-    if (x.object.get("rootRequestId")) |value| {
+    if (x.object.get("limit")) |value| {
         if (!v875(value)) return false;
-    } else return false;
-    if (x.object.get("hop")) |value| {
+    }
+    if (x.object.get("before")) |value| {
         if (!v876(value)) return false;
-    } else return false;
-    if (x.object.get("replyToChatId")) |value| {
+    }
+    if (x.object.get("after")) |value| {
         if (!v877(value)) return false;
-    } else return false;
-    if (x.object.get("replyToRequestId")) |value| {
+    }
+    if (x.object.get("includeActivity")) |value| {
         if (!v878(value)) return false;
-    } else return false;
-    for (x.object.keys()) |key| {
-        if (!(std.mem.eql(u8, key, "rootChatId") or std.mem.eql(u8, key, "rootRequestId") or std.mem.eql(u8, key, "hop") or std.mem.eql(u8, key, "replyToChatId") or std.mem.eql(u8, key, "replyToRequestId"))) return false;
+    }
+    if (x.object.get("includeAgentStatus")) |value| {
+        if (!v879(value)) return false;
+    }
+    if (x.object.get("includeSubagents")) |value| {
+        if (!v880(value)) return false;
+    }
+    if (x.object.get("includeProgress")) |value| {
+        if (!v881(value)) return false;
+    }
+    if (x.object.get("includeInstructions")) |value| {
+        if (!v882(value)) return false;
     }
     return true;
 }
@@ -10833,2042 +10923,2120 @@ fn v874(x: std.json.Value) bool {
     return v31(x);
 }
 fn v875(x: std.json.Value) bool {
-    return v547(x);
+    return integer(x, 1, 100);
 }
 fn v876(x: std.json.Value) bool {
-    return integer(x, 0, 8);
+    return v31(x);
 }
 fn v877(x: std.json.Value) bool {
-    return v31(x);
+    return v872(x);
 }
 fn v878(x: std.json.Value) bool {
-    return v547(x);
+    return x == .bool;
 }
 fn v879(x: std.json.Value) bool {
-    if (x != .object) return false;
-    if (x.object.get("kind")) |value| {
-        if (!v880(value)) return false;
-    } else return false;
-    if (x.object.get("chatId")) |value| {
-        if (!v881(value)) return false;
-    } else return false;
-    if (x.object.get("taskId")) |value| {
-        if (!v882(value)) return false;
-    } else return false;
-    if (x.object.get("chain")) |value| {
-        if (!v883(value)) return false;
-    }
-    return true;
+    return x == .bool;
 }
 fn v880(x: std.json.Value) bool {
-    return x == .string and std.mem.eql(u8, x.string, "task-tool");
+    return x == .bool;
 }
 fn v881(x: std.json.Value) bool {
-    return v31(x);
+    return x == .bool;
 }
 fn v882(x: std.json.Value) bool {
-    return v31(x);
+    return x == .bool;
 }
 fn v883(x: std.json.Value) bool {
-    return v873(x);
+    if (x != .string) return false;
+    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
+    if (length > 1048576) return false;
+    return true;
 }
 fn v884(x: std.json.Value) bool {
     if (x != .object) return false;
-    if (x.object.get("type")) |value| {
+    if (x.object.get("text")) |value| {
         if (!v885(value)) return false;
     } else return false;
-    if (x.object.get("text")) |value| {
+    if (x.object.get("origin")) |value| {
         if (!v886(value)) return false;
-    }
-    if (x.object.get("name")) |value| {
-        if (!v887(value)) return false;
     }
     return true;
 }
 fn v885(x: std.json.Value) bool {
-    if (x != .string) return false;
-    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
-    if (length < 1 or length > 1048576) return false;
-    return true;
+    return v883(x);
 }
 fn v886(x: std.json.Value) bool {
-    return v869(x);
-}
-fn v887(x: std.json.Value) bool {
-    return v869(x);
-}
-fn v888(x: std.json.Value) bool {
-    if (x != .object) return false;
-    if (x.object.get("content")) |value| {
-        if (!v889(value)) return false;
-    }
-    if (x.object.get("stopReason")) |value| {
-        if (!v891(value)) return false;
-    }
-    if (x.object.get("errorMessage")) |value| {
-        if (!v892(value)) return false;
-    }
-    if (x.object.get("toolName")) |value| {
-        if (!v893(value)) return false;
-    }
-    if (x.object.get("isError")) |value| {
-        if (!v894(value)) return false;
-    }
-    if (x.object.get("details")) |value| {
-        if (!v895(value)) return false;
-    }
-    return true;
-}
-fn v889(x: std.json.Value) bool {
-    if (x != .array or x.array.items.len < 0 or x.array.items.len > 4096) return false;
-    for (x.array.items) |value| {
-        if (!v890(value)) return false;
-    }
-    return true;
-}
-fn v890(x: std.json.Value) bool {
-    return v884(x);
-}
-fn v891(x: std.json.Value) bool {
-    return v869(x);
-}
-fn v892(x: std.json.Value) bool {
-    return v869(x);
-}
-fn v893(x: std.json.Value) bool {
-    return v869(x);
-}
-fn v894(x: std.json.Value) bool {
-    return x == .bool;
-}
-fn v895(x: std.json.Value) bool {
     _ = x;
     return true;
 }
-fn v896(x: std.json.Value) bool {
-    if (x != .array or x.array.items.len < 0 or x.array.items.len > 4096) return false;
-    for (x.array.items) |value| {
+fn v887(x: std.json.Value) bool {
+    if (x != .object) return false;
+    if (x.object.get("rootChatId")) |value| {
+        if (!v888(value)) return false;
+    } else return false;
+    if (x.object.get("rootRequestId")) |value| {
+        if (!v889(value)) return false;
+    } else return false;
+    if (x.object.get("hop")) |value| {
+        if (!v890(value)) return false;
+    } else return false;
+    if (x.object.get("replyToChatId")) |value| {
+        if (!v891(value)) return false;
+    } else return false;
+    if (x.object.get("replyToRequestId")) |value| {
+        if (!v892(value)) return false;
+    } else return false;
+    for (x.object.keys()) |key| {
+        if (!(std.mem.eql(u8, key, "rootChatId") or std.mem.eql(u8, key, "rootRequestId") or std.mem.eql(u8, key, "hop") or std.mem.eql(u8, key, "replyToChatId") or std.mem.eql(u8, key, "replyToRequestId"))) return false;
+    }
+    return true;
+}
+fn v888(x: std.json.Value) bool {
+    return v31(x);
+}
+fn v889(x: std.json.Value) bool {
+    return v547(x);
+}
+fn v890(x: std.json.Value) bool {
+    return integer(x, 0, 8);
+}
+fn v891(x: std.json.Value) bool {
+    return v31(x);
+}
+fn v892(x: std.json.Value) bool {
+    return v547(x);
+}
+fn v893(x: std.json.Value) bool {
+    if (x != .object) return false;
+    if (x.object.get("kind")) |value| {
+        if (!v894(value)) return false;
+    } else return false;
+    if (x.object.get("chatId")) |value| {
+        if (!v895(value)) return false;
+    } else return false;
+    if (x.object.get("taskId")) |value| {
+        if (!v896(value)) return false;
+    } else return false;
+    if (x.object.get("chain")) |value| {
         if (!v897(value)) return false;
     }
     return true;
 }
+fn v894(x: std.json.Value) bool {
+    return x == .string and std.mem.eql(u8, x.string, "task-tool");
+}
+fn v895(x: std.json.Value) bool {
+    return v31(x);
+}
+fn v896(x: std.json.Value) bool {
+    return v31(x);
+}
 fn v897(x: std.json.Value) bool {
-    return v888(x);
+    return v887(x);
 }
 fn v898(x: std.json.Value) bool {
     if (x != .object) return false;
-    if (x.object.get("id")) |value| {
+    if (x.object.get("type")) |value| {
         if (!v899(value)) return false;
     } else return false;
-    if (x.object.get("kind")) |value| {
+    if (x.object.get("text")) |value| {
         if (!v900(value)) return false;
-    } else return false;
-    if (x.object.get("data")) |value| {
-        if (!v901(value)) return false;
     }
-    if (x.object.get("model")) |value| {
-        if (!v902(value)) return false;
+    if (x.object.get("name")) |value| {
+        if (!v901(value)) return false;
     }
     return true;
 }
 fn v899(x: std.json.Value) bool {
-    return integer(x, 1, 9007199254740991);
-}
-fn v900(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length < 1 or length > 1048576) return false;
     return true;
 }
+fn v900(x: std.json.Value) bool {
+    return v883(x);
+}
 fn v901(x: std.json.Value) bool {
-    _ = x;
-    return true;
+    return v883(x);
 }
 fn v902(x: std.json.Value) bool {
-    _ = x;
+    if (x != .object) return false;
+    if (x.object.get("content")) |value| {
+        if (!v903(value)) return false;
+    }
+    if (x.object.get("stopReason")) |value| {
+        if (!v905(value)) return false;
+    }
+    if (x.object.get("errorMessage")) |value| {
+        if (!v906(value)) return false;
+    }
+    if (x.object.get("toolName")) |value| {
+        if (!v907(value)) return false;
+    }
+    if (x.object.get("isError")) |value| {
+        if (!v908(value)) return false;
+    }
+    if (x.object.get("details")) |value| {
+        if (!v909(value)) return false;
+    }
     return true;
 }
 fn v903(x: std.json.Value) bool {
+    if (x != .array or x.array.items.len < 0 or x.array.items.len > 4096) return false;
+    for (x.array.items) |value| {
+        if (!v904(value)) return false;
+    }
+    return true;
+}
+fn v904(x: std.json.Value) bool {
+    return v898(x);
+}
+fn v905(x: std.json.Value) bool {
+    return v883(x);
+}
+fn v906(x: std.json.Value) bool {
+    return v883(x);
+}
+fn v907(x: std.json.Value) bool {
+    return v883(x);
+}
+fn v908(x: std.json.Value) bool {
+    return x == .bool;
+}
+fn v909(x: std.json.Value) bool {
+    _ = x;
+    return true;
+}
+fn v910(x: std.json.Value) bool {
+    if (x != .array or x.array.items.len < 0 or x.array.items.len > 4096) return false;
+    for (x.array.items) |value| {
+        if (!v911(value)) return false;
+    }
+    return true;
+}
+fn v911(x: std.json.Value) bool {
+    return v902(x);
+}
+fn v912(x: std.json.Value) bool {
+    if (x != .object) return false;
+    if (x.object.get("id")) |value| {
+        if (!v913(value)) return false;
+    } else return false;
+    if (x.object.get("kind")) |value| {
+        if (!v914(value)) return false;
+    } else return false;
+    if (x.object.get("data")) |value| {
+        if (!v915(value)) return false;
+    }
+    if (x.object.get("model")) |value| {
+        if (!v916(value)) return false;
+    }
+    return true;
+}
+fn v913(x: std.json.Value) bool {
+    return integer(x, 1, 9007199254740991);
+}
+fn v914(x: std.json.Value) bool {
+    if (x != .string) return false;
+    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
+    if (length < 1 or length > 1048576) return false;
+    return true;
+}
+fn v915(x: std.json.Value) bool {
+    _ = x;
+    return true;
+}
+fn v916(x: std.json.Value) bool {
+    _ = x;
+    return true;
+}
+fn v917(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("items")) |value| {
-        if (!v904(value)) return false;
+        if (!v918(value)) return false;
     } else return false;
     if (x.object.get("next")) |value| {
-        if (!v906(value)) return false;
+        if (!v920(value)) return false;
     }
     if (x.object.get("activity")) |value| {
-        if (!v907(value)) return false;
+        if (!v921(value)) return false;
     }
     if (x.object.get("progress")) |value| {
-        if (!v908(value)) return false;
+        if (!v922(value)) return false;
     }
     if (x.object.get("instructions")) |value| {
-        if (!v909(value)) return false;
+        if (!v923(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "items") or std.mem.eql(u8, key, "next") or std.mem.eql(u8, key, "activity") or std.mem.eql(u8, key, "progress") or std.mem.eql(u8, key, "instructions"))) return false;
     }
     return true;
 }
-fn v904(x: std.json.Value) bool {
+fn v918(x: std.json.Value) bool {
     if (x != .array or x.array.items.len < 0 or x.array.items.len > 100) return false;
     for (x.array.items) |value| {
-        if (!v905(value)) return false;
+        if (!v919(value)) return false;
     }
     return true;
 }
-fn v905(x: std.json.Value) bool {
-    return v898(x);
+fn v919(x: std.json.Value) bool {
+    return v912(x);
 }
-fn v906(x: std.json.Value) bool {
+fn v920(x: std.json.Value) bool {
     return v31(x);
 }
-fn v907(x: std.json.Value) bool {
-    return v785(x);
+fn v921(x: std.json.Value) bool {
+    return v797(x);
 }
-fn v908(x: std.json.Value) bool {
-    return v810(x);
+fn v922(x: std.json.Value) bool {
+    return v823(x);
 }
-fn v909(x: std.json.Value) bool {
-    return v849(x);
+fn v923(x: std.json.Value) bool {
+    return v862(x);
 }
-fn v910(x: std.json.Value) bool {
+fn v924(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("chatId")) |value| {
-        if (!v911(value)) return false;
+        if (!v925(value)) return false;
     } else return false;
     return true;
 }
-fn v911(x: std.json.Value) bool {
+fn v925(x: std.json.Value) bool {
     return v31(x);
 }
-fn v912(x: std.json.Value) bool {
+fn v926(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("requested")) |value| {
-        if (!v913(value)) return false;
+        if (!v927(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "requested"))) return false;
     }
     return true;
 }
-fn v913(x: std.json.Value) bool {
+fn v927(x: std.json.Value) bool {
     return x == .bool and x.bool == true;
 }
-fn v914(x: std.json.Value) bool {
+fn v928(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("chatId")) |value| {
-        if (!v915(value)) return false;
+        if (!v929(value)) return false;
     } else return false;
     if (x.object.get("allocationId")) |value| {
-        if (!v916(value)) return false;
+        if (!v930(value)) return false;
     } else return false;
     if (x.object.get("blockId")) |value| {
-        if (!v917(value)) return false;
+        if (!v931(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "allocationId") or std.mem.eql(u8, key, "blockId"))) return false;
     }
     return true;
 }
-fn v915(x: std.json.Value) bool {
+fn v929(x: std.json.Value) bool {
     return v31(x);
 }
-fn v916(x: std.json.Value) bool {
+fn v930(x: std.json.Value) bool {
     return v29(x);
 }
-fn v917(x: std.json.Value) bool {
+fn v931(x: std.json.Value) bool {
     return v35(x);
 }
-fn v918(x: std.json.Value) bool {
+fn v932(x: std.json.Value) bool {
     return x == .string and (std.mem.eql(u8, x.string, "unbound") or std.mem.eql(u8, x.string, "matched"));
 }
-fn v919(x: std.json.Value) bool {
+fn v933(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("version")) |value| {
-        if (!v920(value)) return false;
+        if (!v934(value)) return false;
     } else return false;
     if (x.object.get("chatId")) |value| {
-        if (!v921(value)) return false;
+        if (!v935(value)) return false;
     } else return false;
     if (x.object.get("taskId")) |value| {
-        if (!v922(value)) return false;
+        if (!v936(value)) return false;
     } else return false;
     if (x.object.get("allocationId")) |value| {
-        if (!v923(value)) return false;
+        if (!v937(value)) return false;
     } else return false;
     if (x.object.get("blockId")) |value| {
-        if (!v924(value)) return false;
+        if (!v938(value)) return false;
     } else return false;
     if (x.object.get("registered")) |value| {
-        if (!v925(value)) return false;
+        if (!v939(value)) return false;
     } else return false;
     if (x.object.get("observation")) |value| {
-        if (!v926(value)) return false;
+        if (!v940(value)) return false;
     } else return false;
     if (x.object.get("historical")) |value| {
-        if (!v927(value)) return false;
+        if (!v941(value)) return false;
     } else return false;
     if (x.object.get("live")) |value| {
-        if (!v928(value)) return false;
+        if (!v942(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "version") or std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "taskId") or std.mem.eql(u8, key, "allocationId") or std.mem.eql(u8, key, "blockId") or std.mem.eql(u8, key, "registered") or std.mem.eql(u8, key, "observation") or std.mem.eql(u8, key, "historical") or std.mem.eql(u8, key, "live"))) return false;
     }
     return true;
 }
-fn v920(x: std.json.Value) bool {
+fn v934(x: std.json.Value) bool {
     return integer(x, 1, 1);
 }
-fn v921(x: std.json.Value) bool {
+fn v935(x: std.json.Value) bool {
     return v31(x);
 }
-fn v922(x: std.json.Value) bool {
+fn v936(x: std.json.Value) bool {
     return v31(x);
 }
-fn v923(x: std.json.Value) bool {
+fn v937(x: std.json.Value) bool {
     return v29(x);
 }
-fn v924(x: std.json.Value) bool {
+fn v938(x: std.json.Value) bool {
     return v35(x);
 }
-fn v925(x: std.json.Value) bool {
+fn v939(x: std.json.Value) bool {
     return x == .bool and x.bool == true;
 }
-fn v926(x: std.json.Value) bool {
-    return v918(x);
+fn v940(x: std.json.Value) bool {
+    return v932(x);
 }
-fn v927(x: std.json.Value) bool {
+fn v941(x: std.json.Value) bool {
     return x == .bool and x.bool == true;
 }
-fn v928(x: std.json.Value) bool {
+fn v942(x: std.json.Value) bool {
     return x == .string and std.mem.eql(u8, x.string, "not_checked");
 }
-fn v929(x: std.json.Value) bool {
-    return v930(x) or v931(x);
+fn v943(x: std.json.Value) bool {
+    return v944(x) or v945(x);
 }
-fn v930(x: std.json.Value) bool {
+fn v944(x: std.json.Value) bool {
     return v29(x);
 }
-fn v931(x: std.json.Value) bool {
+fn v945(x: std.json.Value) bool {
     return x == .null;
 }
-fn v932(x: std.json.Value) bool {
+fn v946(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("executable")) |value| {
-        if (!v933(value)) return false;
+        if (!v947(value)) return false;
     }
     if (x.object.get("server")) |value| {
-        if (!v934(value)) return false;
+        if (!v948(value)) return false;
     }
     if (x.object.get("hostId")) |value| {
-        if (!v935(value)) return false;
+        if (!v949(value)) return false;
     }
     if (x.object.get("instanceId")) |value| {
-        if (!v936(value)) return false;
+        if (!v950(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "executable") or std.mem.eql(u8, key, "server") or std.mem.eql(u8, key, "hostId") or std.mem.eql(u8, key, "instanceId"))) return false;
     }
     return true;
 }
-fn v933(x: std.json.Value) bool {
+fn v947(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length < 1 or length > 4096) return false;
     return true;
 }
-fn v934(x: std.json.Value) bool {
+fn v948(x: std.json.Value) bool {
     return v106(x);
 }
-fn v935(x: std.json.Value) bool {
+fn v949(x: std.json.Value) bool {
     return v29(x);
 }
-fn v936(x: std.json.Value) bool {
+fn v950(x: std.json.Value) bool {
     return v29(x);
 }
-fn v937(x: std.json.Value) bool {
+fn v951(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("chatId")) |value| {
-        if (!v938(value)) return false;
+        if (!v952(value)) return false;
     } else return false;
     if (x.object.get("requestId")) |value| {
-        if (!v939(value)) return false;
+        if (!v953(value)) return false;
     } else return false;
     if (x.object.get("port")) |value| {
-        if (!v940(value)) return false;
+        if (!v954(value)) return false;
     } else return false;
     if (x.object.get("target")) |value| {
-        if (!v941(value)) return false;
+        if (!v955(value)) return false;
     }
     if (x.object.get("confirmedOnly")) |value| {
-        if (!v942(value)) return false;
+        if (!v956(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "requestId") or std.mem.eql(u8, key, "port") or std.mem.eql(u8, key, "target") or std.mem.eql(u8, key, "confirmedOnly"))) return false;
     }
     return true;
 }
-fn v938(x: std.json.Value) bool {
+fn v952(x: std.json.Value) bool {
     return v31(x);
 }
-fn v939(x: std.json.Value) bool {
+fn v953(x: std.json.Value) bool {
     return v29(x);
 }
-fn v940(x: std.json.Value) bool {
+fn v954(x: std.json.Value) bool {
     return integer(x, 1, 65535);
 }
-fn v941(x: std.json.Value) bool {
-    return v932(x);
+fn v955(x: std.json.Value) bool {
+    return v946(x);
 }
-fn v942(x: std.json.Value) bool {
+fn v956(x: std.json.Value) bool {
     return x == .bool;
 }
-fn v943(x: std.json.Value) bool {
+fn v957(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("chatId")) |value| {
-        if (!v944(value)) return false;
+        if (!v958(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "chatId"))) return false;
     }
     return true;
 }
-fn v944(x: std.json.Value) bool {
+fn v958(x: std.json.Value) bool {
     return v31(x);
 }
-fn v945(x: std.json.Value) bool {
+fn v959(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("sessionId")) |value| {
-        if (!v946(value)) return false;
+        if (!v960(value)) return false;
     } else return false;
     if (x.object.get("windowId")) |value| {
-        if (!v947(value)) return false;
+        if (!v961(value)) return false;
     } else return false;
     if (x.object.get("blockId")) |value| {
-        if (!v948(value)) return false;
+        if (!v962(value)) return false;
     } else return false;
     if (x.object.get("pid")) |value| {
-        if (!v949(value)) return false;
+        if (!v963(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "sessionId") or std.mem.eql(u8, key, "windowId") or std.mem.eql(u8, key, "blockId") or std.mem.eql(u8, key, "pid"))) return false;
     }
     return true;
 }
-fn v946(x: std.json.Value) bool {
+fn v960(x: std.json.Value) bool {
     return v195(x);
 }
-fn v947(x: std.json.Value) bool {
+fn v961(x: std.json.Value) bool {
     return v197(x);
 }
-fn v948(x: std.json.Value) bool {
+fn v962(x: std.json.Value) bool {
     return v35(x);
 }
-fn v949(x: std.json.Value) bool {
+fn v963(x: std.json.Value) bool {
     return integer(x, 1, 2147483647);
 }
-fn v950(x: std.json.Value) bool {
+fn v964(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("version")) |value| {
-        if (!v951(value)) return false;
+        if (!v965(value)) return false;
     } else return false;
     if (x.object.get("id")) |value| {
-        if (!v952(value)) return false;
+        if (!v966(value)) return false;
     } else return false;
     if (x.object.get("hubId")) |value| {
-        if (!v953(value)) return false;
+        if (!v967(value)) return false;
     } else return false;
     if (x.object.get("machineId")) |value| {
-        if (!v954(value)) return false;
+        if (!v968(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "version") or std.mem.eql(u8, key, "id") or std.mem.eql(u8, key, "hubId") or std.mem.eql(u8, key, "machineId"))) return false;
     }
     return true;
 }
-fn v951(x: std.json.Value) bool {
+fn v965(x: std.json.Value) bool {
     return integer(x, 1, 1);
 }
-fn v952(x: std.json.Value) bool {
+fn v966(x: std.json.Value) bool {
     return v29(x);
 }
-fn v953(x: std.json.Value) bool {
+fn v967(x: std.json.Value) bool {
     return v29(x);
 }
-fn v954(x: std.json.Value) bool {
+fn v968(x: std.json.Value) bool {
     return v15(x);
 }
-fn v955(x: std.json.Value) bool {
+fn v969(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("version")) |value| {
-        if (!v956(value)) return false;
+        if (!v970(value)) return false;
     } else return false;
     if (x.object.get("id")) |value| {
-        if (!v957(value)) return false;
+        if (!v971(value)) return false;
     } else return false;
     if (x.object.get("hubId")) |value| {
-        if (!v958(value)) return false;
+        if (!v972(value)) return false;
     } else return false;
     if (x.object.get("machineId")) |value| {
-        if (!v959(value)) return false;
+        if (!v973(value)) return false;
     } else return false;
     if (x.object.get("cwd")) |value| {
-        if (!v960(value)) return false;
+        if (!v974(value)) return false;
     } else return false;
     if (x.object.get("client")) |value| {
-        if (!v961(value)) return false;
+        if (!v975(value)) return false;
     } else return false;
     if (x.object.get("draftRoot")) |value| {
-        if (!v962(value)) return false;
+        if (!v976(value)) return false;
     } else return false;
     if (x.object.get("port")) |value| {
-        if (!v963(value)) return false;
+        if (!v977(value)) return false;
     } else return false;
     if (x.object.get("workerSocket")) |value| {
-        if (!v964(value)) return false;
+        if (!v978(value)) return false;
     }
     if (x.object.get("target")) |value| {
-        if (!v965(value)) return false;
+        if (!v979(value)) return false;
     } else return false;
     if (x.object.get("binding")) |value| {
-        if (!v966(value)) return false;
+        if (!v980(value)) return false;
     }
     if (x.object.get("claim")) |value| {
-        if (!v967(value)) return false;
+        if (!v981(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "version") or std.mem.eql(u8, key, "id") or std.mem.eql(u8, key, "hubId") or std.mem.eql(u8, key, "machineId") or std.mem.eql(u8, key, "cwd") or std.mem.eql(u8, key, "client") or std.mem.eql(u8, key, "draftRoot") or std.mem.eql(u8, key, "port") or std.mem.eql(u8, key, "workerSocket") or std.mem.eql(u8, key, "target") or std.mem.eql(u8, key, "binding") or std.mem.eql(u8, key, "claim"))) return false;
     }
     return true;
 }
-fn v956(x: std.json.Value) bool {
+fn v970(x: std.json.Value) bool {
     return integer(x, 1, 1);
 }
-fn v957(x: std.json.Value) bool {
+fn v971(x: std.json.Value) bool {
     return v29(x);
 }
-fn v958(x: std.json.Value) bool {
+fn v972(x: std.json.Value) bool {
     return v29(x);
 }
-fn v959(x: std.json.Value) bool {
+fn v973(x: std.json.Value) bool {
     return v15(x);
 }
-fn v960(x: std.json.Value) bool {
+fn v974(x: std.json.Value) bool {
     return v53(x);
 }
-fn v961(x: std.json.Value) bool {
+fn v975(x: std.json.Value) bool {
     return v53(x);
 }
-fn v962(x: std.json.Value) bool {
+fn v976(x: std.json.Value) bool {
     return v53(x);
 }
-fn v963(x: std.json.Value) bool {
+fn v977(x: std.json.Value) bool {
     return integer(x, 1, 65535);
 }
-fn v964(x: std.json.Value) bool {
+fn v978(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length < 1 or length > 100) return false;
     return true;
 }
-fn v965(x: std.json.Value) bool {
+fn v979(x: std.json.Value) bool {
     return v103(x);
 }
-fn v966(x: std.json.Value) bool {
-    return v945(x);
+fn v980(x: std.json.Value) bool {
+    return v959(x);
 }
-fn v967(x: std.json.Value) bool {
+fn v981(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("chatId")) |value| {
-        if (!v968(value)) return false;
+        if (!v982(value)) return false;
     } else return false;
     if (x.object.get("allocationId")) |value| {
-        if (!v969(value)) return false;
+        if (!v983(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "allocationId"))) return false;
     }
     return true;
 }
-fn v968(x: std.json.Value) bool {
+fn v982(x: std.json.Value) bool {
     return v31(x);
 }
-fn v969(x: std.json.Value) bool {
+fn v983(x: std.json.Value) bool {
     return v29(x);
 }
-fn v970(x: std.json.Value) bool {
+fn v984(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("executable")) |value| {
-        if (!v971(value)) return false;
+        if (!v985(value)) return false;
     } else return false;
     if (x.object.get("server")) |value| {
-        if (!v972(value)) return false;
+        if (!v986(value)) return false;
     } else return false;
     if (x.object.get("hostId")) |value| {
-        if (!v973(value)) return false;
+        if (!v987(value)) return false;
     } else return false;
     if (x.object.get("instanceId")) |value| {
-        if (!v974(value)) return false;
+        if (!v988(value)) return false;
     } else return false;
     if (x.object.get("client")) |value| {
-        if (!v975(value)) return false;
+        if (!v989(value)) return false;
     } else return false;
     if (x.object.get("workerSocket")) |value| {
-        if (!v976(value)) return false;
+        if (!v990(value)) return false;
     }
     if (x.object.get("bootstrap")) |value| {
-        if (!v977(value)) return false;
+        if (!v991(value)) return false;
     }
     if (x.object.get("clientState")) |value| {
-        if (!v978(value)) return false;
+        if (!v992(value)) return false;
     }
     if (x.object.get("port")) |value| {
-        if (!v979(value)) return false;
+        if (!v993(value)) return false;
     } else return false;
     if (x.object.get("hubId")) |value| {
-        if (!v980(value)) return false;
+        if (!v994(value)) return false;
     } else return false;
     if (x.object.get("chatId")) |value| {
-        if (!v981(value)) return false;
+        if (!v995(value)) return false;
     } else return false;
     if (x.object.get("label")) |value| {
-        if (!v982(value)) return false;
+        if (!v996(value)) return false;
     } else return false;
     if (x.object.get("allocationId")) |value| {
-        if (!v983(value)) return false;
+        if (!v997(value)) return false;
     }
     if (x.object.get("sessionId")) |value| {
-        if (!v984(value)) return false;
+        if (!v998(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "executable") or std.mem.eql(u8, key, "server") or std.mem.eql(u8, key, "hostId") or std.mem.eql(u8, key, "instanceId") or std.mem.eql(u8, key, "client") or std.mem.eql(u8, key, "workerSocket") or std.mem.eql(u8, key, "bootstrap") or std.mem.eql(u8, key, "clientState") or std.mem.eql(u8, key, "port") or std.mem.eql(u8, key, "hubId") or std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "label") or std.mem.eql(u8, key, "allocationId") or std.mem.eql(u8, key, "sessionId"))) return false;
     }
     return true;
 }
-fn v971(x: std.json.Value) bool {
-    if (x != .string) return false;
-    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
-    if (length < 1 or length > 4096) return false;
-    return true;
-}
-fn v972(x: std.json.Value) bool {
-    return v106(x);
-}
-fn v973(x: std.json.Value) bool {
-    return v29(x);
-}
-fn v974(x: std.json.Value) bool {
-    return v29(x);
-}
-fn v975(x: std.json.Value) bool {
-    if (x != .string) return false;
-    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
-    if (length < 1 or length > 4096) return false;
-    return true;
-}
-fn v976(x: std.json.Value) bool {
-    if (x != .string) return false;
-    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
-    if (length < 1 or length > 100) return false;
-    return true;
-}
-fn v977(x: std.json.Value) bool {
-    return v110(x);
-}
-fn v978(x: std.json.Value) bool {
-    return v53(x);
-}
-fn v979(x: std.json.Value) bool {
-    return integer(x, 1, 65535);
-}
-fn v980(x: std.json.Value) bool {
-    return v29(x);
-}
-fn v981(x: std.json.Value) bool {
-    return v32(x);
-}
-fn v982(x: std.json.Value) bool {
-    if (x != .string) return false;
-    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
-    _ = length;
-    return pattern(x.string, &.{.{ .chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~", .min = 1, .max = 120 }});
-}
-fn v983(x: std.json.Value) bool {
-    return v929(x);
-}
-fn v984(x: std.json.Value) bool {
-    return v195(x);
-}
 fn v985(x: std.json.Value) bool {
-    if (x != .object) return false;
-    if (x.object.get("version")) |value| {
-        if (!v986(value)) return false;
-    } else return false;
-    if (x.object.get("server")) |value| {
-        if (!v987(value)) return false;
-    } else return false;
-    if (x.object.get("hostId")) |value| {
-        if (!v988(value)) return false;
-    } else return false;
-    if (x.object.get("instanceId")) |value| {
-        if (!v989(value)) return false;
-    } else return false;
-    if (x.object.get("sessionId")) |value| {
-        if (!v990(value)) return false;
-    } else return false;
-    if (x.object.get("windowId")) |value| {
-        if (!v991(value)) return false;
-    } else return false;
-    if (x.object.get("blockId")) |value| {
-        if (!v992(value)) return false;
-    } else return false;
-    if (x.object.get("chatId")) |value| {
-        if (!v993(value)) return false;
-    } else return false;
-    if (x.object.get("hubId")) |value| {
-        if (!v994(value)) return false;
-    } else return false;
-    if (x.object.get("allocationId")) |value| {
-        if (!v995(value)) return false;
-    }
-    if (x.object.get("readiness")) |value| {
-        if (!v996(value)) return false;
-    } else return false;
+    if (x != .string) return false;
+    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
+    if (length < 1 or length > 4096) return false;
     return true;
 }
 fn v986(x: std.json.Value) bool {
-    return integer(x, 1, 1);
+    return v106(x);
 }
 fn v987(x: std.json.Value) bool {
-    return v106(x);
+    return v29(x);
 }
 fn v988(x: std.json.Value) bool {
     return v29(x);
 }
 fn v989(x: std.json.Value) bool {
-    return v29(x);
+    if (x != .string) return false;
+    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
+    if (length < 1 or length > 4096) return false;
+    return true;
 }
 fn v990(x: std.json.Value) bool {
-    return v195(x);
+    if (x != .string) return false;
+    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
+    if (length < 1 or length > 100) return false;
+    return true;
 }
 fn v991(x: std.json.Value) bool {
-    return v197(x);
+    return v110(x);
 }
 fn v992(x: std.json.Value) bool {
-    return v35(x);
+    return v53(x);
 }
 fn v993(x: std.json.Value) bool {
-    return v32(x);
+    return integer(x, 1, 65535);
 }
 fn v994(x: std.json.Value) bool {
     return v29(x);
 }
 fn v995(x: std.json.Value) bool {
-    return v929(x);
+    return v32(x);
 }
 fn v996(x: std.json.Value) bool {
-    return x == .string and std.mem.eql(u8, x.string, "not_checked");
+    if (x != .string) return false;
+    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
+    _ = length;
+    return pattern(x.string, &.{.{ .chars = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~", .min = 1, .max = 120 }});
 }
 fn v997(x: std.json.Value) bool {
+    return v943(x);
+}
+fn v998(x: std.json.Value) bool {
+    return v195(x);
+}
+fn v999(x: std.json.Value) bool {
+    if (x != .object) return false;
+    if (x.object.get("version")) |value| {
+        if (!v1000(value)) return false;
+    } else return false;
+    if (x.object.get("server")) |value| {
+        if (!v1001(value)) return false;
+    } else return false;
+    if (x.object.get("hostId")) |value| {
+        if (!v1002(value)) return false;
+    } else return false;
+    if (x.object.get("instanceId")) |value| {
+        if (!v1003(value)) return false;
+    } else return false;
+    if (x.object.get("sessionId")) |value| {
+        if (!v1004(value)) return false;
+    } else return false;
+    if (x.object.get("windowId")) |value| {
+        if (!v1005(value)) return false;
+    } else return false;
+    if (x.object.get("blockId")) |value| {
+        if (!v1006(value)) return false;
+    } else return false;
+    if (x.object.get("chatId")) |value| {
+        if (!v1007(value)) return false;
+    } else return false;
+    if (x.object.get("hubId")) |value| {
+        if (!v1008(value)) return false;
+    } else return false;
+    if (x.object.get("allocationId")) |value| {
+        if (!v1009(value)) return false;
+    }
+    if (x.object.get("readiness")) |value| {
+        if (!v1010(value)) return false;
+    } else return false;
+    return true;
+}
+fn v1000(x: std.json.Value) bool {
+    return integer(x, 1, 1);
+}
+fn v1001(x: std.json.Value) bool {
+    return v106(x);
+}
+fn v1002(x: std.json.Value) bool {
+    return v29(x);
+}
+fn v1003(x: std.json.Value) bool {
+    return v29(x);
+}
+fn v1004(x: std.json.Value) bool {
+    return v195(x);
+}
+fn v1005(x: std.json.Value) bool {
+    return v197(x);
+}
+fn v1006(x: std.json.Value) bool {
+    return v35(x);
+}
+fn v1007(x: std.json.Value) bool {
+    return v32(x);
+}
+fn v1008(x: std.json.Value) bool {
+    return v29(x);
+}
+fn v1009(x: std.json.Value) bool {
+    return v943(x);
+}
+fn v1010(x: std.json.Value) bool {
+    return x == .string and std.mem.eql(u8, x.string, "not_checked");
+}
+fn v1011(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("executable")) |value| {
-        if (!v998(value)) return false;
+        if (!v1012(value)) return false;
     } else return false;
     if (x.object.get("scope")) |value| {
-        if (!v999(value)) return false;
+        if (!v1013(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "executable") or std.mem.eql(u8, key, "scope"))) return false;
     }
     return true;
 }
-fn v998(x: std.json.Value) bool {
+fn v1012(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length < 1 or length > 4096) return false;
     return true;
 }
-fn v999(x: std.json.Value) bool {
+fn v1013(x: std.json.Value) bool {
     return v226(x);
 }
-fn v1000(x: std.json.Value) bool {
+fn v1014(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("operationId")) |value| {
-        if (!v1001(value)) return false;
+        if (!v1015(value)) return false;
     } else return false;
     if (x.object.get("request")) |value| {
-        if (!v1002(value)) return false;
+        if (!v1016(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "operationId") or std.mem.eql(u8, key, "request"))) return false;
     }
     return true;
 }
-fn v1001(x: std.json.Value) bool {
+fn v1015(x: std.json.Value) bool {
     return v32(x);
 }
-fn v1002(x: std.json.Value) bool {
+fn v1016(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length < 1 or length > 131072) return false;
     return true;
 }
-fn v1003(x: std.json.Value) bool {
+fn v1017(x: std.json.Value) bool {
     return x == .string and (std.mem.eql(u8, x.string, "missing") or std.mem.eql(u8, x.string, "accepted") or std.mem.eql(u8, x.string, "allocated") or std.mem.eql(u8, x.string, "not_allocated") or std.mem.eql(u8, x.string, "conflict") or std.mem.eql(u8, x.string, "inconclusive"));
 }
-fn v1004(x: std.json.Value) bool {
+fn v1018(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("version")) |value| {
-        if (!v1005(value)) return false;
+        if (!v1019(value)) return false;
     } else return false;
     if (x.object.get("operationId")) |value| {
-        if (!v1006(value)) return false;
+        if (!v1020(value)) return false;
     } else return false;
     if (x.object.get("requestHash")) |value| {
-        if (!v1007(value)) return false;
+        if (!v1021(value)) return false;
     } else return false;
     if (x.object.get("state")) |value| {
-        if (!v1008(value)) return false;
+        if (!v1022(value)) return false;
     } else return false;
     if (x.object.get("creation")) |value| {
-        if (!v1009(value)) return false;
+        if (!v1023(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "version") or std.mem.eql(u8, key, "operationId") or std.mem.eql(u8, key, "requestHash") or std.mem.eql(u8, key, "state") or std.mem.eql(u8, key, "creation"))) return false;
     }
     return true;
 }
-fn v1005(x: std.json.Value) bool {
+fn v1019(x: std.json.Value) bool {
     return integer(x, 1, 1);
 }
-fn v1006(x: std.json.Value) bool {
+fn v1020(x: std.json.Value) bool {
     return v32(x);
 }
-fn v1007(x: std.json.Value) bool {
+fn v1021(x: std.json.Value) bool {
     return v44(x);
 }
-fn v1008(x: std.json.Value) bool {
-    return v1003(x);
-}
-fn v1009(x: std.json.Value) bool {
-    return v1010(x) or v1011(x);
-}
-fn v1010(x: std.json.Value) bool {
-    return v985(x);
-}
-fn v1011(x: std.json.Value) bool {
-    return x == .null;
-}
-fn v1012(x: std.json.Value) bool {
-    if (x != .object) return false;
-    if (x.object.get("machineId")) |value| {
-        if (!v1013(value)) return false;
-    }
-    if (x.object.get("cwd")) |value| {
-        if (!v1014(value)) return false;
-    }
-    if (x.object.get("title")) |value| {
-        if (!v1015(value)) return false;
-    } else return false;
-    if (x.object.get("problem")) |value| {
-        if (!v1016(value)) return false;
-    }
-    if (x.object.get("description")) |value| {
-        if (!v1017(value)) return false;
-    }
-    for (x.object.keys()) |key| {
-        if (!(std.mem.eql(u8, key, "machineId") or std.mem.eql(u8, key, "cwd") or std.mem.eql(u8, key, "title") or std.mem.eql(u8, key, "problem") or std.mem.eql(u8, key, "description"))) return false;
-    }
-    return true;
-}
-fn v1013(x: std.json.Value) bool {
-    return v15(x);
-}
-fn v1014(x: std.json.Value) bool {
-    return v53(x);
-}
-fn v1015(x: std.json.Value) bool {
-    if (x != .string) return false;
-    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
-    if (length < 1 or length > 200) return false;
-    return true;
-}
-fn v1016(x: std.json.Value) bool {
-    if (x != .string) return false;
-    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
-    if (length > 2048) return false;
-    return true;
-}
-fn v1017(x: std.json.Value) bool {
-    if (x != .string) return false;
-    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
-    if (length > 8192) return false;
-    return true;
-}
-fn v1018(x: std.json.Value) bool {
-    if (x != .object) return false;
-    if (x.object.get("machineId")) |value| {
-        if (!v1019(value)) return false;
-    } else return false;
-    if (x.object.get("cwd")) |value| {
-        if (!v1020(value)) return false;
-    } else return false;
-    if (x.object.get("title")) |value| {
-        if (!v1021(value)) return false;
-    } else return false;
-    if (x.object.get("problem")) |value| {
-        if (!v1022(value)) return false;
-    }
-    if (x.object.get("description")) |value| {
-        if (!v1023(value)) return false;
-    }
-    for (x.object.keys()) |key| {
-        if (!(std.mem.eql(u8, key, "machineId") or std.mem.eql(u8, key, "cwd") or std.mem.eql(u8, key, "title") or std.mem.eql(u8, key, "problem") or std.mem.eql(u8, key, "description"))) return false;
-    }
-    return true;
-}
-fn v1019(x: std.json.Value) bool {
-    return v15(x);
-}
-fn v1020(x: std.json.Value) bool {
-    return v53(x);
-}
-fn v1021(x: std.json.Value) bool {
-    if (x != .string) return false;
-    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
-    if (length < 1 or length > 200) return false;
-    return true;
-}
 fn v1022(x: std.json.Value) bool {
-    if (x != .string) return false;
-    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
-    if (length > 2048) return false;
-    return true;
+    return v1017(x);
 }
 fn v1023(x: std.json.Value) bool {
+    return v1024(x) or v1025(x);
+}
+fn v1024(x: std.json.Value) bool {
+    return v999(x);
+}
+fn v1025(x: std.json.Value) bool {
+    return x == .null;
+}
+fn v1026(x: std.json.Value) bool {
+    if (x != .object) return false;
+    if (x.object.get("machineId")) |value| {
+        if (!v1027(value)) return false;
+    }
+    if (x.object.get("cwd")) |value| {
+        if (!v1028(value)) return false;
+    }
+    if (x.object.get("title")) |value| {
+        if (!v1029(value)) return false;
+    } else return false;
+    if (x.object.get("problem")) |value| {
+        if (!v1030(value)) return false;
+    }
+    if (x.object.get("description")) |value| {
+        if (!v1031(value)) return false;
+    }
+    for (x.object.keys()) |key| {
+        if (!(std.mem.eql(u8, key, "machineId") or std.mem.eql(u8, key, "cwd") or std.mem.eql(u8, key, "title") or std.mem.eql(u8, key, "problem") or std.mem.eql(u8, key, "description"))) return false;
+    }
+    return true;
+}
+fn v1027(x: std.json.Value) bool {
+    return v15(x);
+}
+fn v1028(x: std.json.Value) bool {
+    return v53(x);
+}
+fn v1029(x: std.json.Value) bool {
+    if (x != .string) return false;
+    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
+    if (length < 1 or length > 200) return false;
+    return true;
+}
+fn v1030(x: std.json.Value) bool {
+    if (x != .string) return false;
+    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
+    if (length > 2048) return false;
+    return true;
+}
+fn v1031(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 8192) return false;
     return true;
 }
-fn v1024(x: std.json.Value) bool {
+fn v1032(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("machineId")) |value| {
-        if (!v1025(value)) return false;
+        if (!v1033(value)) return false;
+    } else return false;
+    if (x.object.get("cwd")) |value| {
+        if (!v1034(value)) return false;
+    } else return false;
+    if (x.object.get("title")) |value| {
+        if (!v1035(value)) return false;
+    } else return false;
+    if (x.object.get("problem")) |value| {
+        if (!v1036(value)) return false;
+    }
+    if (x.object.get("description")) |value| {
+        if (!v1037(value)) return false;
+    }
+    for (x.object.keys()) |key| {
+        if (!(std.mem.eql(u8, key, "machineId") or std.mem.eql(u8, key, "cwd") or std.mem.eql(u8, key, "title") or std.mem.eql(u8, key, "problem") or std.mem.eql(u8, key, "description"))) return false;
+    }
+    return true;
+}
+fn v1033(x: std.json.Value) bool {
+    return v15(x);
+}
+fn v1034(x: std.json.Value) bool {
+    return v53(x);
+}
+fn v1035(x: std.json.Value) bool {
+    if (x != .string) return false;
+    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
+    if (length < 1 or length > 200) return false;
+    return true;
+}
+fn v1036(x: std.json.Value) bool {
+    if (x != .string) return false;
+    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
+    if (length > 2048) return false;
+    return true;
+}
+fn v1037(x: std.json.Value) bool {
+    if (x != .string) return false;
+    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
+    if (length > 8192) return false;
+    return true;
+}
+fn v1038(x: std.json.Value) bool {
+    if (x != .object) return false;
+    if (x.object.get("machineId")) |value| {
+        if (!v1039(value)) return false;
     } else return false;
     if (x.object.get("kind")) |value| {
-        if (!v1026(value)) return false;
+        if (!v1040(value)) return false;
     } else return false;
     if (x.object.get("rex")) |value| {
-        if (!v1027(value)) return false;
+        if (!v1041(value)) return false;
     } else return false;
     if (x.object.get("connection")) |value| {
-        if (!v1028(value)) return false;
+        if (!v1042(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "machineId") or std.mem.eql(u8, key, "kind") or std.mem.eql(u8, key, "rex") or std.mem.eql(u8, key, "connection"))) return false;
     }
     return true;
 }
-fn v1025(x: std.json.Value) bool {
+fn v1039(x: std.json.Value) bool {
     return v15(x);
 }
-fn v1026(x: std.json.Value) bool {
+fn v1040(x: std.json.Value) bool {
     return x == .string and (std.mem.eql(u8, x.string, "local") or std.mem.eql(u8, x.string, "worker"));
 }
-fn v1027(x: std.json.Value) bool {
+fn v1041(x: std.json.Value) bool {
     return x == .bool;
 }
-fn v1028(x: std.json.Value) bool {
+fn v1042(x: std.json.Value) bool {
     return x == .string and (std.mem.eql(u8, x.string, "local") or std.mem.eql(u8, x.string, "connected") or std.mem.eql(u8, x.string, "offline") or std.mem.eql(u8, x.string, "unknown"));
 }
-fn v1029(x: std.json.Value) bool {
+fn v1043(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("sampledAtMs")) |value| {
-        if (!v1030(value)) return false;
+        if (!v1044(value)) return false;
     } else return false;
     if (x.object.get("items")) |value| {
-        if (!v1031(value)) return false;
+        if (!v1045(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "sampledAtMs") or std.mem.eql(u8, key, "items"))) return false;
     }
     return true;
 }
-fn v1030(x: std.json.Value) bool {
+fn v1044(x: std.json.Value) bool {
     return integer(x, 0, 9007199254740991);
 }
-fn v1031(x: std.json.Value) bool {
+fn v1045(x: std.json.Value) bool {
     if (x != .array or x.array.items.len < 0 or x.array.items.len > 9) return false;
     for (x.array.items) |value| {
-        if (!v1032(value)) return false;
+        if (!v1046(value)) return false;
     }
     return true;
 }
-fn v1032(x: std.json.Value) bool {
-    return v1024(x);
+fn v1046(x: std.json.Value) bool {
+    return v1038(x);
 }
-fn v1033(x: std.json.Value) bool {
+fn v1047(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("version")) |value| {
-        if (!v1034(value)) return false;
+        if (!v1048(value)) return false;
     } else return false;
     if (x.object.get("bootstrapId")) |value| {
-        if (!v1035(value)) return false;
+        if (!v1049(value)) return false;
     } else return false;
     if (x.object.get("hubId")) |value| {
-        if (!v1036(value)) return false;
+        if (!v1050(value)) return false;
     } else return false;
     if (x.object.get("machineId")) |value| {
-        if (!v1037(value)) return false;
+        if (!v1051(value)) return false;
     } else return false;
     if (x.object.get("cwd")) |value| {
-        if (!v1038(value)) return false;
+        if (!v1052(value)) return false;
     } else return false;
     if (x.object.get("creationId")) |value| {
-        if (!v1039(value)) return false;
+        if (!v1053(value)) return false;
     } else return false;
     if (x.object.get("adoptionId")) |value| {
-        if (!v1040(value)) return false;
+        if (!v1054(value)) return false;
     } else return false;
     if (x.object.get("inputId")) |value| {
-        if (!v1041(value)) return false;
+        if (!v1055(value)) return false;
     }
     if (x.object.get("title")) |value| {
-        if (!v1042(value)) return false;
+        if (!v1056(value)) return false;
     } else return false;
     if (x.object.get("problem")) |value| {
-        if (!v1043(value)) return false;
+        if (!v1057(value)) return false;
     } else return false;
     if (x.object.get("description")) |value| {
-        if (!v1044(value)) return false;
+        if (!v1058(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "version") or std.mem.eql(u8, key, "bootstrapId") or std.mem.eql(u8, key, "hubId") or std.mem.eql(u8, key, "machineId") or std.mem.eql(u8, key, "cwd") or std.mem.eql(u8, key, "creationId") or std.mem.eql(u8, key, "adoptionId") or std.mem.eql(u8, key, "inputId") or std.mem.eql(u8, key, "title") or std.mem.eql(u8, key, "problem") or std.mem.eql(u8, key, "description"))) return false;
     }
     return true;
 }
-fn v1034(x: std.json.Value) bool {
+fn v1048(x: std.json.Value) bool {
     return integer(x, 1, 1);
 }
-fn v1035(x: std.json.Value) bool {
+fn v1049(x: std.json.Value) bool {
     return v29(x);
 }
-fn v1036(x: std.json.Value) bool {
+fn v1050(x: std.json.Value) bool {
     return v29(x);
 }
-fn v1037(x: std.json.Value) bool {
+fn v1051(x: std.json.Value) bool {
     return v15(x);
 }
-fn v1038(x: std.json.Value) bool {
+fn v1052(x: std.json.Value) bool {
     return v53(x);
 }
-fn v1039(x: std.json.Value) bool {
+fn v1053(x: std.json.Value) bool {
     return v29(x);
 }
-fn v1040(x: std.json.Value) bool {
+fn v1054(x: std.json.Value) bool {
     return v29(x);
 }
-fn v1041(x: std.json.Value) bool {
+fn v1055(x: std.json.Value) bool {
     return v29(x);
 }
-fn v1042(x: std.json.Value) bool {
+fn v1056(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length < 1 or length > 200) return false;
     return true;
 }
-fn v1043(x: std.json.Value) bool {
+fn v1057(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length < 1 or length > 2048) return false;
     return true;
 }
-fn v1044(x: std.json.Value) bool {
+fn v1058(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 8192) return false;
     return true;
 }
-fn v1045(x: std.json.Value) bool {
+fn v1059(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("version")) |value| {
-        if (!v1046(value)) return false;
+        if (!v1060(value)) return false;
     } else return false;
     if (x.object.get("id")) |value| {
-        if (!v1047(value)) return false;
+        if (!v1061(value)) return false;
     } else return false;
     if (x.object.get("action")) |value| {
-        if (!v1048(value)) return false;
+        if (!v1062(value)) return false;
     } else return false;
     if (x.object.get("problem")) |value| {
-        if (!v1049(value)) return false;
+        if (!v1063(value)) return false;
     }
     if (x.object.get("description")) |value| {
-        if (!v1050(value)) return false;
+        if (!v1064(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "version") or std.mem.eql(u8, key, "id") or std.mem.eql(u8, key, "action") or std.mem.eql(u8, key, "problem") or std.mem.eql(u8, key, "description"))) return false;
     }
     return true;
 }
-fn v1046(x: std.json.Value) bool {
+fn v1060(x: std.json.Value) bool {
     return integer(x, 1, 1);
 }
-fn v1047(x: std.json.Value) bool {
+fn v1061(x: std.json.Value) bool {
     return v3(x);
 }
-fn v1048(x: std.json.Value) bool {
+fn v1062(x: std.json.Value) bool {
     return x == .string and (std.mem.eql(u8, x.string, "poll") or std.mem.eql(u8, x.string, "create") or std.mem.eql(u8, x.string, "retry") or std.mem.eql(u8, x.string, "discard"));
 }
-fn v1049(x: std.json.Value) bool {
+fn v1063(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 2048) return false;
     return true;
 }
-fn v1050(x: std.json.Value) bool {
+fn v1064(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 8192) return false;
     return true;
 }
-fn v1051(x: std.json.Value) bool {
+fn v1065(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("chatId")) |value| {
-        if (!v1052(value)) return false;
+        if (!v1066(value)) return false;
     } else return false;
     if (x.object.get("allocationId")) |value| {
-        if (!v1053(value)) return false;
+        if (!v1067(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "allocationId"))) return false;
     }
     return true;
 }
-fn v1052(x: std.json.Value) bool {
+fn v1066(x: std.json.Value) bool {
     return v31(x);
 }
-fn v1053(x: std.json.Value) bool {
+fn v1067(x: std.json.Value) bool {
     return v29(x);
 }
-fn v1054(x: std.json.Value) bool {
+fn v1068(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("version")) |value| {
-        if (!v1055(value)) return false;
+        if (!v1069(value)) return false;
     } else return false;
     if (x.object.get("id")) |value| {
-        if (!v1056(value)) return false;
+        if (!v1070(value)) return false;
     } else return false;
     if (x.object.get("phase")) |value| {
-        if (!v1057(value)) return false;
+        if (!v1071(value)) return false;
     } else return false;
     if (x.object.get("notice")) |value| {
-        if (!v1058(value)) return false;
+        if (!v1072(value)) return false;
     } else return false;
     if (x.object.get("saved")) |value| {
-        if (!v1059(value)) return false;
+        if (!v1073(value)) return false;
     } else return false;
     if (x.object.get("ready")) |value| {
-        if (!v1060(value)) return false;
+        if (!v1074(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "version") or std.mem.eql(u8, key, "id") or std.mem.eql(u8, key, "phase") or std.mem.eql(u8, key, "notice") or std.mem.eql(u8, key, "saved") or std.mem.eql(u8, key, "ready"))) return false;
     }
     return true;
 }
-fn v1055(x: std.json.Value) bool {
+fn v1069(x: std.json.Value) bool {
     return integer(x, 1, 1);
 }
-fn v1056(x: std.json.Value) bool {
+fn v1070(x: std.json.Value) bool {
     return v3(x);
 }
-fn v1057(x: std.json.Value) bool {
+fn v1071(x: std.json.Value) bool {
     return x == .string and (std.mem.eql(u8, x.string, "form") or std.mem.eql(u8, x.string, "waiting") or std.mem.eql(u8, x.string, "ready") or std.mem.eql(u8, x.string, "blocked"));
 }
-fn v1058(x: std.json.Value) bool {
+fn v1072(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 1024) return false;
     return true;
 }
-fn v1059(x: std.json.Value) bool {
+fn v1073(x: std.json.Value) bool {
     return x == .bool;
 }
-fn v1060(x: std.json.Value) bool {
-    return v1051(x);
+fn v1074(x: std.json.Value) bool {
+    return v1065(x);
 }
-fn v1061(x: std.json.Value) bool {
+fn v1075(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("version")) |value| {
-        if (!v1062(value)) return false;
+        if (!v1076(value)) return false;
     } else return false;
     if (x.object.get("id")) |value| {
-        if (!v1063(value)) return false;
+        if (!v1077(value)) return false;
     } else return false;
     if (x.object.get("action")) |value| {
-        if (!v1064(value)) return false;
+        if (!v1078(value)) return false;
     } else return false;
     if (x.object.get("chatId")) |value| {
-        if (!v1065(value)) return false;
-    }
-    if (x.object.get("after")) |value| {
-        if (!v1066(value)) return false;
-    }
-    if (x.object.get("configuration")) |value| {
-        if (!v1067(value)) return false;
-    }
-    if (x.object.get("taskTarget")) |value| {
-        if (!v1077(value)) return false;
-    }
-    if (x.object.get("taskForm")) |value| {
-        if (!v1078(value)) return false;
-    }
-    if (x.object.get("text")) |value| {
         if (!v1079(value)) return false;
     }
-    if (x.object.get("hold")) |value| {
+    if (x.object.get("after")) |value| {
         if (!v1080(value)) return false;
+    }
+    if (x.object.get("configuration")) |value| {
+        if (!v1081(value)) return false;
+    }
+    if (x.object.get("taskTarget")) |value| {
+        if (!v1091(value)) return false;
+    }
+    if (x.object.get("taskForm")) |value| {
+        if (!v1092(value)) return false;
+    }
+    if (x.object.get("text")) |value| {
+        if (!v1093(value)) return false;
+    }
+    if (x.object.get("hold")) |value| {
+        if (!v1094(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "version") or std.mem.eql(u8, key, "id") or std.mem.eql(u8, key, "action") or std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "after") or std.mem.eql(u8, key, "configuration") or std.mem.eql(u8, key, "taskTarget") or std.mem.eql(u8, key, "taskForm") or std.mem.eql(u8, key, "text") or std.mem.eql(u8, key, "hold"))) return false;
     }
     return true;
 }
-fn v1062(x: std.json.Value) bool {
+fn v1076(x: std.json.Value) bool {
     return integer(x, 1, 1);
 }
-fn v1063(x: std.json.Value) bool {
+fn v1077(x: std.json.Value) bool {
     return v3(x);
 }
-fn v1064(x: std.json.Value) bool {
+fn v1078(x: std.json.Value) bool {
     return x == .string and (std.mem.eql(u8, x.string, "poll") or std.mem.eql(u8, x.string, "older") or std.mem.eql(u8, x.string, "latest") or std.mem.eql(u8, x.string, "send") or std.mem.eql(u8, x.string, "retry") or std.mem.eql(u8, x.string, "discard") or std.mem.eql(u8, x.string, "stop") or std.mem.eql(u8, x.string, "models") or std.mem.eql(u8, x.string, "configure") or std.mem.eql(u8, x.string, "tasks") or std.mem.eql(u8, x.string, "hosts") or std.mem.eql(u8, x.string, "select") or std.mem.eql(u8, x.string, "create") or std.mem.eql(u8, x.string, "rexStatus") or std.mem.eql(u8, x.string, "rexInspect") or std.mem.eql(u8, x.string, "rexOpen"));
 }
-fn v1065(x: std.json.Value) bool {
+fn v1079(x: std.json.Value) bool {
     return v31(x);
 }
-fn v1066(x: std.json.Value) bool {
+fn v1080(x: std.json.Value) bool {
     return v31(x);
 }
-fn v1067(x: std.json.Value) bool {
-    return v1068(x);
+fn v1081(x: std.json.Value) bool {
+    return v1082(x);
 }
-fn v1068(x: std.json.Value) bool {
+fn v1082(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("expected")) |value| {
-        if (!v1069(value)) return false;
+        if (!v1083(value)) return false;
     } else return false;
     if (x.object.get("selection")) |value| {
-        if (!v1076(value)) return false;
+        if (!v1090(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "expected") or std.mem.eql(u8, key, "selection"))) return false;
     }
     return true;
 }
-fn v1069(x: std.json.Value) bool {
-    return v1070(x);
+fn v1083(x: std.json.Value) bool {
+    return v1084(x);
 }
-fn v1070(x: std.json.Value) bool {
+fn v1084(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("provider")) |value| {
-        if (!v1071(value)) return false;
+        if (!v1085(value)) return false;
     } else return false;
     if (x.object.get("modelId")) |value| {
-        if (!v1073(value)) return false;
+        if (!v1087(value)) return false;
     } else return false;
     if (x.object.get("thinkingLevel")) |value| {
-        if (!v1074(value)) return false;
+        if (!v1088(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "provider") or std.mem.eql(u8, key, "modelId") or std.mem.eql(u8, key, "thinkingLevel"))) return false;
     }
     return true;
 }
-fn v1071(x: std.json.Value) bool {
-    return v1072(x);
+fn v1085(x: std.json.Value) bool {
+    return v1086(x);
 }
-fn v1072(x: std.json.Value) bool {
+fn v1086(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length < 1 or length > 200) return false;
     return true;
 }
-fn v1073(x: std.json.Value) bool {
-    return v1072(x);
+fn v1087(x: std.json.Value) bool {
+    return v1086(x);
 }
-fn v1074(x: std.json.Value) bool {
-    return v1075(x);
+fn v1088(x: std.json.Value) bool {
+    return v1089(x);
 }
-fn v1075(x: std.json.Value) bool {
+fn v1089(x: std.json.Value) bool {
     return x == .string and (std.mem.eql(u8, x.string, "off") or std.mem.eql(u8, x.string, "minimal") or std.mem.eql(u8, x.string, "low") or std.mem.eql(u8, x.string, "medium") or std.mem.eql(u8, x.string, "high") or std.mem.eql(u8, x.string, "xhigh") or std.mem.eql(u8, x.string, "max"));
 }
-fn v1076(x: std.json.Value) bool {
-    return v1070(x);
+fn v1090(x: std.json.Value) bool {
+    return v1084(x);
 }
-fn v1077(x: std.json.Value) bool {
-    return v1018(x);
+fn v1091(x: std.json.Value) bool {
+    return v1032(x);
 }
-fn v1078(x: std.json.Value) bool {
-    return v1012(x);
+fn v1092(x: std.json.Value) bool {
+    return v1026(x);
 }
-fn v1079(x: std.json.Value) bool {
+fn v1093(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 16384) return false;
     return true;
 }
-fn v1080(x: std.json.Value) bool {
+fn v1094(x: std.json.Value) bool {
     return x == .bool;
 }
-fn v1081(x: std.json.Value) bool {
+fn v1095(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("kind")) |value| {
-        if (!v1082(value)) return false;
+        if (!v1096(value)) return false;
     } else return false;
     if (x.object.get("text")) |value| {
-        if (!v1083(value)) return false;
+        if (!v1097(value)) return false;
     } else return false;
     if (x.object.get("toolName")) |value| {
-        if (!v1084(value)) return false;
+        if (!v1098(value)) return false;
     }
     if (x.object.get("isError")) |value| {
-        if (!v1085(value)) return false;
+        if (!v1099(value)) return false;
     }
     if (x.object.get("clipped")) |value| {
-        if (!v1086(value)) return false;
+        if (!v1100(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "kind") or std.mem.eql(u8, key, "text") or std.mem.eql(u8, key, "toolName") or std.mem.eql(u8, key, "isError") or std.mem.eql(u8, key, "clipped"))) return false;
     }
     return true;
 }
-fn v1082(x: std.json.Value) bool {
+fn v1096(x: std.json.Value) bool {
     return x == .string and (std.mem.eql(u8, x.string, "text") or std.mem.eql(u8, x.string, "notice") or std.mem.eql(u8, x.string, "tool_request") or std.mem.eql(u8, x.string, "tool"));
 }
-fn v1083(x: std.json.Value) bool {
-    if (x != .string) return false;
-    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
-    if (length > 8192) return false;
-    return true;
-}
-fn v1084(x: std.json.Value) bool {
-    if (x != .string) return false;
-    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
-    if (length > 128) return false;
-    return true;
-}
-fn v1085(x: std.json.Value) bool {
-    return x == .bool;
-}
-fn v1086(x: std.json.Value) bool {
-    return x == .bool;
-}
-fn v1087(x: std.json.Value) bool {
-    if (x != .object) return false;
-    if (x.object.get("id")) |value| {
-        if (!v1088(value)) return false;
-    } else return false;
-    if (x.object.get("role")) |value| {
-        if (!v1089(value)) return false;
-    } else return false;
-    if (x.object.get("text")) |value| {
-        if (!v1090(value)) return false;
-    } else return false;
-    if (x.object.get("parts")) |value| {
-        if (!v1091(value)) return false;
-    }
-    if (x.object.get("thinkingTokens")) |value| {
-        if (!v1093(value)) return false;
-    }
-    for (x.object.keys()) |key| {
-        if (!(std.mem.eql(u8, key, "id") or std.mem.eql(u8, key, "role") or std.mem.eql(u8, key, "text") or std.mem.eql(u8, key, "parts") or std.mem.eql(u8, key, "thinkingTokens"))) return false;
-    }
-    return true;
-}
-fn v1088(x: std.json.Value) bool {
-    return integer(x, 1, 9007199254740991);
-}
-fn v1089(x: std.json.Value) bool {
-    return x == .string and (std.mem.eql(u8, x.string, "user") or std.mem.eql(u8, x.string, "assistant") or std.mem.eql(u8, x.string, "tool") or std.mem.eql(u8, x.string, "note"));
-}
-fn v1090(x: std.json.Value) bool {
-    if (x != .string) return false;
-    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
-    if (length > 8192) return false;
-    return true;
-}
-fn v1091(x: std.json.Value) bool {
-    if (x != .array or x.array.items.len < 0 or x.array.items.len > 256) return false;
-    for (x.array.items) |value| {
-        if (!v1092(value)) return false;
-    }
-    return true;
-}
-fn v1092(x: std.json.Value) bool {
-    return v1081(x);
-}
-fn v1093(x: std.json.Value) bool {
-    return integer(x, 1, 9007199254740991);
-}
-fn v1094(x: std.json.Value) bool {
-    if (x != .object) return false;
-    if (x.object.get("requestId")) |value| {
-        if (!v1095(value)) return false;
-    } else return false;
-    if (x.object.get("kind")) |value| {
-        if (!v1096(value)) return false;
-    } else return false;
-    if (x.object.get("saved")) |value| {
-        if (!v1097(value)) return false;
-    } else return false;
-    if (x.object.get("text")) |value| {
-        if (!v1098(value)) return false;
-    } else return false;
-    if (x.object.get("clipped")) |value| {
-        if (!v1099(value)) return false;
-    } else return false;
-    for (x.object.keys()) |key| {
-        if (!(std.mem.eql(u8, key, "requestId") or std.mem.eql(u8, key, "kind") or std.mem.eql(u8, key, "saved") or std.mem.eql(u8, key, "text") or std.mem.eql(u8, key, "clipped"))) return false;
-    }
-    return true;
-}
-fn v1095(x: std.json.Value) bool {
-    return v547(x);
-}
-fn v1096(x: std.json.Value) bool {
-    return x == .string and (std.mem.eql(u8, x.string, "input") or std.mem.eql(u8, x.string, "task") or std.mem.eql(u8, x.string, "instructions"));
-}
 fn v1097(x: std.json.Value) bool {
-    return x == .bool;
+    if (x != .string) return false;
+    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
+    if (length > 8192) return false;
+    return true;
 }
 fn v1098(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
-    if (length > 16384) return false;
+    if (length > 128) return false;
     return true;
 }
 fn v1099(x: std.json.Value) bool {
     return x == .bool;
 }
 fn v1100(x: std.json.Value) bool {
+    return x == .bool;
+}
+fn v1101(x: std.json.Value) bool {
     if (x != .object) return false;
-    if (x.object.get("agentRune")) |value| {
-        if (!v1101(value)) return false;
-    }
-    if (x.object.get("agentName")) |value| {
+    if (x.object.get("id")) |value| {
         if (!v1102(value)) return false;
-    }
-    if (x.object.get("chatId")) |value| {
+    } else return false;
+    if (x.object.get("role")) |value| {
         if (!v1103(value)) return false;
     } else return false;
-    if (x.object.get("kind")) |value| {
+    if (x.object.get("text")) |value| {
         if (!v1104(value)) return false;
     } else return false;
-    if (x.object.get("title")) |value| {
+    if (x.object.get("parts")) |value| {
         if (!v1105(value)) return false;
+    }
+    if (x.object.get("thinkingTokens")) |value| {
+        if (!v1107(value)) return false;
+    }
+    for (x.object.keys()) |key| {
+        if (!(std.mem.eql(u8, key, "id") or std.mem.eql(u8, key, "role") or std.mem.eql(u8, key, "text") or std.mem.eql(u8, key, "parts") or std.mem.eql(u8, key, "thinkingTokens"))) return false;
+    }
+    return true;
+}
+fn v1102(x: std.json.Value) bool {
+    return integer(x, 1, 9007199254740991);
+}
+fn v1103(x: std.json.Value) bool {
+    return x == .string and (std.mem.eql(u8, x.string, "user") or std.mem.eql(u8, x.string, "assistant") or std.mem.eql(u8, x.string, "tool") or std.mem.eql(u8, x.string, "note"));
+}
+fn v1104(x: std.json.Value) bool {
+    if (x != .string) return false;
+    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
+    if (length > 8192) return false;
+    return true;
+}
+fn v1105(x: std.json.Value) bool {
+    if (x != .array or x.array.items.len < 0 or x.array.items.len > 256) return false;
+    for (x.array.items) |value| {
+        if (!v1106(value)) return false;
+    }
+    return true;
+}
+fn v1106(x: std.json.Value) bool {
+    return v1095(x);
+}
+fn v1107(x: std.json.Value) bool {
+    return integer(x, 1, 9007199254740991);
+}
+fn v1108(x: std.json.Value) bool {
+    if (x != .object) return false;
+    if (x.object.get("requestId")) |value| {
+        if (!v1109(value)) return false;
+    } else return false;
+    if (x.object.get("kind")) |value| {
+        if (!v1110(value)) return false;
+    } else return false;
+    if (x.object.get("saved")) |value| {
+        if (!v1111(value)) return false;
+    } else return false;
+    if (x.object.get("text")) |value| {
+        if (!v1112(value)) return false;
+    } else return false;
+    if (x.object.get("clipped")) |value| {
+        if (!v1113(value)) return false;
+    } else return false;
+    for (x.object.keys()) |key| {
+        if (!(std.mem.eql(u8, key, "requestId") or std.mem.eql(u8, key, "kind") or std.mem.eql(u8, key, "saved") or std.mem.eql(u8, key, "text") or std.mem.eql(u8, key, "clipped"))) return false;
+    }
+    return true;
+}
+fn v1109(x: std.json.Value) bool {
+    return v547(x);
+}
+fn v1110(x: std.json.Value) bool {
+    return x == .string and (std.mem.eql(u8, x.string, "input") or std.mem.eql(u8, x.string, "task") or std.mem.eql(u8, x.string, "instructions"));
+}
+fn v1111(x: std.json.Value) bool {
+    return x == .bool;
+}
+fn v1112(x: std.json.Value) bool {
+    if (x != .string) return false;
+    const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
+    if (length > 16384) return false;
+    return true;
+}
+fn v1113(x: std.json.Value) bool {
+    return x == .bool;
+}
+fn v1114(x: std.json.Value) bool {
+    if (x != .object) return false;
+    if (x.object.get("agentRune")) |value| {
+        if (!v1115(value)) return false;
+    }
+    if (x.object.get("agentName")) |value| {
+        if (!v1116(value)) return false;
+    }
+    if (x.object.get("chatId")) |value| {
+        if (!v1117(value)) return false;
+    } else return false;
+    if (x.object.get("kind")) |value| {
+        if (!v1118(value)) return false;
+    } else return false;
+    if (x.object.get("title")) |value| {
+        if (!v1119(value)) return false;
     } else return false;
     if (x.object.get("machineId")) |value| {
-        if (!v1106(value)) return false;
+        if (!v1120(value)) return false;
     } else return false;
     if (x.object.get("cwd")) |value| {
-        if (!v1107(value)) return false;
+        if (!v1121(value)) return false;
     } else return false;
     if (x.object.get("parentChatId")) |value| {
-        if (!v1108(value)) return false;
+        if (!v1122(value)) return false;
     }
     if (x.object.get("activity")) |value| {
-        if (!v1109(value)) return false;
+        if (!v1123(value)) return false;
     }
     if (x.object.get("rexState")) |value| {
-        if (!v1110(value)) return false;
+        if (!v1124(value)) return false;
     }
     if (x.object.get("connection")) |value| {
-        if (!v1111(value)) return false;
+        if (!v1125(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "agentRune") or std.mem.eql(u8, key, "agentName") or std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "kind") or std.mem.eql(u8, key, "title") or std.mem.eql(u8, key, "machineId") or std.mem.eql(u8, key, "cwd") or std.mem.eql(u8, key, "parentChatId") or std.mem.eql(u8, key, "activity") or std.mem.eql(u8, key, "rexState") or std.mem.eql(u8, key, "connection"))) return false;
     }
     return true;
 }
-fn v1101(x: std.json.Value) bool {
+fn v1115(x: std.json.Value) bool {
     return v122(x);
 }
-fn v1102(x: std.json.Value) bool {
+fn v1116(x: std.json.Value) bool {
     return v124(x);
 }
-fn v1103(x: std.json.Value) bool {
+fn v1117(x: std.json.Value) bool {
     return v31(x);
 }
-fn v1104(x: std.json.Value) bool {
+fn v1118(x: std.json.Value) bool {
     return v558(x);
 }
-fn v1105(x: std.json.Value) bool {
+fn v1119(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 160) return false;
     return true;
 }
-fn v1106(x: std.json.Value) bool {
+fn v1120(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 80) return false;
     return true;
 }
-fn v1107(x: std.json.Value) bool {
+fn v1121(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 256) return false;
     return true;
 }
-fn v1108(x: std.json.Value) bool {
+fn v1122(x: std.json.Value) bool {
     return v31(x);
 }
-fn v1109(x: std.json.Value) bool {
+fn v1123(x: std.json.Value) bool {
     return x == .string and (std.mem.eql(u8, x.string, "busy") or std.mem.eql(u8, x.string, "idle") or std.mem.eql(u8, x.string, "unknown"));
 }
-fn v1110(x: std.json.Value) bool {
+fn v1124(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 32) return false;
     return true;
 }
-fn v1111(x: std.json.Value) bool {
+fn v1125(x: std.json.Value) bool {
     return x == .string and (std.mem.eql(u8, x.string, "local") or std.mem.eql(u8, x.string, "connected") or std.mem.eql(u8, x.string, "offline") or std.mem.eql(u8, x.string, "unknown") or std.mem.eql(u8, x.string, "unregistered"));
 }
-fn v1112(x: std.json.Value) bool {
+fn v1126(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("items")) |value| {
-        if (!v1113(value)) return false;
+        if (!v1127(value)) return false;
     } else return false;
     if (x.object.get("after")) |value| {
-        if (!v1115(value)) return false;
+        if (!v1129(value)) return false;
     }
     if (x.object.get("next")) |value| {
-        if (!v1116(value)) return false;
+        if (!v1130(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "items") or std.mem.eql(u8, key, "after") or std.mem.eql(u8, key, "next"))) return false;
     }
     return true;
 }
-fn v1113(x: std.json.Value) bool {
+fn v1127(x: std.json.Value) bool {
     if (x != .array or x.array.items.len < 0 or x.array.items.len > 25) return false;
     for (x.array.items) |value| {
-        if (!v1114(value)) return false;
+        if (!v1128(value)) return false;
     }
     return true;
 }
-fn v1114(x: std.json.Value) bool {
-    return v1100(x);
+fn v1128(x: std.json.Value) bool {
+    return v1114(x);
 }
-fn v1115(x: std.json.Value) bool {
+fn v1129(x: std.json.Value) bool {
     return v31(x);
 }
-fn v1116(x: std.json.Value) bool {
+fn v1130(x: std.json.Value) bool {
     return v31(x);
 }
-fn v1117(x: std.json.Value) bool {
+fn v1131(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("status")) |value| {
-        if (!v1118(value)) return false;
+        if (!v1132(value)) return false;
     } else return false;
     if (x.object.get("inspection")) |value| {
-        if (!v1119(value)) return false;
+        if (!v1133(value)) return false;
     }
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "status") or std.mem.eql(u8, key, "inspection"))) return false;
     }
     return true;
 }
-fn v1118(x: std.json.Value) bool {
+fn v1132(x: std.json.Value) bool {
     return v177(x);
 }
-fn v1119(x: std.json.Value) bool {
+fn v1133(x: std.json.Value) bool {
     return v209(x);
 }
-fn v1120(x: std.json.Value) bool {
+fn v1134(x: std.json.Value) bool {
     return x == .string and (std.mem.eql(u8, x.string, "hub") or std.mem.eql(u8, x.string, "task"));
 }
-fn v1121(x: std.json.Value) bool {
+fn v1135(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("toolInventory")) |value| {
-        if (!v1122(value)) return false;
-    }
-    if (x.object.get("toolInventoryStatus")) |value| {
-        if (!v1123(value)) return false;
-    }
-    if (x.object.get("agentRune")) |value| {
-        if (!v1124(value)) return false;
-    }
-    if (x.object.get("kind")) |value| {
-        if (!v1125(value)) return false;
-    }
-    if (x.object.get("cwd")) |value| {
-        if (!v1126(value)) return false;
-    }
-    if (x.object.get("gitBranch")) |value| {
-        if (!v1127(value)) return false;
-    }
-    if (x.object.get("agentName")) |value| {
-        if (!v1128(value)) return false;
-    }
-    if (x.object.get("clientMode")) |value| {
-        if (!v1129(value)) return false;
-    } else return false;
-    if (x.object.get("hubChatId")) |value| {
-        if (!v1130(value)) return false;
-    } else return false;
-    if (x.object.get("settingsPending")) |value| {
-        if (!v1131(value)) return false;
-    }
-    if (x.object.get("hosts")) |value| {
-        if (!v1132(value)) return false;
-    }
-    if (x.object.get("brief")) |value| {
-        if (!v1133(value)) return false;
-    }
-    if (x.object.get("tasks")) |value| {
-        if (!v1134(value)) return false;
-    }
-    if (x.object.get("rex")) |value| {
-        if (!v1135(value)) return false;
-    }
-    if (x.object.get("modelSettings")) |value| {
         if (!v1136(value)) return false;
     }
-    if (x.object.get("hubId")) |value| {
-        if (!v1154(value)) return false;
-    } else return false;
-    if (x.object.get("chatId")) |value| {
-        if (!v1155(value)) return false;
-    } else return false;
-    if (x.object.get("title")) |value| {
-        if (!v1156(value)) return false;
-    } else return false;
-    if (x.object.get("model")) |value| {
-        if (!v1157(value)) return false;
-    } else return false;
-    if (x.object.get("tools")) |value| {
-        if (!v1158(value)) return false;
-    } else return false;
-    if (x.object.get("agentStatus")) |value| {
-        if (!v1159(value)) return false;
+    if (x.object.get("toolInventoryStatus")) |value| {
+        if (!v1137(value)) return false;
     }
-    if (x.object.get("activityKnown")) |value| {
-        if (!v1160(value)) return false;
+    if (x.object.get("agentRune")) |value| {
+        if (!v1138(value)) return false;
+    }
+    if (x.object.get("kind")) |value| {
+        if (!v1139(value)) return false;
+    }
+    if (x.object.get("cwd")) |value| {
+        if (!v1140(value)) return false;
+    }
+    if (x.object.get("gitBranch")) |value| {
+        if (!v1141(value)) return false;
+    }
+    if (x.object.get("agentName")) |value| {
+        if (!v1142(value)) return false;
+    }
+    if (x.object.get("clientMode")) |value| {
+        if (!v1143(value)) return false;
     } else return false;
-    if (x.object.get("busy")) |value| {
-        if (!v1161(value)) return false;
+    if (x.object.get("hubChatId")) |value| {
+        if (!v1144(value)) return false;
     } else return false;
-    if (x.object.get("queued")) |value| {
-        if (!v1162(value)) return false;
-    } else return false;
-    if (x.object.get("entries")) |value| {
-        if (!v1163(value)) return false;
-    } else return false;
-    if (x.object.get("hasOlder")) |value| {
-        if (!v1165(value)) return false;
-    } else return false;
-    if (x.object.get("historical")) |value| {
-        if (!v1166(value)) return false;
-    } else return false;
-    if (x.object.get("preview")) |value| {
-        if (!v1167(value)) return false;
-    } else return false;
-    if (x.object.get("notice")) |value| {
+    if (x.object.get("settingsPending")) |value| {
+        if (!v1145(value)) return false;
+    }
+    if (x.object.get("hosts")) |value| {
+        if (!v1146(value)) return false;
+    }
+    if (x.object.get("brief")) |value| {
+        if (!v1147(value)) return false;
+    }
+    if (x.object.get("tasks")) |value| {
+        if (!v1148(value)) return false;
+    }
+    if (x.object.get("rex")) |value| {
+        if (!v1149(value)) return false;
+    }
+    if (x.object.get("modelSettings")) |value| {
+        if (!v1150(value)) return false;
+    }
+    if (x.object.get("hubId")) |value| {
         if (!v1168(value)) return false;
     } else return false;
-    if (x.object.get("draft")) |value| {
+    if (x.object.get("chatId")) |value| {
         if (!v1169(value)) return false;
     } else return false;
+    if (x.object.get("title")) |value| {
+        if (!v1170(value)) return false;
+    } else return false;
+    if (x.object.get("model")) |value| {
+        if (!v1171(value)) return false;
+    } else return false;
+    if (x.object.get("tools")) |value| {
+        if (!v1172(value)) return false;
+    } else return false;
+    if (x.object.get("agentStatus")) |value| {
+        if (!v1173(value)) return false;
+    }
+    if (x.object.get("subagents")) |value| {
+        if (!v1174(value)) return false;
+    }
+    if (x.object.get("activityKnown")) |value| {
+        if (!v1175(value)) return false;
+    } else return false;
+    if (x.object.get("busy")) |value| {
+        if (!v1176(value)) return false;
+    } else return false;
+    if (x.object.get("queued")) |value| {
+        if (!v1177(value)) return false;
+    } else return false;
+    if (x.object.get("entries")) |value| {
+        if (!v1178(value)) return false;
+    } else return false;
+    if (x.object.get("hasOlder")) |value| {
+        if (!v1180(value)) return false;
+    } else return false;
+    if (x.object.get("historical")) |value| {
+        if (!v1181(value)) return false;
+    } else return false;
+    if (x.object.get("preview")) |value| {
+        if (!v1182(value)) return false;
+    } else return false;
+    if (x.object.get("notice")) |value| {
+        if (!v1183(value)) return false;
+    } else return false;
+    if (x.object.get("draft")) |value| {
+        if (!v1184(value)) return false;
+    } else return false;
     for (x.object.keys()) |key| {
-        if (!(std.mem.eql(u8, key, "toolInventory") or std.mem.eql(u8, key, "toolInventoryStatus") or std.mem.eql(u8, key, "agentRune") or std.mem.eql(u8, key, "kind") or std.mem.eql(u8, key, "cwd") or std.mem.eql(u8, key, "gitBranch") or std.mem.eql(u8, key, "agentName") or std.mem.eql(u8, key, "clientMode") or std.mem.eql(u8, key, "hubChatId") or std.mem.eql(u8, key, "settingsPending") or std.mem.eql(u8, key, "hosts") or std.mem.eql(u8, key, "brief") or std.mem.eql(u8, key, "tasks") or std.mem.eql(u8, key, "rex") or std.mem.eql(u8, key, "modelSettings") or std.mem.eql(u8, key, "hubId") or std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "title") or std.mem.eql(u8, key, "model") or std.mem.eql(u8, key, "tools") or std.mem.eql(u8, key, "agentStatus") or std.mem.eql(u8, key, "activityKnown") or std.mem.eql(u8, key, "busy") or std.mem.eql(u8, key, "queued") or std.mem.eql(u8, key, "entries") or std.mem.eql(u8, key, "hasOlder") or std.mem.eql(u8, key, "historical") or std.mem.eql(u8, key, "preview") or std.mem.eql(u8, key, "notice") or std.mem.eql(u8, key, "draft"))) return false;
+        if (!(std.mem.eql(u8, key, "toolInventory") or std.mem.eql(u8, key, "toolInventoryStatus") or std.mem.eql(u8, key, "agentRune") or std.mem.eql(u8, key, "kind") or std.mem.eql(u8, key, "cwd") or std.mem.eql(u8, key, "gitBranch") or std.mem.eql(u8, key, "agentName") or std.mem.eql(u8, key, "clientMode") or std.mem.eql(u8, key, "hubChatId") or std.mem.eql(u8, key, "settingsPending") or std.mem.eql(u8, key, "hosts") or std.mem.eql(u8, key, "brief") or std.mem.eql(u8, key, "tasks") or std.mem.eql(u8, key, "rex") or std.mem.eql(u8, key, "modelSettings") or std.mem.eql(u8, key, "hubId") or std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "title") or std.mem.eql(u8, key, "model") or std.mem.eql(u8, key, "tools") or std.mem.eql(u8, key, "agentStatus") or std.mem.eql(u8, key, "subagents") or std.mem.eql(u8, key, "activityKnown") or std.mem.eql(u8, key, "busy") or std.mem.eql(u8, key, "queued") or std.mem.eql(u8, key, "entries") or std.mem.eql(u8, key, "hasOlder") or std.mem.eql(u8, key, "historical") or std.mem.eql(u8, key, "preview") or std.mem.eql(u8, key, "notice") or std.mem.eql(u8, key, "draft"))) return false;
     }
     return true;
 }
-fn v1122(x: std.json.Value) bool {
+fn v1136(x: std.json.Value) bool {
     return v591(x);
 }
-fn v1123(x: std.json.Value) bool {
+fn v1137(x: std.json.Value) bool {
     return v599(x);
 }
-fn v1124(x: std.json.Value) bool {
+fn v1138(x: std.json.Value) bool {
     return v122(x);
 }
-fn v1125(x: std.json.Value) bool {
+fn v1139(x: std.json.Value) bool {
     return v558(x);
 }
-fn v1126(x: std.json.Value) bool {
+fn v1140(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 4096) return false;
     return true;
 }
-fn v1127(x: std.json.Value) bool {
+fn v1141(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 160) return false;
     return true;
 }
-fn v1128(x: std.json.Value) bool {
+fn v1142(x: std.json.Value) bool {
     return v124(x);
 }
-fn v1129(x: std.json.Value) bool {
-    return v1120(x);
+fn v1143(x: std.json.Value) bool {
+    return v1134(x);
 }
-fn v1130(x: std.json.Value) bool {
+fn v1144(x: std.json.Value) bool {
     return v31(x);
 }
-fn v1131(x: std.json.Value) bool {
+fn v1145(x: std.json.Value) bool {
     return x == .bool;
 }
-fn v1132(x: std.json.Value) bool {
-    return v1029(x);
+fn v1146(x: std.json.Value) bool {
+    return v1043(x);
 }
-fn v1133(x: std.json.Value) bool {
+fn v1147(x: std.json.Value) bool {
     return v146(x);
 }
-fn v1134(x: std.json.Value) bool {
-    return v1112(x);
+fn v1148(x: std.json.Value) bool {
+    return v1126(x);
 }
-fn v1135(x: std.json.Value) bool {
-    return v1117(x);
+fn v1149(x: std.json.Value) bool {
+    return v1131(x);
 }
-fn v1136(x: std.json.Value) bool {
-    return v1137(x);
+fn v1150(x: std.json.Value) bool {
+    return v1151(x);
 }
-fn v1137(x: std.json.Value) bool {
+fn v1151(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("hubId")) |value| {
-        if (!v1138(value)) return false;
+        if (!v1152(value)) return false;
     } else return false;
     if (x.object.get("chatId")) |value| {
-        if (!v1139(value)) return false;
+        if (!v1153(value)) return false;
     } else return false;
     if (x.object.get("selection")) |value| {
-        if (!v1140(value)) return false;
+        if (!v1154(value)) return false;
     } else return false;
     if (x.object.get("defaultModel")) |value| {
-        if (!v1141(value)) return false;
+        if (!v1155(value)) return false;
     } else return false;
     if (x.object.get("models")) |value| {
-        if (!v1145(value)) return false;
+        if (!v1159(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "hubId") or std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "selection") or std.mem.eql(u8, key, "defaultModel") or std.mem.eql(u8, key, "models"))) return false;
     }
     return true;
 }
-fn v1138(x: std.json.Value) bool {
+fn v1152(x: std.json.Value) bool {
     return v3(x);
 }
-fn v1139(x: std.json.Value) bool {
+fn v1153(x: std.json.Value) bool {
     return v31(x);
 }
-fn v1140(x: std.json.Value) bool {
-    return v1070(x);
+fn v1154(x: std.json.Value) bool {
+    return v1084(x);
 }
-fn v1141(x: std.json.Value) bool {
-    return v1142(x);
+fn v1155(x: std.json.Value) bool {
+    return v1156(x);
 }
-fn v1142(x: std.json.Value) bool {
+fn v1156(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("provider")) |value| {
-        if (!v1143(value)) return false;
+        if (!v1157(value)) return false;
     } else return false;
     if (x.object.get("modelId")) |value| {
-        if (!v1144(value)) return false;
+        if (!v1158(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "provider") or std.mem.eql(u8, key, "modelId"))) return false;
     }
     return true;
 }
-fn v1143(x: std.json.Value) bool {
-    return v1072(x);
+fn v1157(x: std.json.Value) bool {
+    return v1086(x);
 }
-fn v1144(x: std.json.Value) bool {
-    return v1072(x);
+fn v1158(x: std.json.Value) bool {
+    return v1086(x);
 }
-fn v1145(x: std.json.Value) bool {
+fn v1159(x: std.json.Value) bool {
     if (x != .array or x.array.items.len < 0 or x.array.items.len > 256) return false;
     for (x.array.items) |value| {
-        if (!v1146(value)) return false;
+        if (!v1160(value)) return false;
     }
     return true;
 }
-fn v1146(x: std.json.Value) bool {
-    return v1147(x);
+fn v1160(x: std.json.Value) bool {
+    return v1161(x);
 }
-fn v1147(x: std.json.Value) bool {
+fn v1161(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("provider")) |value| {
-        if (!v1148(value)) return false;
+        if (!v1162(value)) return false;
     } else return false;
     if (x.object.get("modelId")) |value| {
-        if (!v1149(value)) return false;
+        if (!v1163(value)) return false;
     } else return false;
     if (x.object.get("name")) |value| {
-        if (!v1150(value)) return false;
+        if (!v1164(value)) return false;
     } else return false;
     if (x.object.get("thinkingLevels")) |value| {
-        if (!v1151(value)) return false;
+        if (!v1165(value)) return false;
     } else return false;
     if (x.object.get("defaultThinkingLevel")) |value| {
-        if (!v1153(value)) return false;
+        if (!v1167(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "provider") or std.mem.eql(u8, key, "modelId") or std.mem.eql(u8, key, "name") or std.mem.eql(u8, key, "thinkingLevels") or std.mem.eql(u8, key, "defaultThinkingLevel"))) return false;
     }
     return true;
 }
-fn v1148(x: std.json.Value) bool {
-    return v1072(x);
+fn v1162(x: std.json.Value) bool {
+    return v1086(x);
 }
-fn v1149(x: std.json.Value) bool {
-    return v1072(x);
+fn v1163(x: std.json.Value) bool {
+    return v1086(x);
 }
-fn v1150(x: std.json.Value) bool {
+fn v1164(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 160) return false;
     return true;
 }
-fn v1151(x: std.json.Value) bool {
+fn v1165(x: std.json.Value) bool {
     if (x != .array or x.array.items.len < 1 or x.array.items.len > 7) return false;
     for (x.array.items) |value| {
-        if (!v1152(value)) return false;
+        if (!v1166(value)) return false;
     }
     return true;
 }
-fn v1152(x: std.json.Value) bool {
-    return v1075(x);
+fn v1166(x: std.json.Value) bool {
+    return v1089(x);
 }
-fn v1153(x: std.json.Value) bool {
-    return v1075(x);
+fn v1167(x: std.json.Value) bool {
+    return v1089(x);
 }
-fn v1154(x: std.json.Value) bool {
+fn v1168(x: std.json.Value) bool {
     return v3(x);
 }
-fn v1155(x: std.json.Value) bool {
+fn v1169(x: std.json.Value) bool {
     return v31(x);
 }
-fn v1156(x: std.json.Value) bool {
+fn v1170(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 160) return false;
     return true;
 }
-fn v1157(x: std.json.Value) bool {
+fn v1171(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 160) return false;
     return true;
 }
-fn v1158(x: std.json.Value) bool {
+fn v1172(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 80) return false;
     return true;
 }
-fn v1159(x: std.json.Value) bool {
-    return v781(x);
+fn v1173(x: std.json.Value) bool {
+    return v782(x);
 }
-fn v1160(x: std.json.Value) bool {
+fn v1174(x: std.json.Value) bool {
+    return v792(x);
+}
+fn v1175(x: std.json.Value) bool {
     return x == .bool;
 }
-fn v1161(x: std.json.Value) bool {
+fn v1176(x: std.json.Value) bool {
     return x == .bool;
 }
-fn v1162(x: std.json.Value) bool {
+fn v1177(x: std.json.Value) bool {
     return integer(x, 0, 9007199254740991);
 }
-fn v1163(x: std.json.Value) bool {
+fn v1178(x: std.json.Value) bool {
     if (x != .array or x.array.items.len < 0 or x.array.items.len > 80) return false;
     for (x.array.items) |value| {
-        if (!v1164(value)) return false;
+        if (!v1179(value)) return false;
     }
     return true;
 }
-fn v1164(x: std.json.Value) bool {
-    return v1087(x);
+fn v1179(x: std.json.Value) bool {
+    return v1101(x);
 }
-fn v1165(x: std.json.Value) bool {
+fn v1180(x: std.json.Value) bool {
     return x == .bool;
 }
-fn v1166(x: std.json.Value) bool {
+fn v1181(x: std.json.Value) bool {
     return x == .bool;
 }
-fn v1167(x: std.json.Value) bool {
+fn v1182(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 4096) return false;
     return true;
 }
-fn v1168(x: std.json.Value) bool {
+fn v1183(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length > 1024) return false;
     return true;
 }
-fn v1169(x: std.json.Value) bool {
-    return v1170(x) or v1171(x);
+fn v1184(x: std.json.Value) bool {
+    return v1185(x) or v1186(x);
 }
-fn v1170(x: std.json.Value) bool {
-    return v1094(x);
+fn v1185(x: std.json.Value) bool {
+    return v1108(x);
 }
-fn v1171(x: std.json.Value) bool {
+fn v1186(x: std.json.Value) bool {
     return x == .null;
 }
-fn v1172(x: std.json.Value) bool {
-    return v1173(x) or v1178(x);
+fn v1187(x: std.json.Value) bool {
+    return v1188(x) or v1193(x);
 }
-fn v1173(x: std.json.Value) bool {
+fn v1188(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("version")) |value| {
-        if (!v1174(value)) return false;
+        if (!v1189(value)) return false;
     } else return false;
     if (x.object.get("id")) |value| {
-        if (!v1175(value)) return false;
+        if (!v1190(value)) return false;
     } else return false;
     if (x.object.get("ok")) |value| {
-        if (!v1176(value)) return false;
+        if (!v1191(value)) return false;
     } else return false;
     if (x.object.get("snapshot")) |value| {
-        if (!v1177(value)) return false;
+        if (!v1192(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "version") or std.mem.eql(u8, key, "id") or std.mem.eql(u8, key, "ok") or std.mem.eql(u8, key, "snapshot"))) return false;
     }
     return true;
 }
-fn v1174(x: std.json.Value) bool {
+fn v1189(x: std.json.Value) bool {
     return integer(x, 1, 1);
 }
-fn v1175(x: std.json.Value) bool {
+fn v1190(x: std.json.Value) bool {
     return v3(x);
 }
-fn v1176(x: std.json.Value) bool {
+fn v1191(x: std.json.Value) bool {
     return x == .bool and x.bool == true;
 }
-fn v1177(x: std.json.Value) bool {
-    return v1121(x);
+fn v1192(x: std.json.Value) bool {
+    return v1135(x);
 }
-fn v1178(x: std.json.Value) bool {
+fn v1193(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("version")) |value| {
-        if (!v1179(value)) return false;
+        if (!v1194(value)) return false;
     } else return false;
     if (x.object.get("id")) |value| {
-        if (!v1180(value)) return false;
+        if (!v1195(value)) return false;
     } else return false;
     if (x.object.get("ok")) |value| {
-        if (!v1181(value)) return false;
+        if (!v1196(value)) return false;
     } else return false;
     if (x.object.get("error")) |value| {
-        if (!v1182(value)) return false;
+        if (!v1197(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "version") or std.mem.eql(u8, key, "id") or std.mem.eql(u8, key, "ok") or std.mem.eql(u8, key, "error"))) return false;
     }
     return true;
 }
-fn v1179(x: std.json.Value) bool {
+fn v1194(x: std.json.Value) bool {
     return integer(x, 1, 1);
 }
-fn v1180(x: std.json.Value) bool {
+fn v1195(x: std.json.Value) bool {
     return v3(x);
 }
-fn v1181(x: std.json.Value) bool {
+fn v1196(x: std.json.Value) bool {
     return x == .bool and x.bool == false;
 }
-fn v1182(x: std.json.Value) bool {
+fn v1197(x: std.json.Value) bool {
     if (x != .string) return false;
     const length = std.unicode.utf8CountCodepoints(x.string) catch return false;
     if (length < 1 or length > 1024) return false;
     return true;
 }
-fn v1183(x: std.json.Value) bool {
+fn v1198(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("chatId")) |value| {
-        if (!v1184(value)) return false;
+        if (!v1199(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "chatId"))) return false;
     }
     return true;
 }
-fn v1184(x: std.json.Value) bool {
+fn v1199(x: std.json.Value) bool {
     return v31(x);
 }
-fn v1185(x: std.json.Value) bool {
+fn v1200(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("chatId")) |value| {
-        if (!v1186(value)) return false;
+        if (!v1201(value)) return false;
     } else return false;
     if (x.object.get("expected")) |value| {
-        if (!v1187(value)) return false;
+        if (!v1202(value)) return false;
     } else return false;
     if (x.object.get("selection")) |value| {
-        if (!v1188(value)) return false;
+        if (!v1203(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "expected") or std.mem.eql(u8, key, "selection"))) return false;
     }
     return true;
 }
-fn v1186(x: std.json.Value) bool {
+fn v1201(x: std.json.Value) bool {
     return v31(x);
 }
-fn v1187(x: std.json.Value) bool {
-    return v1070(x);
+fn v1202(x: std.json.Value) bool {
+    return v1084(x);
 }
-fn v1188(x: std.json.Value) bool {
-    return v1070(x);
+fn v1203(x: std.json.Value) bool {
+    return v1084(x);
 }
-fn v1189(x: std.json.Value) bool {
+fn v1204(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("hubId")) |value| {
-        if (!v1190(value)) return false;
+        if (!v1205(value)) return false;
     } else return false;
     if (x.object.get("chatId")) |value| {
-        if (!v1191(value)) return false;
+        if (!v1206(value)) return false;
     } else return false;
     if (x.object.get("selection")) |value| {
-        if (!v1192(value)) return false;
+        if (!v1207(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "hubId") or std.mem.eql(u8, key, "chatId") or std.mem.eql(u8, key, "selection"))) return false;
     }
     return true;
 }
-fn v1190(x: std.json.Value) bool {
+fn v1205(x: std.json.Value) bool {
     return v3(x);
 }
-fn v1191(x: std.json.Value) bool {
+fn v1206(x: std.json.Value) bool {
     return v31(x);
 }
-fn v1192(x: std.json.Value) bool {
-    return v1070(x);
+fn v1207(x: std.json.Value) bool {
+    return v1084(x);
 }
-fn v1193(x: std.json.Value) bool {
+fn v1208(x: std.json.Value) bool {
     if (x != .object) return false;
     if (x.object.get("kind")) |value| {
-        if (!v1194(value)) return false;
+        if (!v1209(value)) return false;
     } else return false;
     if (x.object.get("hubId")) |value| {
-        if (!v1195(value)) return false;
+        if (!v1210(value)) return false;
     } else return false;
     for (x.object.keys()) |key| {
         if (!(std.mem.eql(u8, key, "kind") or std.mem.eql(u8, key, "hubId"))) return false;
     }
     return true;
 }
-fn v1194(x: std.json.Value) bool {
+fn v1209(x: std.json.Value) bool {
     return x == .string and std.mem.eql(u8, x.string, "ready");
 }
-fn v1195(x: std.json.Value) bool {
+fn v1210(x: std.json.Value) bool {
     return v29(x);
 }
