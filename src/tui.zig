@@ -541,6 +541,7 @@ const Model = struct {
     sidebar_visible: bool = false,
     pending_since: std.Io.Timestamp = .zero,
     shown_transport: TransportStatus = .quiet,
+    worker_transport: bool = false,
     uncertain: bool = false,
     online: bool = false,
     notice: [1024]u8 = undefined,
@@ -598,7 +599,7 @@ const Model = struct {
     }
     fn canList(self: *Model) bool {
         if (self.bridge.client_mode != .task) return true;
-        self.note("Rex task client locked to this task. Use the hub TUI for other tasks.");
+        self.note("Task client locked to this task. Use the hub TUI for other tasks.");
         return false;
     }
     fn settings(self: *Model) ?wire.ModelSettingsSnapshot {
@@ -1329,7 +1330,7 @@ const Model = struct {
         self.chat_height = chat_h;
         var chat: std.ArrayList(Row) = .empty;
         if (s) |snap| try chatRows(ctx, &chat, snap.entries, layout.body, rune(snap));
-        if (chat.items.len == 0) try rows(ctx, &chat, if (s == null) "Connecting to the local hub…" else if (self.readOnly()) "Read-only inspection · :rex open to participate" else "Enter to send · Esc for Normal mode · :help", layout.body, dim);
+        if (chat.items.len == 0) try rows(ctx, &chat, if (s == null) (if (self.bridge.failed) "Selected hub connection failed; no local fallback." else if (self.worker_transport) "Connecting to the selected hub via this worker…" else "Connecting to the selected hub…") else if (self.readOnly()) "Read-only inspection · :rex open to participate" else "Enter to send · Esc for Normal mode · :help", layout.body, dim);
         self.scroll_max = chat.items.len -| chat_h;
         self.scroll = @min(self.scroll, self.scroll_max);
         const first = self.scroll_max - self.scroll;
@@ -1477,6 +1478,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var hub_id: ?[]const u8 = null;
     var chat_id: ?[]const u8 = null;
     var allocation_id: ?[]const u8 = null;
+    var attach_machine: ?[]const u8 = null;
     var worker_socket: ?[]const u8 = null;
     var bootstrap_id: ?[]const u8 = null;
     var client_state: ?[]const u8 = null;
@@ -1484,7 +1486,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--tui")) continue;
         const key = args[i];
-        if (!std.mem.eql(u8, key, "--port") and !std.mem.eql(u8, key, "--task") and !std.mem.eql(u8, key, "--hub-id") and !std.mem.eql(u8, key, "--rex-allocation") and !std.mem.eql(u8, key, "--worker-socket") and !std.mem.eql(u8, key, "--agent-bootstrap") and !std.mem.eql(u8, key, "--client-state")) return error.UnsupportedTuiOption;
+        if (!std.mem.eql(u8, key, "--port") and !std.mem.eql(u8, key, "--task") and !std.mem.eql(u8, key, "--hub-id") and !std.mem.eql(u8, key, "--rex-allocation") and !std.mem.eql(u8, key, "--worker-socket") and !std.mem.eql(u8, key, "--attach-machine") and !std.mem.eql(u8, key, "--agent-bootstrap") and !std.mem.eql(u8, key, "--client-state")) return error.UnsupportedTuiOption;
         i += 1;
         if (i == args.len) return error.MissingOptionValue;
         if (std.mem.eql(u8, key, "--port")) {
@@ -1512,21 +1514,27 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
             if (!wire.validRexUuid(.{ .string = args[i] })) return error.InvalidAllocation;
             bootstrap_id = args[i];
         }
+        if (std.mem.eql(u8, key, "--attach-machine")) {
+            if (attach_machine != null or !wire.validMachineIdentity(.{ .string = args[i] })) return error.InvalidArguments;
+            attach_machine = args[i];
+        }
         if (std.mem.eql(u8, key, "--worker-socket")) {
             if (!std.fs.path.isAbsolute(args[i]) or args[i].len > 100 or std.mem.indexOfAny(u8, args[i], "\x00\r\n") != null) return error.InvalidWorkerSocket;
             worker_socket = args[i];
         }
         try forwarded.appendSlice(init.gpa, &.{ key, args[i] });
     }
-    if ((worker_socket != null or bootstrap_id != null) and allocation_id == null) return error.InvalidAllocation;
+    if (attach_machine != null and (allocation_id != null or bootstrap_id != null or hub_id == null or chat_id == null)) return error.InvalidAllocation;
+    if (attach_machine != null and !wire.validRexUuid(.{ .string = hub_id.? })) return error.InvalidHub;
+    if ((worker_socket != null or bootstrap_id != null) and allocation_id == null and attach_machine == null) return error.InvalidAllocation;
     if (bootstrap_id != null and client_state == null) return error.InvalidAllocation;
     if (allocation_id != null and (hub_id == null or chat_id == null)) return error.InvalidAllocation;
     var bridge = try Bridge.start(.{ .io = init.io, .environ = init.minimal.environ }, init.gpa, forwarded.items);
     defer bridge.deinit();
-    bridge.client_mode = if (allocation_id != null) .task else .hub;
+    bridge.client_mode = if (allocation_id != null or attach_machine != null) .task else .hub;
     if (hub_id) |id| bridge.hub_id = try init.gpa.dupe(u8, id);
     if (chat_id) |id| bridge.chat_id = try init.gpa.dupe(u8, id);
-    var model: Model = .{ .a = init.gpa, .bridge = &bridge, .editor = Editor.init(init.gpa) };
+    var model: Model = .{ .a = init.gpa, .bridge = &bridge, .editor = Editor.init(init.gpa), .worker_transport = worker_socket != null };
     var animation_seed: [8]u8 = undefined;
     init.io.random(&animation_seed);
     model.animations.random_state = std.mem.readInt(u64, &animation_seed, .little);
@@ -1800,6 +1808,27 @@ test "transport tracks admission state without displaying a waiting label" {
     try std.testing.expectEqual(TransportStatus.idle, TransportStatus.observe(null, .zero, true, false));
     try std.testing.expectEqual(TransportStatus.fenced, TransportStatus.observe(.poll, .zero, false, true));
     try std.testing.expectEqual(TransportStatus.fenced, TransportStatus.observe(null, .zero, true, true));
+}
+
+test "connection presentation distinguishes the selected worker route and terminal failure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    var model: Model = .{ .a = a, .bridge = &bridge, .editor = Editor.init(a) };
+    fw.DrawContext.init(.unicode);
+    const ctx: fw.DrawContext = .{ .arena = a, .min = .{}, .max = .{ .width = 100, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
+    for ([_]bool{ false, true }) |worker_route| {
+        model.worker_transport = worker_route;
+        const text = try testSurfaceText(a, try Model.draw(&model, ctx));
+        try std.testing.expect(std.mem.indexOf(u8, text, "Connecting to the selected hub") != null);
+        try std.testing.expect((std.mem.indexOf(u8, text, "via this worker") != null) == worker_route);
+        try std.testing.expect(std.mem.indexOf(u8, text, "local hub") == null);
+    }
+    bridge.failed = true;
+    const failed = try testSurfaceText(a, try Model.draw(&model, ctx));
+    try std.testing.expect(std.mem.indexOf(u8, failed, "Selected hub connection failed; no local fallback.") != null);
+    try std.testing.expect(std.mem.indexOf(u8, failed, "Connecting") == null);
 }
 
 test "command readiness keeps stale and fenced warnings separate from error notices" {

@@ -34,7 +34,7 @@ const help =
     \\  deck hub --here [--tui | --no-tui] [--port 52800] [--task CHAT_ID] [--message TEXT]
     \\  deck agent [--hub REX_HOST | --local] [--directory STATE] [--port 52800]
     \\    Create & open form in local Rex; worker/cwd/terminal stay on this machine.
-    \\  deck agent [connection options] --list | --resume NAME | --drafts
+    \\  deck agent [connection options] --list | --resume NAME [--here] | --drafts
     \\  deck agent [connection options] --recover STARTUP_ID | --discard REQUEST_ID --confirm
     \\    Recovery and discard both require --confirm. Use deck agent --help for details.
     \\    Selection: --hub, DECK_HUB_REX_HOST, otherwise local; --local ignores env.
@@ -97,7 +97,8 @@ const help =
     \\Direct --task launches are read-only, including plain and one-shot paths.
     \\Remote task clients reuse the verified worker link; no extra login or exposed HTTP.
     \\Approved remote launcher: deck agent --launch-from ABS_WORKER_DIRECTORY [--help].
-    \\Launcher list/create/open/inspect is separate from task input and hub authority.
+    \\Launcher authority is separate from Rex task allocation and general hub authority.
+    \\Explicit --resume NAME --here attaches to an independent task on this worker.
     \\Terminal allocation uses local Unix endpoints (API 8+); forwarding requires 14+.
     \\Jobs/child terminals remain future.
     \\
@@ -495,6 +496,7 @@ pub fn main(init: std.process.Init) void {
                 error.BootstrapLaunchUnconfirmed => "deck: task-form terminal creation unconfirmed. Inspect saved startup metadata and Rex; do not blindly launch a duplicate.\n",
                 error.ClientAlreadyStarting => "deck: another launcher is starting this connection; wait for it to finish.\n",
                 error.AgentActionUnconfirmed => "deck: agent action not confirmed; no fallback or automatic retry.\n",
+                error.InteractiveTerminalRequired => "deck: --resume --here requires an interactive terminal; no task or Rex terminal opened.\n",
                 else => "deck: agent startup refused; check private client storage, selected hub and Rex authentication/version. No fallback, worker replacement or effect replay.\n",
             };
             std.Io.File.stderr().writeStreamingAll(init.io, message) catch {};

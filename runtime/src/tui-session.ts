@@ -13,7 +13,7 @@ import { randomUUID } from "node:crypto";
 import { DraftStore, type Draft } from "./drafts.js";
 import { hubCommand } from "./hub-client.js";
 import { HubError } from "./responses.js";
-import { validTuiRequest, validTuiResponse, type TuiRequest, type TuiSnapshot, type TuiEntry, type TuiResponse } from "./generated/contracts.js";
+import { validMachineIdentity, validRexUuid, validTuiRequest, validTuiResponse, type TuiRequest, type TuiSnapshot, type TuiEntry, type TuiResponse } from "./generated/contracts.js";
 import { validSafePiId, validMutationArgs } from "./mutation-contracts.js";
 
 import { validTaskTarget } from "./task-target.js";
@@ -77,6 +77,7 @@ export class TuiSession {
   private supportsBrief = false;
   private supportsHosts = false;
   private startupBlocked = false;
+  private attachmentMachine?: string;
   private mode: TuiClientMode = "hub";
   private hubChatId?: string;
   private participates() { return canParticipate(this.mode, this.chatId, this.hubChatId); }
@@ -101,6 +102,15 @@ export class TuiSession {
     this.state!.notice = "Rex startup registered (historical observation, not current health).";
     this.startupBlocked = false;
   }
+  async registerAttachment(machineId: string) {
+    if (this.state || this.startupBlocked || !validMachineIdentity(machineId) || !validRexUuid(this.expectedHub) || !validSafePiId(this.selected)) throw new Error("Task attachment requires a pinned hub/task/worker");
+    this.startupBlocked = true; this.mode = "task"; this.attachmentMachine = machineId;
+    await this.initialize();
+    const page = this.renderHistory(await this.history());
+    this.state!.entries = page.entries; this.before = page.next; this.state!.hasOlder = !!page.next;
+    this.state!.notice = "Attached in this terminal; no Rex allocation changed. Detach does not stop work.";
+    this.startupBlocked = false;
+  }
   private async initialize() { if (!this.state) await this.selectChat(this.selected); }
   private async selectChat(target?: string) {
     if (this.state) requireNavigation(this.mode);
@@ -108,6 +118,7 @@ export class TuiSession {
     const status = await this.command("status", target ? { chatId: target } : {}, this.hubId ?? this.expectedHub);
     if (status.hubGuard !== 1 || (target && status.chatId !== target) || ((this.hubId ?? this.expectedHub) && status.hubId !== (this.hubId ?? this.expectedHub))) throw new Error("Hub/chat identity guard required; selection unchanged");
     if (this.hubChatId !== undefined && status.mainChatId !== this.hubChatId) throw new Error("Hub chat identity changed; selection unchanged");
+    if (this.attachmentMachine && (status.chatId === status.mainChatId || status.binding?.kind !== "task" || status.binding.machineId !== this.attachmentMachine)) throw new Error("Attached task worker/binding changed; no input enabled");
     const store = this.store ?? new DraftStore(status.hubId, this.draftRoot);
     const saved = (await store.list()).filter((draft) => draft.chatId === status.chatId);
     const writable = canParticipate(this.mode, status.chatId, status.mainChatId);

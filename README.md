@@ -102,10 +102,19 @@ After durable creation acknowledgement, Deck verifies/adopts this exact Rex bloc
 # Use the same connection options for all of these:
 deck agent --list
 deck agent --resume wintermute
+deck agent --resume wintermute --here  # use this terminal; keep the saved workspace
 deck agent --drafts
 deck agent --recover STARTUP_UUID --confirm
 deck agent --discard REQUEST_UUID --confirm
 ```
+
+For a remote task in the current terminal:
+
+```sh
+deck agent --hub https://YOUR-HUB --resume wintermute --here
+```
+
+`--here` requires an interactive terminal and a hub with attachment support; update the hub and invoking client together using the normal drained upgrade procedure. It resolves the name on the selected worker, loads existing history and enables task-scoped input. It does **not** create/reopen a Rex task terminal, register the current `REX_BLOCK`, change the saved workspace, or stop work on detach. Remote traffic uses the selected worker's private relay, never a local-hub fallback. An existing worker's executable pins and receipts remain unchanged; this explicitly selected renderer uses the installed client rather than dispatching its UI to the worker's older pinned package. Unsupported/offline peers refuse instead of silently opening elsewhere. Ordinary resume without `--here` retains managed Rex behavior.
 
 Names resolve to authoritative IDs among this worker's independent tasks. Resume reuses a running client or opens after definite exit; it creates no task and replays no initial input. Unconfirmed allocation/opening refuses instead of blindly creating another terminal. Recovery retrieves the original creation and its saved brief without opening a terminal or submitting input. If the original form remains open, choose **Retry** there; otherwise resume the task and send a message when ready. Input drafts left by older clients remain available for explicit `:retry` or `:discard`, but are never sent automatically. Discard only removes local recovery intent/drafts; it does not cancel/delete a task, stop a worker or kill a possible Rex session. Inspect ambiguous terminal creation before discarding its fence.
 
@@ -619,7 +628,7 @@ Drafts live under the normal client-state root in a private `launcher-drafts` na
 
 ## Limits and trust
 
-- The chat API listens only on loopback and trusts local OS users. Worker listeners authenticate registered Tailscale machines, not individual OS users. Task scopes expose allocation-scoped commands; separately approved launchers expose only list/create/open/inspect. Neither exposes the general HTTP/login/hub command surface.
+- The chat API listens only on loopback and trusts local OS users. Worker listeners authenticate registered Tailscale machines, not individual OS users. Task scopes expose allocation-scoped commands; separately approved launchers expose list/create/open/inspect plus explicit current-terminal attachment to independent tasks assigned to that worker. Attachments allow bounded task reads/input/settings/stop/instruction import, not Rex startup/opening, task creation/navigation, login or tool grants. Neither exposes the general HTTP/login/hub command surface.
 - File and shell tools can access paths outside the workspace, use ordinary symlinks, and contact external services.
 - File tools handle regular UTF-8 files up to 128 KiB. Exact edit requires one match. Bash has a 60-second default timeout, a 300-second maximum, and a 64 KiB output tail.
 - Stored chats, receipts, instructions, credentials, drafts, and backups can contain sensitive plaintext. Display sanitization is not secret redaction.

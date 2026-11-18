@@ -212,7 +212,7 @@ fn sessionWithTrust(native: Native, config: SessionConfig, implementation: []con
     input_owned = false;
     output_owned = false;
     local_owned = false;
-    if (config.launcher orelse false) std.Io.File.stderr().writeStreamingAll(native.io, "deck: approved launcher relay enabled (list/create/open/inspect only)\n") catch {};
+    if (config.launcher orelse false) std.Io.File.stderr().writeStreamingAll(native.io, "deck: approved launcher relay enabled (assigned independent tasks only)\n") catch {};
     std.Io.File.stderr().writeStreamingAll(native.io, if (mcp != null) (if (clients != null) "deck: worker connected (files/bash/MCP/Rex task relay; no Pi runtime)\n" else "deck: worker connected (files/bash/MCP; no Pi runtime)\n") else if (clients != null) "deck: worker connected (files/bash/Rex task relay; no Pi runtime)\n" else "deck: worker connected (files/bash only; no Pi runtime)\n") catch {};
     @import("worker.zig").serveRemoteMcpTracked(native, input, output, pipe[0], journal, config.machineId, config.rexClient, mcp, config.drain);
 }

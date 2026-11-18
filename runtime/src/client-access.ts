@@ -1,9 +1,10 @@
 // Client interaction policy, not authentication of the trusted-local HTTP API.
 // Pi tools continue to coordinate conversations through the runtime. Human task
-// participation requires a successfully registered allocation-bound Rex client.
+// participation requires registered allocation-bound Rex startup or explicit
+// --resume --here attachment. Neither is granted by selecting a task.
 import type { TuiClientMode } from "./generated/contracts.js";
 export const inspectOnly = "Read-only task inspection. Open/reopen its Rex session to participate.";
-export const taskLocked = "This Rex task client is locked to its task. Use the hub TUI to inspect or create other tasks.";
+export const taskLocked = "This task client is locked to its task. Use the hub TUI to inspect or create other tasks.";
 export function canParticipate(mode: TuiClientMode, chatId?: string, hubChatId?: string): boolean {
   return !!chatId && !!hubChatId && (mode === "task" ? chatId !== hubChatId : chatId === hubChatId);
 }

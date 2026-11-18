@@ -157,9 +157,30 @@ for (const { remote, upgrading, live = false, interrupted = false } of [{ remote
     assert.match(await cli("--resume", task.agentName), /admitted/);
     reopened = await until(() => hubCommand(port, "rex_status", { chatId: task.chatId }, status.hubId), (s: any) => s.status === "allocated" && s.binding.blockId !== b.blockId);
     assert.equal(reopened.binding.sessionId, b.sessionId);
-    await new Promise(r => setTimeout(r, 500));
+    const resumedCapture = () => rexCall(localHome, "capture", "--session", reopened.binding.sessionId, "--block", reopened.binding.blockId, "--trim", "--unwrap");
+    await until(resumedCapture, text => text.includes(message));
     assert.equal((await hubCommand(port, "list_chats", {}, status.hubId) as any).items.length, 2);
     assert.equal((await hubCommand(port, "history", { chatId: task.chatId }, status.hubId) as any).items.filter((entry: any) => entry.kind === "deck.input").length, 1, "resume never submits the brief or replays input");
+    await assert.rejects(cli("--resume", task.agentName, "--here"), /interactive terminal/, "non-PTY refusal precedes transport/terminal mutation");
+    const connectionAtAttach = daemon ? await readFile(join(daemon.directory, "rex-connection.json")) : undefined;
+    const registrationAtAttach = remote ? await readFile(join(root, "hub", "rex-workers.json")) : undefined;
+    const attachedText = "New input from my current terminal";
+    // A real invoking PTY, outside Rex and deliberately in a different cwd. An
+    // ambient unrelated REX_BLOCK must not become startup/allocation authority.
+    const here = spawn("python3", [resolve("scripts/tui-pty-test.py"), deck!, "agent", ...flags, "--resume", task.agentName, "--here"], { cwd: hubWork, env: { ...env, PATH: `${root}/bin:${process.env.PATH}`, REX_BLOCK: "block:11111111-1111-4111-8111-111111111111" } });
+    let hereOut = "", hereErr = ""; here.stdout!.on("data", b => { hereOut += String(b); }); here.stderr!.on("data", b => { hereErr += String(b); });
+    const hereClosed = once(here, "close");
+    here.stdin!.end(JSON.stringify([{ wait: "Connecting to the selected hub" }, { wait: message }, { capture: "history" }, { keys: attachedText }, { keys: "\r" }, { wait: "Input admitted" }, { keys: "\u0003" }]));
+    assert.equal((await hereClosed)[0], 0, hereErr);
+    const captureHere = JSON.parse(hereOut); assert.equal(captureHere.restored, true); assert.match(captureHere.screens.history, /Start only on this explicit user message/);
+    assert.doesNotMatch(captureHere.screens.history, /Connecting to the local hub/);
+    assert.deepEqual(await hubCommand(port, "rex_status", { chatId: task.chatId }, status.hubId), reopened, "here leaves original allocation and startup observation unchanged");
+    assert.equal((await rexJson(localHome, "session", "ls", "--json", "--short=false")).sessions.length, 1);
+    assert.equal((await hubCommand(port, "status", { chatId: task.chatId }, status.hubId) as any).binding.cwd, work, "here does not rebind tools to the invoking cwd");
+    const afterHere: any = await hubCommand(port, "history", { chatId: task.chatId }, status.hubId);
+    assert.equal(afterHere.items.filter((e: any) => e.kind === "deck.input").length, 2); assert.ok(afterHere.items.some((e: any) => e.data?.text === attachedText));
+    if (daemon) assert.deepEqual(await readFile(join(daemon.directory, "rex-connection.json")), connectionAtAttach);
+    if (remote) assert.deepEqual(await readFile(join(root, "hub", "rex-workers.json")), registrationAtAttach);
     }
     if (daemon) {
       assert.equal(JSON.parse(await readFile(join(daemon.directory, "rex-connection.json"), "utf8")).pid, daemon.pid);

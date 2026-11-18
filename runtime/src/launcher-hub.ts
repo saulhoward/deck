@@ -9,6 +9,9 @@ import { ChatDoc, DeckError, type DeckRuntime } from "./deck.js";
 import { briefFields } from "./task-brief.js";
 import { agentNameFields } from "./agent-names.js";
 import { prefixUnits } from "./view-text.js";
+import { attachedRequest } from "./attachment-contracts.js";
+import { dispatch } from "./ipc.js";
+import { responseFrame } from "./responses.js";
 import { validSafePiId } from "./mutation-contracts.js";
 import { validWorkerFrame } from "./remote-contracts.js";
 import { validLaunchRequest, validLaunchResponse, launcherBodyLimit } from "./launcher-contracts.js";
@@ -29,7 +32,7 @@ export async function launcherResponse(runtime: DeckRuntime, machineId: string, 
   };
   const guard=async()=>{
     if(!approved || frame.launcher?.hubId!==runtime.hubId)refused();
-    if(request.command==="launch_open" || request.command==="launch_inspect" || request.command==="launch_adopt") {
+    if(request.command==="launch_open" || request.command==="launch_inspect" || request.command==="launch_adopt" || request.command==="launch_task") {
       try{await task(request.args.chatId);}catch{refused();}
     }
   };
@@ -38,6 +41,16 @@ export async function launcherResponse(runtime: DeckRuntime, machineId: string, 
   try {
     const result=await runtime.guardedCommand(guard,async()=>{
       switch(request.command){
+        case "launch_task": {
+          const inner = attachedRequest(request.args.body, request.args.chatId, runtime.hubId);
+          if (!inner) return refused();
+          // The outer canonical guard is also rechecked at serialized mutation
+          // admission and before releasing results. No Rex allocation is changed.
+          let reply: ResponseEnvelope;
+          try { reply = { version: 1, id: inner.id, ok: true, result: await dispatch(runtime, inner, undefined, true) }; }
+          catch (error) { reply = { version: 1, id: inner.id, ok: false, error: { code: error instanceof DeckError ? error.code : "runtime_failed", message: error instanceof DeckError ? error.message : "Attached task command failed; outcome unconfirmed" } }; }
+          return { ...identity, chatId: request.args.chatId, body: responseFrame(reply, inner).subarray(4).toString("utf8") };
+        }
         case "launch_list": {
           const page=await runtime.harness.commit(tx=>tx.scanConversations({order:"ascending"},25,request.args.after?{after:Number(request.args.after) as ConversationId,order:"ascending"}:undefined),context);
           const items:LauncherList["items"]=[];

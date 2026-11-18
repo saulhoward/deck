@@ -1,4 +1,6 @@
-import { validLauncherRequest, validLauncherList, validLauncherCreated, validLauncherOpened, validLauncherAdopted, validLauncherInspection, validResponseEnvelope, type LauncherRequest, type ResponseEnvelope } from "./generated/contracts.js";
+import { attachedRequest } from "./attachment-contracts.js";
+import { responseResult } from "./responses.js";
+import { validLauncherTaskReply, validLauncherRequest, validLauncherList, validLauncherCreated, validLauncherOpened, validLauncherAdopted, validLauncherInspection, validResponseEnvelope, type LauncherRequest, type ResponseEnvelope } from "./generated/contracts.js";
 import { validBrief, validBriefBinding, briefFields } from "./task-brief.js";
 import { validAdoptArgs, validRexReply } from "./rex-open-contracts.js";
 import { validSafePiId } from "./mutation-contracts.js";
@@ -6,6 +8,7 @@ export const launcherBodyLimit = 128 * 1024;
 export function validLaunchRequest(value: unknown): value is LauncherRequest {
   if (!validLauncherRequest(value) || Buffer.byteLength(JSON.stringify(value)) > launcherBodyLimit) return false;
   switch(value.command) {
+    case "launch_task": return attachedRequest(value.args.body, value.args.chatId) !== undefined;
     case "launch_adopt": return validAdoptArgs(value.args);
     case "launch_list": return value.args.after === undefined || validSafePiId(value.args.after);
     case "launch_create": return validBriefBinding(value.args.title,value.args.cwd) && validBrief({...(value.args.problem===undefined?{}:{problem:value.args.problem}),...(value.args.description===undefined?{}:{description:value.args.description})});
@@ -17,6 +20,16 @@ export function validLaunchResponse(value: unknown, request: LauncherRequest, hu
   if (!value.ok) return true;
   const r=value.result;
   switch(request.command) {
+    case "launch_task": {
+      const inner = attachedRequest(request.args.body, request.args.chatId, hubId);
+      if (!inner || !validLauncherTaskReply(r) || r.hubId !== hubId || r.machineId !== machineId || r.chatId !== request.args.chatId) return false;
+      try {
+        const reply: unknown = JSON.parse(r.body);
+        if (!validResponseEnvelope(reply) || reply.id !== inner.id) return false;
+        if (reply.ok) responseResult(reply, inner.id, inner);
+        return true;
+      } catch { return false; }
+    }
     case "launch_list": return validLauncherList(r) && r.hubId===hubId && r.machineId===machineId && (r.next===undefined || (validSafePiId(r.next) && Number(r.next)>Number(request.args.after??0))) && r.items.every((t,i)=>validSafePiId(t.chatId) && validBriefBinding("task",t.cwd) && Number(t.chatId)>Number(i?r.items[i-1]!.chatId:request.args.after??0) && (r.next===undefined || Number(t.chatId)<=Number(r.next)));
     case "launch_create": return validLauncherCreated(r) && r.hubId===hubId && r.machineId===machineId && r.requestId===request.args.requestId && validSafePiId(r.chatId) && r.title===request.args.title && r.cwd===request.args.cwd && validBrief(r.brief) && JSON.stringify(briefFields(r.brief))===JSON.stringify(briefFields(request.args));
     case "launch_adopt": return validLauncherAdopted(r) && r.hubId === hubId && r.machineId === machineId && validRexReply({ command: "rex_adopt", args: request.args, hubId }, r.ack);

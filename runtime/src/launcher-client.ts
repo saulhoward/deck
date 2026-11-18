@@ -7,6 +7,7 @@ import { validRemoteWorkerConfig, validRexWorkerConnection, validMachineIdentity
 import { validRexClient } from "./remote-contracts.js";
 import { validLaunchRequest, validLaunchResponse } from "./launcher-contracts.js";
 import { FrameDecoder, encodeFrame } from "./protocol.js";
+import { HubError } from "./responses.js";
 export type LauncherTarget={hubId:string;machineId:string;socket:string};
 export function privateOwner(info:{mode:number;uid:number}) {
   if(info.uid!==process.getuid?.() || (info.mode&0o077)!==0)throw new Error("Launcher storage must be private and owned by this user");
@@ -62,6 +63,6 @@ export async function launcherCommand(target:LauncherTarget,request:LauncherRequ
   }catch{throw new Error("Launcher link lost/cancelled; outcome unconfirmed; no request replayed");}
   finally{abort.removeEventListener("abort",cancel);socket.destroy();decoder.destroy();}
   if(!validLaunchResponse(response,request,target.hubId,target.machineId))throw new Error("Invalid launcher acknowledgement; outcome unconfirmed");
-  if(!response.ok)throw new Error(response.error.message);
+  if(!response.ok)throw new HubError(response.error.code,response.error.message,request.command);
   return response.result;
 }

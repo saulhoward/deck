@@ -1,5 +1,9 @@
 {
   "bases": {
+    "AgentAttachment": { "hubId": "00000000-0000-4000-8000-000000000001", "machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "chatId": "2" },
+    "LauncherTaskCommand": { "chatId": "2", "body": "{}" },
+    "LauncherTaskReply": { "hubId": "00000000-0000-4000-8000-000000000001", "machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "chatId": "2", "body": "{}" },
+    "LauncherRequest": { "version": 1, "id": "00000000-0000-4000-8000-000000000001", "command": "launch_task", "args": { "chatId": "2", "body": "{}" } },
     "WorkerHandoffPlan": { "version": 1, "id": "00000000-0000-4000-8000-000000000001", "hubId": "00000000-0000-4000-8000-000000000002", "machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "beforeImplementation": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "implementation": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "beforeClient": { "executable": "/tools/old", "socket": "/private/worker.sock" }, "client": { "executable": "/tools/new", "socket": "/private/worker.sock" } },
     "WorkerHandoffReply": { "kind": "worker_upgrade", "id": "00000000-0000-4000-8000-000000000001", "hubId": "00000000-0000-4000-8000-000000000002", "status": "prepared" },
     "RexWorkerRegistration": { "version": 1, "machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "implementation": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "capabilities": ["files", "bash", "rex", "launcher"], "rexClient": { "executable": "/tools/new-deck", "socket": "/private/worker.sock" }, "previousClients": [{ "executable": "/tools/old-deck", "socket": "/private/worker.sock" }], "upgradeId": "00000000-0000-4000-8000-000000000001", "upgradeHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
@@ -139,6 +143,15 @@
     }
   },
   "cases": [
+    { "name": "attachment pins hub task and worker", "schema": "AgentAttachment", "valid": true },
+    { "name": "attachment requires task", "schema": "AgentAttachment", "remove": ["chatId"], "valid": false },
+    { "name": "attachment cannot claim a Rex block", "schema": "AgentAttachment", "set": { "blockId": "block:00000000-0000-4000-8000-000000000001" }, "valid": false },
+    { "name": "bounded attached command body", "schema": "LauncherTaskCommand", "valid": true },
+    { "name": "attachment command needs body", "schema": "LauncherTaskCommand", "remove": ["body"], "valid": false },
+    { "name": "attached command is a distinct launcher request", "schema": "LauncherRequest", "valid": true },
+    { "name": "attached command cannot supply worker authority", "schema": "LauncherRequest", "set": { "machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }, "valid": false },
+    { "name": "attached reply pins all identities", "schema": "LauncherTaskReply", "valid": true },
+    { "name": "attached reply requires worker", "schema": "LauncherTaskReply", "remove": ["machineId"], "valid": false },
     { "name": "live worker handoff plan", "schema": "WorkerHandoffPlan", "valid": true },
     { "name": "live handoff protocol is explicit", "schema": "WorkerHandoffPlan", "set": { "version": 2 }, "valid": false },
     { "name": "live handoff needs expected old image", "schema": "WorkerHandoffPlan", "remove": ["beforeImplementation"], "valid": false },

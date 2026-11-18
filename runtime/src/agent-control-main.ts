@@ -9,9 +9,10 @@ import { displayText } from "./tui-session.js";
 import { startupIndexes, bootstrapPath, bootstrapRecord, StartupFiles, finishStartup, missing } from "./agent-storage.js";
 import { AgentWizard, wizardTransport, startupDraft } from "./agent-wizard.js";
 import { DraftStore } from "./drafts.js";
+import { attachedCommand } from "./attached-client.js";
 const [kind, selected, action, root, value, ...extra] = process.argv.slice(2);
 async function main() {
-  if (extra.length || !selected || !root?.startsWith("/") || !["local", "worker"].includes(kind ?? "") || !["ready", "prepare", "upgrade-ready", "list", "resume", "drafts", "discard", "discard-startup", "recover"].includes(action ?? "") || ((action === "resume" || action === "discard" || action === "discard-startup" || action === "recover") !== (value !== undefined))) throw new Error("Invalid agent launch options");
+  if (extra.length || !selected || !root?.startsWith("/") || !["local", "worker"].includes(kind ?? "") || !["ready", "prepare", "upgrade-ready", "list", "resume", "attach", "drafts", "discard", "discard-startup", "recover"].includes(action ?? "") || ((action === "resume" || action === "attach" || action === "discard" || action === "discard-startup" || action === "recover") !== (value !== undefined))) throw new Error("Invalid agent launch options");
   const port = kind === "local" ? Number(selected) : 52800;
   const remote = kind === "worker" ? await rexLauncherTarget(selected) : undefined;
   const status = remote ? undefined : await hubCommand(port, "status");
@@ -89,8 +90,15 @@ async function main() {
   }
   const matches = tasks.filter(task => task.agentName === value);
   if (matches.length !== 1) throw new Error("Task name not found uniquely on this worker; use --list. No task or terminal created");
-  if ((await store.list()).length) throw new Error("Unresolved launcher request exists. Use --drafts and inspect the task before explicitly discarding that request; no open replayed");
   const task = matches[0]!;
+  if (action === "attach") {
+    // Read-only name resolution. Each subsequent attached command revalidates
+    // the canonical task/worker scope; this does not grant a Rex allocation.
+    const observed = remote ? await attachedCommand(remote, task.chatId, "status", { chatId: task.chatId }, hubId).catch(() => { throw new Error("Task attachment unavailable through the selected worker; --here requires a supporting hub. No Rex terminal opened"); }) : await hubCommand(port, "status", { chatId: task.chatId }, hubId);
+    if (!validStatusSnapshot(observed) || observed.hubId !== hubId || observed.chatId !== task.chatId || observed.chatId === observed.mainChatId || observed.binding?.kind !== "task" || observed.binding.machineId !== machineId) throw new Error("Task attachment scope unavailable; no terminal opened");
+    process.stdout.write(JSON.stringify({ hubId, machineId, chatId: task.chatId })); return;
+  }
+  if ((await store.list()).length) throw new Error("Unresolved launcher request exists. Use --drafts and inspect the task before explicitly discarding that request; no open replayed");
   const request: Extract<LauncherRequest, { command: "launch_open" }> = { version: 1, id: randomUUID(), command: "launch_open", args: { chatId: task.chatId, requestId: randomUUID(), confirmedOnly: true } };
   await store.save(request);
   const ack = remote ? (await launch(request)).ack : await hubCommand(port, "rex_open", { ...request.args, port }, hubId);
@@ -99,7 +107,7 @@ async function main() {
 }
 void main().catch(error => {
   // No nested transport/provider diagnostics or request bodies.
-  const allowed = error instanceof Error && /^(Invalid agent|Local hub lacks|Task name|Task listing|Unresolved launcher)/.test(error.message);
+  const allowed = error instanceof Error && /^(Invalid agent|Local hub lacks|Task name|Task listing|Task attachment|Unresolved launcher)/.test(error.message);
   process.stderr.write(allowed ? `${error.message}\n` : "Selected hub/worker unavailable or request outcome unconfirmed; exact saved drafts retained. No fallback or automatic replay.\n");
   process.exitCode = 1;
 });

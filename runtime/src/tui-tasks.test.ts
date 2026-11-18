@@ -310,7 +310,7 @@ test("real PTY: allocation-registered Rex TUI participates but refuses every tas
   try {
     Object.assign(f.chats[1]!, { agentRune: "ᚦ", agentName: "frostwire", agentNameAlgorithm: "wintermute-v1" });
     const steps: object[] = [{ wait: "history for 2" }, { wait: "Rex startup registered" }, { keys: "\x1b" }];
-    for (const cmd of [":tasks", ":hosts", ":new", ":hub", ":main", ":select 1", ":task forbidden", ":task-at {}"]) steps.push({ keys: cmd }, { wait: "client idle" }, { keys: "\r" }, { wait: "Rex task client locked" });
+    for (const cmd of [":tasks", ":hosts", ":new", ":hub", ":main", ":select 1", ":task forbidden", ":task-at {}"]) steps.push({ keys: cmd }, { wait: "client idle" }, { keys: "\r" }, { wait: "Task client locked" });
     // Command mode pauses polls and exposes precise transport readiness. A
     // neutral footer during normal editing does not mean Ctrl-S can be queued.
     steps.push({ keys: "iallowed in Rex" }, { keys: "\x1b" }, { keys: ":send" }, { wait: ":send" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Input admitted" }, { keys: ":q\r" });

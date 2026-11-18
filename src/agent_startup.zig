@@ -8,12 +8,12 @@ const storage = @import("private_store.zig");
 const forward = @import("rex_forward.zig");
 const worker_client = @import("worker_client.zig");
 const Mode = enum { create, list, @"resume", drafts, discard, recover };
-const Options = struct { hub: ?[]const u8 = null, local: bool = false, directory: ?[]const u8 = null, rex: ?[]const u8 = null, server: ?[]const u8 = null, port: u16 = 52800, mode: Mode = .create, value: ?[]const u8 = null, confirm: bool = false };
+const Options = struct { hub: ?[]const u8 = null, local: bool = false, here: bool = false, directory: ?[]const u8 = null, rex: ?[]const u8 = null, server: ?[]const u8 = null, port: u16 = 52800, mode: Mode = .create, value: ?[]const u8 = null, confirm: bool = false };
 const Ready = struct { hubId: []const u8, machineId: []const u8 };
 const help =
     \\deck agent [--hub REX_HOST | --local] [--directory STATE] [--port 52800]
     \\deck agent [same connection options] --list
-    \\deck agent [same connection options] --resume NAME
+    \\deck agent [same connection options] --resume NAME [--here]
     \\deck agent [same connection options] --drafts
     \\deck agent [same connection options] --discard REQUEST_ID --confirm
     \\deck agent [same connection options] --recover STARTUP_ID --confirm
@@ -27,6 +27,8 @@ const help =
     \\The chat stays empty until you send a message.
     \\Detach never stops work. Uncertain input requires explicit :retry / :discard.
     \\--resume resolves a name on this worker, never creates a new task.
+    \\--here resumes in this terminal without creating/replacing a Rex allocation.
+    \\It preserves the saved task workspace and requires attachment support on the hub.
     \\Advanced direct/legacy clients retain --tui, --no-tui and --launch-from.
     \\
 ;
@@ -34,8 +36,8 @@ pub fn managed(args: []const []const u8) bool {
     if (args.len > 0 and std.mem.eql(u8, args[0], "--wizard")) return true;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        for ([_][]const u8{ "--tui", "--no-tui", "--message", "--task", "--hub-id", "--rex-allocation", "--worker-socket", "--agent-bootstrap", "--client-state", "--launch-from" }) |flag| if (std.mem.eql(u8, args[i], flag)) return false;
-        if (std.mem.eql(u8, args[i], "--local") or std.mem.eql(u8, args[i], "--list") or std.mem.eql(u8, args[i], "--drafts") or std.mem.eql(u8, args[i], "--confirm") or std.mem.eql(u8, args[i], "--help")) continue;
+        for ([_][]const u8{ "--tui", "--no-tui", "--message", "--task", "--hub-id", "--rex-allocation", "--worker-socket", "--attach-machine", "--agent-bootstrap", "--client-state", "--launch-from" }) |flag| if (std.mem.eql(u8, args[i], flag)) return false;
+        if (std.mem.eql(u8, args[i], "--here") or std.mem.eql(u8, args[i], "--local") or std.mem.eql(u8, args[i], "--list") or std.mem.eql(u8, args[i], "--drafts") or std.mem.eql(u8, args[i], "--confirm") or std.mem.eql(u8, args[i], "--help")) continue;
         i += 1;
     }
     return true;
@@ -49,6 +51,10 @@ fn options(args: []const []const u8) !Options {
         const key = args[i];
         if (std.mem.eql(u8, key, "--local") and !o.local) {
             o.local = true;
+            continue;
+        }
+        if (std.mem.eql(u8, key, "--here") and !o.here) {
+            o.here = true;
             continue;
         }
         if (std.mem.eql(u8, key, "--confirm") and !o.confirm) {
@@ -73,7 +79,7 @@ fn options(args: []const []const u8) !Options {
             seen_mode = true;
         } else return error.InvalidArguments;
     }
-    if (o.hub != null and o.local or (o.mode == .discard or o.mode == .recover) != o.confirm) return error.InvalidArguments;
+    if (o.hub != null and o.local or (o.mode == .discard or o.mode == .recover) != o.confirm or (o.here and o.mode != .@"resume")) return error.InvalidArguments;
     if (o.value) |value| {
         if (o.mode == .@"resume") {
             if (!wire.validAgentName(.{ .string = value })) return error.InvalidArguments;
@@ -296,6 +302,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     if (args.len == 1 and std.mem.eql(u8, args[0], "--help")) return std.Io.File.stdout().writeStreamingAll(native.io, help);
     if (args.len == 4 and std.mem.eql(u8, args[0], "--wizard") and std.mem.eql(u8, args[2], "--client-state")) return wizard(init, a, args[3], args[1]);
     const o = try options(args);
+    if (o.here and (std.c.isatty(0) != 1 or std.c.isatty(1) != 1)) return error.InteractiveTerminalRequired;
     const selected = try selectedHub(o, native.environ.getPosix("DECK_HUB_REX_HOST"));
     const cwd = try std.process.currentPathAlloc(native.io, a);
     const root = if (o.directory == null and native.environ.getPosix("DECK_CLIENT_STATE_DIRECTORY") != null) native.environ.getPosix("DECK_CLIENT_STATE_DIRECTORY").? else try std.fs.path.join(a, &.{ try @import("state.zig").directory(native, a, o.directory), "client" });
@@ -321,13 +328,32 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
                 try std.Io.File.stderr().writeStreamingAll(native.io, "deck: upgrade deferred; listing through the verified pinned client without changing the worker\n");
                 break :blk try workerDirectory(native, a, root, hub, executable, remote.value, o.port, client, cwd, &cancelled, false);
             };
-            if (selected_worker.reuse_client) |saved_client| return worker_client.replace(native, a, saved_client, args);
+            // Here is an explicitly selected client of the existing launcher,
+            // not a Rex allocation under the worker's executable pin. Verify
+            // old pins as usual, but run the installed renderer without changing
+            // the daemon/client pins or asking a legacy client to parse --here.
+            if (!o.here) if (selected_worker.reuse_client) |saved_client| return worker_client.replace(native, a, saved_client, args);
             worker_path = selected_worker.directory;
         }
     }
     const kind: []const u8 = if (worker_path != null) "worker" else "local";
     const endpoint = worker_path orelse port;
     const connected = try ready(native, a, cwd, kind, endpoint, root, &cancelled);
+    if (o.here) {
+        if (worker_path) |path| if (try @import("worker_handoff.zig").load(native, a, path)) |pending| if (pending.phase != .deferred) return error.WorkerUpgradeUnconfirmed;
+        const result = try control(native, a, cwd, kind, endpoint, root, "attach", o.value, &cancelled);
+        if (!result.result.ok or result.stderr.len != 0) {
+            try std.Io.File.stderr().writeStreamingAll(native.io, result.stderr);
+            return error.AgentActionUnconfirmed;
+        }
+        const attachment = (try wire.parseAgentAttachment(a, result.stdout)).value;
+        if (!std.mem.eql(u8, attachment.hubId, connected.hubId) or !std.mem.eql(u8, attachment.machineId, connected.machineId) or (std.fmt.parseInt(u64, attachment.chatId, 10) catch return error.InvalidHubIdentity) > 9007199254740991) return error.InvalidHubIdentity;
+        var client_args: std.ArrayList([]const u8) = .empty;
+        try client_args.appendSlice(a, &.{ "--tui", "--port", port, "--hub-id", attachment.hubId, "--task", attachment.chatId, "--attach-machine", attachment.machineId, "--client-state", root });
+        if (worker_path) |path| try client_args.appendSlice(a, &.{ "--worker-socket", (try connection(native, a, path)).rexClient.socket });
+        // No startup/creation lock is held for the lifetime of this renderer.
+        return @import("tui.zig").run(init, client_args.items);
+    }
     const starts_path = try std.fs.path.join(a, &.{ root, "startups" });
     var starts = try storage.directory(native, starts_path);
     defer starts.close(native.io);
@@ -403,6 +429,11 @@ test "agent selection honors explicit/env/local and never treats URL spellings a
     try std.testing.expectError(error.InvalidArguments, options(&.{ "--discard", "id" }));
     try std.testing.expectError(error.InvalidArguments, options(&.{ "--discard", "id", "--confirm" }));
     try std.testing.expectError(error.InvalidArguments, options(&.{ "--resume", "unsafe\nname" }));
+    try std.testing.expect((try options(&.{ "--here", "--resume", "dustspill" })).here);
+    try std.testing.expect((try options(&.{ "--resume", "dustspill", "--here" })).here);
+    for ([_][]const []const u8{ &.{"--here"}, &.{ "--here", "--list" }, &.{ "--resume", "dustspill", "--here", "--here" } }) |invalid| try std.testing.expectError(error.InvalidArguments, options(invalid));
+    try std.testing.expect(managed(&.{ "--here", "--resume", "dustspill" }));
+    try std.testing.expect(!managed(&.{ "--here", "--tui" }));
     try std.testing.expect(managed(&.{}));
     try std.testing.expect(managed(&.{ "--hub", "--no-tui" }));
     try std.testing.expect(!managed(&.{ "--port", "52800", "--no-tui" }));
