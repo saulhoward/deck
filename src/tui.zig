@@ -1358,13 +1358,26 @@ const Model = struct {
             const bytes_label = try std.fmt.allocPrint(ctx.arena, " {d}/{d} bytes ", .{ self.editor.text.items.len, Editor.limit });
             if (layout.main > border.len + bytes_label.len + 4) lineLimit(ctx, surface, @intCast(right - bytes_label.len), upper, bytes_label, Theme.rule, null, 0, right);
         }
-        // Operational notices remain visible above the prompt, never swallowed
-        // by decorative chrome or the tool inventory sidebar.
+        // Local request-slot readiness is independent of the last hub observation.
+        // Keep explicit retry readiness visible while stale, but never for an
+        // occupied/fenced bridge. Routine waiting still has no flashing label.
+        const warning = if (self.shown_transport == .fenced)
+            "STALE · client fenced"
+        else if (self.command_mode and self.shown_transport == .idle)
+            (if (self.online) "client idle" else "STALE · client idle")
+        else if (!self.online)
+            "STALE"
+        else
+            "";
+        // Commands use the footer, so put their warning at the right of the
+        // notice row and clip the notice before it. Never paint over error text.
+        const warning_x: u16 = @intCast(right - @min(right - 1, displayWidth(ctx, warning)));
+        const notice_right = if (self.command_mode and warning.len > 0) warning_x -| 1 else right;
         const notice = self.notice[0..self.notice_len];
-        lineLimit(ctx, surface, 1, upper - 1, notice, dim, null, 0, right);
+        lineLimit(ctx, surface, 1, upper - 1, notice, dim, null, 0, notice_right);
         if (notice.len == 0) if (s) |snap| {
             const preview = snap.preview[0 .. std.mem.indexOfScalar(u8, snap.preview, '\n') orelse snap.preview.len];
-            if (preview.len > 0) lineLimit(ctx, surface, layout.x, upper - 1, try std.fmt.allocPrint(ctx.arena, "live · {s}", .{preview}), dim, null, 0, right);
+            if (preview.len > 0) lineLimit(ctx, surface, layout.x, upper - 1, try std.fmt.allocPrint(ctx.arena, "live · {s}", .{preview}), dim, null, 0, notice_right);
         };
         var cursor_row: usize = 0;
         for (prompt.items, 0..) |row, i| if (self.editor.cursor >= row.offset) {
@@ -1416,7 +1429,6 @@ const Model = struct {
         lineLimit(ctx, surface, location_x, h - 2, shown_location, dim, null, 0, footer_right);
         const status = try std.fmt.allocPrint(ctx.arena, "{s} [{s}]", .{ if (s) |snap| snap.model else "model —", if (self.settings()) |settings_value| @tagName(settings_value.selection.thinkingLevel) else "thinking —" });
         // Reserve room for uncertainty even with long model names.
-        const warning = if (self.shown_transport == .fenced) "STALE · client fenced" else if (!self.online) "STALE" else if (self.command_mode and self.shown_transport == .idle) self.shown_transport.text() else "";
         const warning_width = @min(footer_right - 2, displayWidth(ctx, warning));
         const model_width = @min(displayWidth(ctx, status), if (self.command_mode or warning_width > 0) footer_right / 2 else footer_right - 1);
         const model_x: u16 = @intCast(footer_right - model_width);
@@ -1436,7 +1448,7 @@ const Model = struct {
             lineLimit(ctx, surface, 1, h - 1, command_text[start_byte..], accent, null, 0, command_right);
             surface.cursor = .{ .row = h - 1, .col = @intCast(@min(command_right, 1 + remaining)), .shape = .beam };
             // Keep slot/fence information observable without displacing commands.
-            if (warning_width > 0) lineLimit(ctx, surface, 1, upper - 1, warning, if (self.online) dim else Theme.orange, null, 0, right);
+            if (warning_width > 0) lineLimit(ctx, surface, warning_x, upper - 1, warning, if (self.online) dim else Theme.orange, null, 0, right);
         } else if (warning_width > 0) lineLimit(ctx, surface, 1, h - 1, warning, Theme.orange, null, 0, command_right);
         return surface;
     }
@@ -1788,6 +1800,55 @@ test "transport tracks admission state without displaying a waiting label" {
     try std.testing.expectEqual(TransportStatus.idle, TransportStatus.observe(null, .zero, true, false));
     try std.testing.expectEqual(TransportStatus.fenced, TransportStatus.observe(.poll, .zero, false, true));
     try std.testing.expectEqual(TransportStatus.fenced, TransportStatus.observe(null, .zero, true, true));
+}
+
+test "command readiness keeps stale and fenced warnings separate from error notices" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    var model: Model = .{ .a = a, .bridge = &bridge, .editor = .init(a), .uncertain = true };
+    defer model.deinit();
+    try model.command.appendSlice(a, "retry");
+    const notice = "Connection lost or cancelled; request outcome unconfirmed";
+    model.note(notice);
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    fw.DrawContext.init(.unicode);
+    var ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 100, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
+    for ([_]u16{ 80, 100, 140 }) |width| {
+        ctx.max.width = width;
+        for ([_]bool{ false, true }) |online| {
+            model.online = online;
+            for ([_]bool{ false, true }) |commands| {
+                model.command_mode = commands;
+                for ([_]?Action{ null, .poll, .create }) |pending| {
+                    bridge.pending = if (pending) |action| .{ .version = 1, .id = "pending", .action = action } else null;
+                    for ([_]bool{ false, true }) |fenced| {
+                        bridge.failed = fenced;
+                        const text = try testSurfaceText(ctx.arena, try Model.draw(&model, ctx));
+                        try std.testing.expectEqual(commands and pending == null and !fenced, std.mem.indexOf(u8, text, "client idle") != null);
+                        try std.testing.expectEqual(!online or fenced, std.mem.indexOf(u8, text, "STALE") != null);
+                        try std.testing.expectEqual(fenced, std.mem.indexOf(u8, text, "client fenced") != null);
+                        try std.testing.expect(std.mem.indexOf(u8, text, "client waiting") == null);
+                        const visible_notice = if (width >= 100 or !commands) notice else "Connection lost or cancelled; request outcome";
+                        try std.testing.expect(std.mem.indexOf(u8, text, visible_notice) != null);
+                        try std.testing.expectEqualStrings(notice, model.notice[0..model.notice_len]);
+                        if (commands) try std.testing.expect(std.mem.indexOf(u8, text, ":retry") != null);
+                    }
+                }
+            }
+        }
+    }
+    // Warning and notice regions remain bounded on narrow command panes too.
+    model.online = false;
+    model.command_mode = true;
+    bridge.pending = null;
+    bridge.failed = false;
+    for ([_]u16{ 20, 40 }) |width| {
+        ctx.max.width = width;
+        const surface = try Model.draw(&model, ctx);
+        try std.testing.expect(std.unicode.utf8ValidateSlice(try testSurfaceText(ctx.arena, surface)));
+        try std.testing.expect(surface.cursor.?.col < width);
+    }
 }
 
 test "TTY selection preserves plain mode and literal flag-looking message bytes" {

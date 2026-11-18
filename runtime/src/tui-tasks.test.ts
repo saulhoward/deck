@@ -15,7 +15,7 @@ import type { TuiRequest, ChatListItem } from "./generated/contracts.js";
 const hub = "12345678-1234-4234-8234-123456789abc";
 async function fixture() {
   const local = await clientEnv(); const requests: any[] = [];
-  const flags = { phase1: false, badBriefAck: false, legacyBriefHub: false, loseCreateOnce: false, noRex: false, loseCreate: false, loseOpen: false, badSelect: false, badList: false, sparse: false, badRex: false };
+  const flags = { phase1: false, badBriefAck: false, legacyBriefHub: false, loseCreateOnce: false, offlineReadsAfterCreate: false, noRex: false, loseCreate: false, loseOpen: false, badSelect: false, badList: false, sparse: false, badRex: false };
   const chats: ChatListItem[] = [
     { chatId: "1", kind: "main", title: "Main", machineId: "saved-worker", cwd: "/saved/main" },
     { chatId: "2", kind: "task", title: "Existing task", machineId: "other-worker", cwd: "/saved/task" },
@@ -25,6 +25,9 @@ async function fixture() {
     const value = JSON.parse(Buffer.concat(chunks).toString()); requests.push(value);
     const { command, args, id } = value; const chat = chats.find((c) => c.chatId === (args.chatId ?? "1"))!;
     let result: any;
+    // Keep the lost-ACK case stale until its explicit retry. A fast successful
+    // background read must not hide the disconnected rendering path.
+    if (flags.offlineReadsAfterCreate && chats.some(c => c.chatId === "3") && (command === "status" || command === "history")) { response.destroy(); return; }
     if (command === "status") result = { hubId: hub, hubGuard: 1, ...(flags.phase1 ? { taskBrief: 1, hostInventory: 1 } : {}), ...(flags.noRex ? {} : { rexOpen: 1 }), rexStartup: 1, mainChatId: "1", chatId: flags.badSelect ? "1" : chat.chatId, binding: chat, tools: "offline", activity: { scheduling: "running", tasks: [{ record: { otherTaskText: "OTHER_TASK_CONTENT" }, state: {} }], submissions: [] } };
     else if (command === "history") result = { items: [{ id: Number(chat.chatId) * 100, kind: "deck.input", data: { text: `history for ${chat.chatId}` } }], next: String(Number(chat.chatId) * 100) };
     else if (command === "list_hosts") result = { sampledAtMs: 1, items: [{ machineId: "a".repeat(32), kind: "local", rex: true, connection: "local" }, { machineId: "b".repeat(32), kind: "worker", rex: true, connection: "offline" }] };
@@ -33,6 +36,7 @@ async function fixture() {
       if (command === "create_task_brief" && flags.legacyBriefHub) { response.end(JSON.stringify({ version: 1, id, ok: false, error: { code: "invalid", message: "Unknown command" } })); return; }
       if (!chats.some((c) => c.chatId === "3")) chats.push({ chatId: "3", kind: "task", title: args.title, machineId: args.machineId, cwd: args.cwd, ...(command === "create_task_brief" ? { brief: { ...(args.problem === undefined ? {} : { problem: args.problem }), ...(args.description === undefined ? {} : { description: args.description }) } } : {}) });
       if (flags.loseCreate || flags.loseCreateOnce) { flags.loseCreateOnce = false; response.destroy(); return; }
+      flags.offlineReadsAfterCreate = false;
       result = { chatId: "3", ...(command === "create_task_brief" ? { brief: flags.badBriefAck ? {} : chats.find(c => c.chatId === "3")!.brief } : {}) };
     } else if (command === "rex_status") result = { version: 1, hubId: hub, chatId: flags.badRex ? "1" : args.chatId, taskId: null, status: "unallocated", binding: null, previousBinding: null, bestEffort: true };
     else if (command === "rex_inspect") result = { version: 1, hubId: hub, chatId: args.chatId, requestId: hub, taskId: null, startedAtMs: 1, finishedAtMs: 2, status: "unbound", observation: null };
@@ -254,7 +258,7 @@ for (const oldHub of [false, true]) test(`brief creation ${oldHub ? "refuses an 
 });
 
 for (const lose of [false, true]) test(`real PTY: deck hub brief composer, host selection, ${lose ? "lost ACK and explicit retry" : "separate create/open"}`, { skip: !binary, timeout: 30_000 }, async () => {
-  const f = await fixture(); f.flags.phase1 = true; f.flags.loseCreateOnce = lose;
+  const f = await fixture(); f.flags.phase1 = true; f.flags.loseCreateOnce = lose; f.flags.offlineReadsAfterCreate = lose;
   try {
     const form = { title: "Brief task", machineId: "b".repeat(32), cwd: "/remote path", problem: "  Exact problem 日本語\\n", description: "LONG_BRIEF_".repeat(90) + "END_BRIEF" };
     const child = spawn("python3", [resolve("scripts/tui-pty-test.py"), binary!, "hub", "--tui", "--port", String(f.port)], { env: f.local.env, stdio: ["pipe", "pipe", "pipe"] });
@@ -264,9 +268,15 @@ for (const lose of [false, true]) test(`real PTY: deck hub brief composer, host 
       { keys: ":cancel\r" }, { wait: "Unsubmitted task form cleared" }, { keys: ":new" }, { wait: "client idle" }, { keys: "\r" }, { wait: "TASK BRIEF" },
       { keys: "\x1b[200~" + JSON.stringify(form) + "\x1b[201~" }, { wait: "END_BRIEF" }, { keys: "\x1b" }, { keys: ":send" }, { wait: "client idle" }, { keys: "\r" },
     ];
-    if (lose) steps.push({ wait: "LOCKED" }, { wait: "END_BRIEF" }, { keys: ":retry" }, { wait: "client idle" }, { keys: "\r" });
+    if (lose) steps.push({ wait: "LOCKED" }, { wait: "END_BRIEF" }, { wait: "STALE" }, { keys: ":retry" }, { wait: "client idle" }, { capture: "retry" }, { keys: "\r" });
     steps.push({ wait: "Task 3 created" }, { keys: ":select 3" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Read-only task inspection" }, { keys: ":brief" }, { wait: "client idle" }, { keys: "\r" }, { wait: "immutable creation snapshot" }, { wait: "Exact problem" }, { keys: "\x1b" }, { keys: ":q\r" });
     child.stdin.end(JSON.stringify(steps)); const [code] = await once(child, "exit"); assert.equal(code, 0, errors + out);
+    if (lose) {
+      const screen = JSON.parse(out).screens.retry;
+      assert.match(screen, /STALE · client idle/);
+      assert.match(screen, /Hub connection lost or cancelled; request outcome unconfirmed/);
+      assert.doesNotMatch(screen, /client waiting/);
+    }
     const creates = f.requests.filter(r => r.command === "create_task_brief"); assert.equal(creates.length, lose ? 2 : 1);
     assert.equal(f.requests.filter(r => r.command === "create_task").length, 0);
     const { requestId, ...actual } = creates[0].args; assert.deepEqual(actual, form);
