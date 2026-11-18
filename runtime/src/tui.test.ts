@@ -531,7 +531,11 @@ test("real PTY: Vesper sidebar, centered Markdown/table, expanding prompt and En
     assert.ok(wide.slice(0, 37).every(row => row[84] === (row.startsWith("─") ? "┤" : "│")));
     assert.equal(wide[37]!, "─".repeat(84) + "┴" + "─".repeat(55));
     assert.match(screens.wide!, /Inventory unsupported by hub/);
-    assert.match(screens.wide!, /:tools · full inventory/);
+    assert.doesNotMatch(screens.wide!, /:tools/);
+    assert.equal(wide[31]!.slice(86).trim(), "#SUBAGENTS");
+    assert.equal(wide[34]!.slice(86).trim(), "#TOOLS");
+    assert.equal(wide[36]!.slice(86).trim(), "Unknown, not an empty tool list.");
+    assert.ok(wide.slice(6, 31).every(row => row.slice(85).trim() === ""));
     assert.ok(wide.some(row => row.includes("Task") && row.includes("Status")));
     assert.doesNotMatch(screens.wide!, /\*\*Ready\*\*|:---|---:/);
     assert.ok(expanded.some(row => row.indexOf("hello") === 2));
@@ -738,16 +742,16 @@ test("real PTY: subagent sidebar updates working/done/error and unknown, reports
   f.plainHistory(); f.subagents({ chatId: "1", items: [], hasMore: false });
   try {
     await pty(f.port, f.local.env, [
-      { wait: "mock/echo" }, { resize: [40, 140] }, { wait_row: { row: 6, text: "SUBAGENTS" } }, { wait_row: { row: 7, text: "None" } },
-      { checkpoint: "working" }, { wait_row: { row: 7, text: "wintermute" } }, { wait_row: { row: 7, text: "working" } }, { capture: "working" },
+      { wait: "mock/echo" }, { resize: [40, 140] }, { wait_row: { row: 31, text: "#SUBAGENTS" } }, { wait_row: { row: 32, text: "None" } },
+      { checkpoint: "working" }, { wait_row: { row: 32, text: "wintermute" } }, { wait_row: { row: 32, text: "working" } }, { capture: "working" },
       { keys: "\x1b" }, { keys: ":older\r" }, { wait: "Older history" },
-      { checkpoint: "done" }, { wait_row: { row: 7, text: "done" } }, { capture: "done" },
-      { checkpoint: "error" }, { wait_row: { row: 7, text: "error" } },
-      { checkpoint: "unknown" }, { wait_row: { row: 7, text: "unknown" } },
+      { checkpoint: "done" }, { wait_row: { row: 32, text: "done" } }, { capture: "done" },
+      { checkpoint: "error" }, { wait_row: { row: 32, text: "error" } },
+      { checkpoint: "unknown" }, { wait_row: { row: 32, text: "unknown" } },
       { checkpoint: "overflow" }, { wait: "11+ more" }, { capture: "overflow" },
       { resize: [24, 112] }, { wait: "12+ more" }, { capture: "small" },
-      { resize: [40, 140] }, { checkpoint: "unavailable" }, { wait_row: { row: 7, text: "Unavailable" } },
-      { checkpoint: "working" }, { wait_row: { row: 7, text: "wintermute" } },
+      { resize: [40, 140] }, { checkpoint: "unavailable" }, { wait_row: { row: 32, text: "Unavailable" } },
+      { checkpoint: "working" }, { wait_row: { row: 32, text: "wintermute" } },
       { checkpoint: "failRead" }, { wait: "SUBAGENTS · STALE" }, { capture: "stale" },
       { keys: ":q!\r" },
     ], screens, {
@@ -760,9 +764,15 @@ test("real PTY: subagent sidebar updates working/done/error and unknown, reports
       failRead: async () => { const pending = f.holdNext("activity"); await pending.entered; pending.release("fail"); f.hang(); },
     });
     for (const name of ["working", "done", "overflow", "small", "stale"]) {
-      assert.match(screens[name]!, /SUBAGENTS/); assert.match(screens[name]!, /TOOLS/); assert.match(screens[name]!, /:tools/);
+      assert.match(screens[name]!, /#SUBAGENTS/); assert.match(screens[name]!, /#TOOLS/); assert.doesNotMatch(screens[name]!, /:tools/);
     }
     assert.match(screens.done!, /Older history/);
+    const sidebar = screens.working!.split("\n").map(row => row.slice(86).trim());
+    assert.equal(sidebar[31], "#SUBAGENTS"); assert.equal(sidebar[34], "#TOOLS");
+    assert.equal(sidebar[36], "Unknown, not an empty tool list.");
+    assert.ok(sidebar.slice(6, 31).every(row => row === ""));
+    const small = screens.small!.split("\n").map(row => row.slice(86).trim());
+    assert.equal(small[20], "tool list.");
     assert.doesNotMatch(screens.small!, /Inventory unavailable.*working/);
     assert.ok(f.requests.filter(r => r.command === "history" || r.command === "activity").every(r => r.args.includeSubagents === true));
     assert.ok(f.requests.every(r => ["status", "history", "activity", "progress"].includes(r.command)));

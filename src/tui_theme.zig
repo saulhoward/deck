@@ -5,6 +5,8 @@ pub const base: vaxis.Style = .{ .fg = .{ .rgb = .{ 255, 255, 255 } }, .bg = .{ 
 // Muted dark-blue message panel, keeping Vesper's near-black contrast.
 pub const user: vaxis.Style = .{ .fg = base.fg, .bg = .{ .rgb = .{ 24, 32, 48 } } };
 pub const dim: vaxis.Style = .{ .fg = .{ .rgb = .{ 160, 160, 160 } }, .bg = base.bg };
+// Sidebar chrome stays neutral; do not borrow the chat accent/white palette.
+pub const sidebar_heading: vaxis.Style = .{ .fg = .{ .rgb = .{ 176, 176, 176 } }, .bg = base.bg };
 pub const rule: vaxis.Style = .{ .fg = .{ .rgb = .{ 80, 80, 80 } }, .bg = base.bg };
 pub const green: vaxis.Style = .{ .fg = .{ .rgb = .{ 153, 255, 228 } }, .bg = base.bg };
 pub const orange: vaxis.Style = .{ .fg = .{ .rgb = .{ 255, 199, 153 } }, .bg = base.bg };
