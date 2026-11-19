@@ -524,27 +524,30 @@ test("real PTY: Vesper sidebar, centered Markdown/table, expanding prompt and En
     if (process.env.DECK_TUI_CAPTURE) console.log(JSON.stringify(screens));
     // pyte display strings omit the continuation cell of wide glyphs.
     const wide = screens.wide!.split("\n").map(row => row.replaceAll("界", "界 ")), expanded = screens.expanded!.split("\n").map(row => row.replaceAll("界", "界 "));
-    assert.equal(wide[2]!.indexOf("Δ hub"), 110); assert.equal(wide[4]!.slice(85).trim(), "");
+    assert.equal(wide[2]!.indexOf("Δ hub"), 112); assert.equal(wide[4]!.slice(89).trim(), "");
     assert.doesNotMatch(screens.wide!, /wintermute|PROMPT|NORMAL|you ·|#\d|\/16384 bytes/);
     const userRow = wide.findIndex(row => row.includes("• Please render"));
-    for (const y of [userRow - 2, userRow - 1, userRow + 1, userRow + 2]) assert.equal(wide[y]!.slice(0, 84).trim(), "");
-    assert.ok(wide.some(row => row.indexOf("• Please render") === 0));
-    assert.ok(wide.some(row => row.indexOf("Δ Report") === 0));
+    for (const y of [userRow - 2, userRow - 1, userRow + 1, userRow + 2]) assert.equal(wide[y]!.slice(0, 88).trim(), "");
+    assert.ok(wide.some(row => row.indexOf("• Please render") === 2));
+    assert.ok(wide.some(row => row.indexOf("Δ Report") === 2));
     assert.equal(wide[39]!.trim(), "mock/echo [medium]");
     assert.equal(wide[39]!.indexOf("mock/echo"), 121);
-    assert.ok(wide.slice(0, 37).every(row => row[84] === (row.startsWith("─") ? "┤" : "│")));
-    assert.equal(wide[37]!, "─".repeat(84) + "┴" + "─".repeat(55));
+    assert.ok(wide.slice(0, 37).every(row => row[88] === (row.startsWith("─") ? "┤" : "│")));
+    assert.equal(wide[37]!, "─".repeat(88) + "┴" + "─".repeat(51));
     assert.match(screens.wide!, /Inventory unsupported by hub/);
     assert.doesNotMatch(screens.wide!, /:tools/);
-    assert.equal(wide[31]!.slice(86).trim(), "#SUBAGENTS");
-    assert.equal(wide[34]!.slice(86).trim(), "#TOOLS");
-    assert.equal(wide[36]!.slice(86).trim(), "Unknown, not an empty tool list.");
-    assert.ok(wide.slice(6, 31).every(row => row.slice(85).trim() === ""));
+    assert.equal(wide[30]!.slice(90).trim(), "#SUBAGENTS");
+    assert.equal(wide[33]!.slice(90).trim(), "#TOOLS");
+    assert.equal(wide[35]!.slice(90).trim(), "Unknown, not an empty tool list.");
+    assert.ok(wide.slice(6, 30).every(row => row.slice(89).trim() === ""));
+    assert.equal(wide[36]!.slice(89).trim(), ""); // Bottom sidebar padding.
+    assert.ok(wide.some(row => row.indexOf("Please render") === 4));
+    assert.ok(wide.slice(0, 37).filter(row => !row.startsWith("─")).every(row => row.slice(84, 88).trim() === ""));
     assert.ok(wide.some(row => row.includes("Task") && row.includes("Status")));
     assert.doesNotMatch(screens.wide!, /\*\*Ready\*\*|:---|---:/);
-    assert.ok(expanded.some(row => row.indexOf("hello") === 2));
-    assert.ok(expanded.some(row => row.indexOf("second") === 2));
-    assert.ok(expanded.some(row => row.indexOf("third") === 2));
+    assert.ok(expanded.some(row => row.indexOf("hello") === 4));
+    assert.ok(expanded.some(row => row.indexOf("second") === 4));
+    assert.ok(expanded.some(row => row.indexOf("third") === 4));
     const rules = (rows: string[]) => rows.flatMap((row, i) => row.startsWith("─") ? [i] : []);
     assert.equal(rules(wide)[1]! - rules(wide)[0]!, 3); // two input rows
     assert.equal(rules(expanded)[1]! - rules(expanded)[0]!, 4);
@@ -727,7 +730,7 @@ test("real PTY: busy sidebar and footer take turns revealing runes without a wai
     let sidebarSeen = false, problemSeen = false;
     for (const screen of Object.values(screens)) {
       const rows = screen.split("\n");
-      const sidebar = /[\u16a0-\u16ea]/u.test(rows[2]!.slice(84));
+      const sidebar = /[\u16a0-\u16ea]/u.test(rows[2]!.slice(88));
       const problem = /[\u16a0-\u16ea]/u.test(rows[38]!);
       sidebarSeen ||= sidebar; problemSeen ||= problem;
       assert.ok(!sidebar || !problem, "The two labels should animate at different times");
@@ -746,16 +749,16 @@ test("real PTY: subagent sidebar updates working/done/error and unknown, reports
   f.plainHistory(); f.subagents({ chatId: "1", items: [], hasMore: false });
   try {
     await pty(f.port, f.local.env, [
-      { wait: "mock/echo" }, { resize: [40, 140] }, { wait_row: { row: 31, text: "#SUBAGENTS" } }, { wait_row: { row: 32, text: "None" } },
-      { checkpoint: "working" }, { wait_row: { row: 32, text: "wintermute" } }, { wait_row: { row: 32, text: "working" } }, { capture: "working" },
+      { wait: "mock/echo" }, { resize: [40, 140] }, { wait_row: { row: 30, text: "#SUBAGENTS" } }, { wait_row: { row: 31, text: "None" } },
+      { checkpoint: "working" }, { wait_row: { row: 31, text: "wintermute" } }, { wait_row: { row: 31, text: "working" } }, { capture: "working" },
       { keys: "\x1b" }, { keys: ":older\r" }, { wait: "Older history" },
-      { checkpoint: "done" }, { wait_row: { row: 32, text: "done" } }, { capture: "done" },
-      { checkpoint: "error" }, { wait_row: { row: 32, text: "error" } },
-      { checkpoint: "unknown" }, { wait_row: { row: 32, text: "unknown" } },
+      { checkpoint: "done" }, { wait_row: { row: 31, text: "done" } }, { capture: "done" },
+      { checkpoint: "error" }, { wait_row: { row: 31, text: "error" } },
+      { checkpoint: "unknown" }, { wait_row: { row: 31, text: "unknown" } },
       { checkpoint: "overflow" }, { wait: "11+ more" }, { capture: "overflow" },
       { resize: [24, 112] }, { wait: "12+ more" }, { capture: "small" },
-      { resize: [40, 140] }, { checkpoint: "unavailable" }, { wait_row: { row: 32, text: "Unavailable" } },
-      { checkpoint: "working" }, { wait_row: { row: 32, text: "wintermute" } },
+      { resize: [40, 140] }, { checkpoint: "unavailable" }, { wait_row: { row: 31, text: "Unavailable" } },
+      { checkpoint: "working" }, { wait_row: { row: 31, text: "wintermute" } },
       { checkpoint: "failRead" }, { wait: "SUBAGENTS · STALE" }, { capture: "stale" },
       { keys: ":q!\r" },
     ], screens, {
@@ -771,12 +774,13 @@ test("real PTY: subagent sidebar updates working/done/error and unknown, reports
       assert.match(screens[name]!, /#SUBAGENTS/); assert.match(screens[name]!, /#TOOLS/); assert.doesNotMatch(screens[name]!, /:tools/);
     }
     assert.match(screens.done!, /Older history/);
-    const sidebar = screens.working!.split("\n").map(row => row.slice(86).trim());
-    assert.equal(sidebar[31], "#SUBAGENTS"); assert.equal(sidebar[34], "#TOOLS");
-    assert.equal(sidebar[36], "Unknown, not an empty tool list.");
-    assert.ok(sidebar.slice(6, 31).every(row => row === ""));
-    const small = screens.small!.split("\n").map(row => row.slice(86).trim());
-    assert.equal(small[20], "tool list.");
+    const sidebar = screens.working!.split("\n").map(row => row.slice(90).trim());
+    assert.equal(sidebar[30], "#SUBAGENTS"); assert.equal(sidebar[33], "#TOOLS");
+    assert.equal(sidebar[35], "Unknown, not an empty tool list.");
+    assert.ok(sidebar.slice(6, 30).every(row => row === ""));
+    const small = screens.small!.split("\n").map(row => row.slice(90).trim());
+    assert.equal(small[19], "empty tool list.");
+    assert.equal(small[20], ""); assert.equal(sidebar[36], "");
     assert.doesNotMatch(screens.small!, /Inventory unavailable.*working/);
     assert.ok(f.requests.filter(r => r.command === "history" || r.command === "activity").every(r => r.args.includeSubagents === true));
     assert.ok(f.requests.every(r => ["status", "history", "activity", "progress"].includes(r.command)));

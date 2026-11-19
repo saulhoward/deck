@@ -5,7 +5,7 @@ pub const base: vaxis.Style = .{ .fg = .{ .rgb = .{ 255, 255, 255 } }, .bg = .{ 
 // Muted dark-blue message panel, keeping Vesper's near-black contrast.
 pub const user: vaxis.Style = .{ .fg = base.fg, .bg = .{ .rgb = .{ 24, 32, 48 } } };
 pub const dim: vaxis.Style = .{ .fg = .{ .rgb = .{ 160, 160, 160 } }, .bg = base.bg };
-// Sidebar chrome stays neutral; do not borrow the chat accent/white palette.
+// Sidebar lists stay neutral; only the rune/name identity uses orange.
 pub const sidebar_heading: vaxis.Style = .{ .fg = .{ .rgb = .{ 176, 176, 176 } }, .bg = base.bg };
 pub const rule: vaxis.Style = .{ .fg = .{ .rgb = .{ 80, 80, 80 } }, .bg = base.bg };
 pub const green: vaxis.Style = .{ .fg = .{ .rgb = .{ 153, 255, 228 } }, .bg = base.bg };
@@ -18,14 +18,15 @@ pub const Layout = struct {
     pub fn init(width: u16, override: ?bool) Layout {
         // Explicit show works below the automatic threshold. At pathological
         // widths preserve at least ten chat columns rather than underflowing.
-        // Spend spare width on the inventory before expanding chat margins.
-        // Automatic layouts preserve the 80-column body plus four gutters.
+        // Reserve four columns on each side of the 80-column chat before
+        // expanding the sidebar. Narrow forced layouts keep a usable body.
         const side: u16 = if ((override orelse (width >= 112)) and width >= 20)
-            (if (width >= 112) @min(56, width - 84) else @min(56, width / 3))
+            (if (width >= 112) @min(56, width - 88) else @min(56, width / 3))
         else
             0;
         const main = width - side;
-        const body = @min(80, main -| 4);
+        const gutters: u16 = if (main >= 18) 8 else 4;
+        const body = @min(80, main -| gutters);
         return .{ .main = main, .sidebar = side, .body = @max(1, body), .x = (main - body) / 2 };
     }
 };
@@ -101,14 +102,19 @@ pub fn rune(seed: u64, step: u64, index: usize) u21 {
 }
 test "sidebar geometry respects 80 columns and explicit narrow overrides" {
     try std.testing.expectEqual(@as(u16, 0), Layout.init(100, null).sidebar);
-    try std.testing.expectEqual(@as(u16, 56), Layout.init(140, null).sidebar);
+    try std.testing.expectEqual(@as(u16, 52), Layout.init(140, null).sidebar);
     try std.testing.expectEqual(@as(u16, 80), Layout.init(140, null).body);
     try std.testing.expect(Layout.init(60, true).sidebar > 0);
     try std.testing.expectEqual(@as(u16, 0), Layout.init(140, false).sidebar);
-    for (20..513) |w| {
-        const l = Layout.init(@intCast(w), true);
+    try std.testing.expectEqual(@as(u16, 24), Layout.init(112, null).sidebar);
+    try std.testing.expectEqual(@as(u16, 4), Layout.init(112, null).x);
+    try std.testing.expectEqual(@as(u16, 56), Layout.init(144, null).sidebar);
+    for ([_]?bool{ null, false, true }) |override| for (20..513) |w| {
+        const l = Layout.init(@intCast(w), override);
         try std.testing.expect(l.body <= 80 and l.x + l.body < l.main);
-    }
+        try std.testing.expect(l.body >= 10);
+        if (l.main >= 18) try std.testing.expect(l.x >= 4 and l.main - l.x - l.body >= 4);
+    };
 }
 
 test "busy pulses stagger randomly with bounded silence, and stop on idle or stale samples" {

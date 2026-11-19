@@ -540,8 +540,9 @@ fn sidebarRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), snapshot: ?wire.T
     try list.append(ctx.arena, .{ .text = if (online) "#TOOLS" else "#TOOLS · STALE", .style = Theme.sidebar_heading });
     var inventory: std.ArrayList(Row) = .empty;
     try inventoryRows(ctx, &inventory, snapshot, width, true);
-    // Rows 0..5 belong to identity/spacing; the last three are rule/footer.
-    const budget = height - 9 - list.items.len;
+    // Rows 0..5 belong to identity/spacing; reserve a blank bottom row
+    // above the full-width rule and two footer rows.
+    const budget = height - 10 - list.items.len;
     const overflow = inventory.items.len > budget;
     const count = @min(inventory.items.len, budget - @intFromBool(overflow));
     for (inventory.items[0..count]) |row| try list.append(ctx.arena, .{
@@ -1638,11 +1639,11 @@ const Model = struct {
             const identity = try std.fmt.allocPrint(ctx.arena, "{s} {s}", .{ symbol, try animatedText(ctx, saved_name, available -| symbol_width, self.animation(.sidebar)) });
             const identity_x: u16 = @intCast(layout.main + 2 + (available - @min(available, displayWidth(ctx, identity))) / 2);
             const role_x: u16 = @intCast(layout.main + 2 + (available - @min(available, displayWidth(ctx, role))) / 2);
-            lineLimit(ctx, surface, identity_x, 2, identity, Theme.sidebar_heading, null, 0, w - 1);
+            lineLimit(ctx, surface, identity_x, 2, identity, Theme.orange, null, 0, w - 1);
             lineLimit(ctx, surface, role_x, 4, role, dim, null, 0, w - 1);
             var sidebar: std.ArrayList(Row) = .empty;
             try sidebarRows(ctx, &sidebar, s, available, h, self.online, self.freshActivity());
-            const sidebar_y = h - 3 - sidebar.items.len;
+            const sidebar_y = h - 4 - sidebar.items.len;
             for (sidebar.items, 0..) |row, index| lineLimit(ctx, surface, layout.main + 2, @intCast(sidebar_y + index), row.text, row.style, null, 0, w - 1);
         }
         const footer_right = w - 1;
@@ -2013,8 +2014,8 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     model.sidebar_override = true;
     model.snapshot.?.value.case0.snapshot.agentRune = "ᚦ";
     const centered = try Model.draw(&model, wide_ctx);
-    try std.testing.expectEqualStrings("ᚦ", centered.buffer[2 * 140 + 106].char.grapheme);
-    try std.testing.expectEqualStrings("a", centered.buffer[4 * 140 + 110].char.grapheme);
+    try std.testing.expectEqualStrings("ᚦ", centered.buffer[2 * 140 + 108].char.grapheme);
+    try std.testing.expectEqualStrings("a", centered.buffer[4 * 140 + 112].char.grapheme);
     try model.press(&ctx, .{ .codepoint = 'v' });
     try std.testing.expect(model.external_edit and ctx.quit);
 }
@@ -2206,18 +2207,18 @@ test "user panels pad full chat width, task footer uses brief, and filters canno
     fw.DrawContext.init(.unicode);
     const draw_ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
     const surface = try Model.draw(&model, draw_ctx);
-    for (1..4) |y| for (0..84) |x| try std.testing.expectEqualDeep(Theme.user.bg, surface.buffer[y * 140 + x].style.bg);
-    for ([_]usize{ 0, 4 }) |y| for (0..84) |x| {
+    for (1..4) |y| for (0..88) |x| try std.testing.expectEqualDeep(Theme.user.bg, surface.buffer[y * 140 + x].style.bg);
+    for ([_]usize{ 0, 4 }) |y| for (0..88) |x| {
         const cell = surface.buffer[y * 140 + x];
         try std.testing.expectEqualDeep(base.bg, cell.style.bg);
         try std.testing.expectEqualStrings(" ", cell.char.grapheme);
     };
-    try std.testing.expectEqualDeep(base.bg, surface.buffer[85].style.bg);
-    try std.testing.expectEqualStrings("•", surface.buffer[2 * 140].char.grapheme);
-    try std.testing.expectEqualDeep(base.fg, surface.buffer[5 * 140 + 2].style.fg);
+    try std.testing.expectEqualDeep(base.bg, surface.buffer[89].style.bg);
+    try std.testing.expectEqualStrings("•", surface.buffer[2 * 140 + 2].char.grapheme);
+    try std.testing.expectEqualDeep(base.fg, surface.buffer[5 * 140 + 4].style.fg);
     const thinking = "[thinking: 27 tokens]";
     for (thinking, 0..) |_, x| {
-        const cell = surface.buffer[6 * 140 + 2 + x];
+        const cell = surface.buffer[6 * 140 + 4 + x];
         try std.testing.expectEqualStrings(thinking[x..][0..1], cell.char.grapheme);
         try std.testing.expectEqualDeep(dim.fg, cell.style.fg);
     }
@@ -2303,13 +2304,15 @@ fn testSurfaceText(a: std.mem.Allocator, surface: fw.Surface) ![]const u8 {
     return text.items;
 }
 
-fn testSidebarGrey(surface: fw.Surface, layout: Theme.Layout) !void {
+fn testSidebarPalette(surface: fw.Surface, layout: Theme.Layout) !void {
     if (layout.sidebar == 0) return;
     const width = surface.size.width;
     for (0..surface.size.height - 3) |y| for (surface.buffer[y * width + layout.main .. (y + 1) * width]) |cell| {
         try std.testing.expect(cell.style.fg == .rgb);
         const rgb = cell.style.fg.rgb;
-        try std.testing.expect(rgb[0] == rgb[1] and rgb[1] == rgb[2] and rgb[0] < 255);
+        if (y == 2 and !std.mem.eql(u8, cell.char.grapheme, "│") and (!std.mem.eql(u8, cell.char.grapheme, " ") or std.meta.eql(cell.style.fg, Theme.orange.fg))) {
+            try std.testing.expectEqualDeep(Theme.orange.fg, cell.style.fg);
+        } else try std.testing.expect(rgb[0] == rgb[1] and rgb[1] == rgb[2] and rgb[0] < 255);
         try std.testing.expectEqualDeep(base.bg, cell.style.bg);
     };
 }
@@ -2371,7 +2374,7 @@ test "tool inventory separates locations and grants, preserves unknown, and offe
         .{ .profileId = "old_revision", .machineId = worker_machine, .location = .worker, .revision = revision, .state = .unavailable, .tools = &.{} },
     } };
     const inventory_surface = try Model.draw(&model, ctx);
-    try testSidebarGrey(inventory_surface, Theme.Layout.init(ctx.max.width.?, null));
+    try testSidebarPalette(inventory_surface, Theme.Layout.init(ctx.max.width.?, null));
     const text = try testSurfaceText(alloc, inventory_surface);
     try std.testing.expect(std.mem.indexOf(u8, text, ":tools") == null);
     for ([_][]const u8{ "MCP · HUB", "MCP · WORKER LOCAL", "search · enabled (1)", "workspace · enabled (1)", "browser · not granted (1)", "old_revision · unavailable", "BUILT-IN · WORKER LOCAL", "read · write · edit · bash", "BUILT-IN · HUB", "task_list · subagent", "ENVIRONMENT TOOLS", "custom_environment_tool" }) |expected| try std.testing.expect(std.mem.indexOf(u8, text, expected) != null);
@@ -2808,18 +2811,19 @@ test "subagent sidebar coexists with inventory, marks stale samples, and stays b
     fw.DrawContext.init(.unicode);
     var ctx: fw.DrawContext = .{ .arena = alloc, .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
     const fresh_surface = try Model.draw(&model, ctx);
-    try testSidebarGrey(fresh_surface, Theme.Layout.init(140, null));
+    try testSidebarPalette(fresh_surface, Theme.Layout.init(140, null));
     const fresh = try testSurfaceText(alloc, fresh_surface);
     try std.testing.expect(std.mem.indexOf(u8, fresh, ":tools") == null);
-    try std.testing.expectEqualStrings("#SUBAGENTS", try testSurfaceRowText(alloc, fresh_surface, 31, 86));
-    try std.testing.expectEqualStrings("#TOOLS", try testSurfaceRowText(alloc, fresh_surface, 34, 86));
-    try std.testing.expectEqualStrings("Unknown, not an empty tool list.", try testSurfaceRowText(alloc, fresh_surface, 36, 86));
-    for (6..31) |y| try std.testing.expectEqualStrings("", try testSurfaceRowText(alloc, fresh_surface, y, 86));
+    try std.testing.expectEqualStrings("#SUBAGENTS", try testSurfaceRowText(alloc, fresh_surface, 30, 90));
+    try std.testing.expectEqualStrings("#TOOLS", try testSurfaceRowText(alloc, fresh_surface, 33, 90));
+    try std.testing.expectEqualStrings("Unknown, not an empty tool list.", try testSurfaceRowText(alloc, fresh_surface, 35, 90));
+    for (6..30) |y| try std.testing.expectEqualStrings("", try testSurfaceRowText(alloc, fresh_surface, y, 90));
+    try std.testing.expectEqualStrings("", try testSurfaceRowText(alloc, fresh_surface, 36, 90));
     // A taller terminal adds space above the list, not below it.
     ctx.max.height = 60;
     const taller = try Model.draw(&model, ctx);
-    try std.testing.expectEqualStrings("#SUBAGENTS", try testSurfaceRowText(alloc, taller, 51, 86));
-    try std.testing.expectEqualStrings("Unknown, not an empty tool list.", try testSurfaceRowText(alloc, taller, 56, 86));
+    try std.testing.expectEqualStrings("#SUBAGENTS", try testSurfaceRowText(alloc, taller, 50, 90));
+    try std.testing.expectEqualStrings("Unknown, not an empty tool list.", try testSurfaceRowText(alloc, taller, 55, 90));
     ctx.max.height = 40;
     for ([_][]const u8{ "#SUBAGENTS", "wintermute", "working", "#TOOLS", "Inventory unavailable" }) |text| try std.testing.expect(std.mem.indexOf(u8, fresh, text) != null);
     try std.testing.expect(std.mem.indexOf(u8, fresh, "STALE") == null);
@@ -2843,8 +2847,9 @@ test "subagent sidebar coexists with inventory, marks stale samples, and stays b
         ctx.max = .{ .width = width, .height = height };
         model.sidebar_override = true;
         const visible = try Model.draw(&model, ctx);
-        try testSidebarGrey(visible, Theme.Layout.init(width, true));
-        if (height >= 12) try std.testing.expect((try testSurfaceRowText(alloc, visible, height - 4, Theme.Layout.init(width, true).main + 2)).len > 0);
+        try testSidebarPalette(visible, Theme.Layout.init(width, true));
+        try std.testing.expectEqualStrings("", try testSurfaceRowText(alloc, visible, height - 4, Theme.Layout.init(width, true).main + 2));
+        if (height >= 12) try std.testing.expect((try testSurfaceRowText(alloc, visible, height - 5, Theme.Layout.init(width, true).main + 2)).len > 0);
         model.sidebar_override = false;
         const hidden = try testSurfaceText(alloc, try Model.draw(&model, ctx));
         try std.testing.expect(std.mem.indexOf(u8, hidden, "SUBAGENTS") == null);
