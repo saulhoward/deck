@@ -63,6 +63,10 @@ test("IPC rejects invalid discovery args before reading and invalid serialized p
     assert.equal(calls.length, 0);
     assert.equal((await call({ limit: 1, extension: "ignored" })).ok, true);
     assert.deepEqual(calls, [{ limit: 1 }]); // Extensions are not forwarded.
+    for (const includeObservations of [true, false]) {
+      assert.equal((await call({ limit: 1, includeObservations, extension: "ignored" })).ok, true);
+      assert.deepEqual(calls.at(-1), { limit: 1, includeObservations });
+    }
     assert.equal((await call()).ok, true); assert.equal((await call(null)).ok, true);
     for (const invalid of [
       { items: [row("4"), row("5")] }, // Too many for original request limit.

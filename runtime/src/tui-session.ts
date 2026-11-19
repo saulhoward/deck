@@ -72,6 +72,7 @@ export class TuiSession {
   private activeSaved = false;
   private state?: TuiSnapshot;
   private before: string | undefined;
+  private pageLimits = { latest: 80, older: 80 };
   private supportsSettings = false;
   private supportsRex = false;
   private supportsStartup = false;
@@ -129,6 +130,7 @@ export class TuiSession {
     // cursor, binding or request can leak into the new chat on a failed switch.
     this.hubId = status.hubId; this.chatId = status.chatId; this.hubChatId = status.mainChatId; this.store = store;
     this.active = active; this.activeSaved = !!active; this.before = undefined;
+    this.pageLimits = { latest: 80, older: 80 };
     this.binding = status.binding && { machineId: status.binding.machineId, cwd: status.binding.cwd };
     this.localWorkspace = status.binding?.cwd === process.cwd() && (this.mode === "task" || status.machineId === status.binding?.machineId);
     this.gitSampleAt = 0;
@@ -172,9 +174,14 @@ export class TuiSession {
     this.settingsUncertain = false;
   }
   private async history(before?: string) {
-    let limit = 80;
+    const direction = before === undefined ? "latest" : "older";
+    let limit = this.pageLimits[direction];
     for (;;) {
-      try { return await this.command("history", { chatId: this.chatId, limit, ...(before ? { before } : {}), includeActivity: true, includeAgentStatus: true, includeSubagents: true, includeProgress: true }, this.hubId); }
+      try {
+        const page = await this.command("history", { chatId: this.chatId, limit, ...(before ? { before } : {}), includeActivity: true, includeAgentStatus: true, includeSubagents: true, includeProgress: true }, this.hubId);
+        this.pageLimits[direction] = limit;
+        return page;
+      }
       catch (error) { if (!(error instanceof HubError) || error.policy.action !== "reduce_page" || limit === 1) throw error; limit = Math.max(1, Math.floor(limit / 2)); }
     }
   }
@@ -204,8 +211,10 @@ export class TuiSession {
     delete this.state!.subagents;
     if (page.activity?.subagents) this.state!.subagents = { ...page.activity.subagents, items: page.activity.subagents.items.map((item: import("./generated/contracts.js").SubagentItem) => ({ ...item, title: displayText(item.title, 160).replace(/\n/g, " ") })) };
     if (page.activity?.agentStatus) this.state!.agentStatus = page.activity.agentStatus;
-    if (page.activity) { this.state!.activityKnown = true; this.state!.busy = page.activity.busy; this.state!.queued = page.activity.queued; }
-    if (page.progress) this.state!.preview = displayText([page.progress.generation?.text ?? "", ...(page.progress.tools ?? []).map((tool: any) => `[${tool.name}] ${tool.text}`)].filter(Boolean).join("\n"), 4096);
+    this.state!.activityKnown = page.activity !== undefined;
+    this.state!.busy = page.activity?.busy ?? false;
+    this.state!.queued = page.activity?.queued ?? 0;
+    this.state!.preview = page.progress ? displayText([page.progress.generation?.text ?? "", ...(page.progress.tools ?? []).map((tool: any) => `[${tool.name}] ${tool.text}`)].filter(Boolean).join("\n"), 4096) : "";
   }
   private async deliver() {
     requireParticipation(this.mode, this.chatId, this.hubChatId);

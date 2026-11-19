@@ -99,7 +99,11 @@ export async function dispatch(runtime: DeckRuntime, request: Record<string, unk
     }
     case "list_chats": {
       if (!validDiscoveryArgs(args)) throw new DeckError("invalid", "Invalid chat discovery arguments");
-      return runtime.listChats({ ...(args.limit === undefined ? {} : { limit: args.limit }), ...(args.after === undefined ? {} : { after: args.after }) });
+      return runtime.listChats({
+        ...(args.limit === undefined ? {} : { limit: args.limit }),
+        ...(args.after === undefined ? {} : { after: args.after }),
+        ...(args.includeObservations === undefined ? {} : { includeObservations: args.includeObservations }),
+      });
     }
     case "create_task": {
       if (!validMutationArgs("create_task", args)) throw new DeckError("invalid", "Invalid task creation arguments");

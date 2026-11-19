@@ -100,9 +100,30 @@ test("TUI adapter holds bounded canonical pages, samples independently, reduces 
     await f.action("poll"); assert.deepEqual(f.requests.slice(-2).map((v) => v.command), ["activity", "progress"]);
     f.oversized(); const latest = await f.action("latest"); assert.equal(latest.entries.length, 1);
     assert.deepEqual(f.requests.slice(-7).map((v) => v.args.limit), [80, 40, 20, 10, 5, 2, 1]);
+    const since = f.requests.length;
+    await f.action("poll");
+    assert.deepEqual(f.requests.slice(since).filter(v => v.command === "history").map(v => v.args.limit), [1]);
+    await f.action("older"); // The two directions learn independently.
+    assert.deepEqual(f.requests.slice(-7).map(v => v.args.limit), [80, 40, 20, 10, 5, 2, 1]);
     assert.ok(f.requests.slice(1).every((v) => v.hubId === "tui-test"));
     assert.ok(f.requests.every((v) => ["status", "history", "activity", "progress"].includes(v.command)));
   } finally { await f.close(); }
+});
+
+test("a fitting history reply without optional samples cannot replay an old live preview", async () => {
+  const local = await clientEnv();
+  let includeSample = true;
+  const session = new TuiSession(async name => {
+    if (name === "status") return { hubGuard: 1, hubId: "test", chatId: "1", mainChatId: "1", tools: "offline" };
+    assert.equal(name, "history");
+    return { items: [], ...(includeSample ? { activity: { busy: true, queued: 1 }, progress: { generation: { text: "partial" } } } : {}) };
+  }, undefined, undefined, local.env.DECK_CLIENT_STATE_DIRECTORY);
+  try {
+    assert.equal((await session.handle({ version: 1, id: "1", action: "poll" })).preview, "partial");
+    includeSample = false;
+    const next = await session.handle({ version: 1, id: "2", action: "poll" });
+    assert.equal(next.preview, ""); assert.equal(next.activityKnown, false);
+  } finally { await local.close(); }
 });
 
 test("TUI saves exact input before admission; loss/malformed ACK preserves bytes, no replay until explicit retry", async () => {
