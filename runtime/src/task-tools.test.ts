@@ -22,7 +22,7 @@ test("model task inspection pages canonical chats, reads offline history/activit
   const directory = await mkdtemp(join(tmpdir(), "deck-task-tools-"));
   const faux = fauxProvider(); const models = createModels(); models.setProvider(faux.provider);
   const model = faux.getModel(); let effects = 0;
-  const options = { models, model: { provider: model.provider, modelId: model.id }, binding: { machineId: "host", cwd: directory }, environment: () => undefined, hostFiles: { call: async () => { effects++; throw new Error("Inspection must not issue an effect"); } } };
+  const options = { implementation: "a".repeat(64), models, model: { provider: model.provider, modelId: model.id }, binding: { machineId: "host", cwd: directory }, environment: () => undefined, hostFiles: { call: async () => { effects++; throw new Error("Inspection must not issue an effect"); } } };
   let runtime = await DeckRuntime.open(join(directory, "pi.sqlite"), options);
   try {
     let task = await runtime.createTask("Parser work", { machineId: "offline", cwd: "/saved" });

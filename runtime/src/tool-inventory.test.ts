@@ -25,7 +25,7 @@ const other: McpProfile = { ...local, id: "unrelated", machineId: unrelated, wor
 async function fixture(native = true) {
   const root = await mkdtemp(join(tmpdir(), "deck-tool-inventory-")), faux = fauxProvider(), models = createModels(); models.setProvider(faux.provider);
   let probes = 0;
-  const options = { models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: hub, cwd: "/saved" }, environment: () => { probes++; throw new Error("Must not resolve/probe environment"); }, ...(native ? { mcpCatalog: { version: 1 as const, profiles: [local, service, remote, other] }, hostFiles: { registeredHosts: async () => { probes++; throw new Error("Must not probe workers"); }, call: async () => { probes++; throw new Error("Must not dispatch effects"); } } } : {}) };
+  const options = { implementation: "a".repeat(64), models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: hub, cwd: "/saved" }, environment: () => { probes++; throw new Error("Must not resolve/probe environment"); }, ...(native ? { mcpCatalog: { version: 1 as const, profiles: [local, service, remote, other] }, hostFiles: { registeredHosts: async () => { probes++; throw new Error("Must not probe workers"); }, call: async () => { probes++; throw new Error("Must not dispatch effects"); } } } : {}) };
   const runtime = await DeckRuntime.open(join(root, "pi.sqlite"), options);
   return { runtime, root, options, faux, probes: () => probes, close: async () => { await runtime.close(); await rm(root, { recursive: true, force: true }); } };
 }

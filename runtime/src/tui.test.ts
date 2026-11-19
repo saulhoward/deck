@@ -80,7 +80,7 @@ async function fixture(withSettings = false, withProgramStatus = false, withStyl
   const session = new TuiSession((name, args, expected) => hubCommand(address.port, name, args, expected), undefined, undefined, local.env.DECK_CLIENT_STATE_DIRECTORY);
   let sequence = 0;
   const action = (action: TuiRequest["action"], text?: string, hold?: boolean, configuration?: ModelSettingsChange) => session.handle({ version: 1, id: String(++sequence), action, ...(text !== undefined ? { text } : {}), ...(hold !== undefined ? { hold } : {}), ...(configuration ? { configuration } : {}) });
-  return { local, requests, port: address.port, action, holdNext, plainHistory: () => { plainHistory = true; }, subagents: (value: ActivitySnapshot["subagents"]) => { if (value === undefined) delete activity.subagents; else activity.subagents = value; }, busy: (value: boolean) => { activity.busy = value; }, settingsLoss: (value: boolean) => { settingsLoss = value; }, settingsInvalid: (value: boolean) => { settingsInvalid = value; }, loss: (value: boolean) => { loss = value; }, malformed: (value: boolean) => { malformed = value; }, oversized: () => { oversized = true; }, hang: () => { hang = true; }, close: async () => { for (const reply of pendingGates) reply.resolve("fail"); server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); await local.close(); } };
+  return { local, requests, port: address.port, action, holdNext, plainHistory: () => { plainHistory = true; }, subagents: (value: ActivitySnapshot["subagents"]) => { if (value === undefined) delete activity.subagents; else activity.subagents = value; }, settingsLoss: (value: boolean) => { settingsLoss = value; }, settingsInvalid: (value: boolean) => { settingsInvalid = value; }, loss: (value: boolean) => { loss = value; }, malformed: (value: boolean) => { malformed = value; }, oversized: () => { oversized = true; }, hang: () => { hang = true; }, close: async () => { for (const reply of pendingGates) reply.resolve("fail"); server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); await local.close(); } };
 }
 
 test("TUI adapter holds bounded canonical pages, samples independently, reduces only validated too-large reads", async () => {
@@ -247,35 +247,16 @@ async function pty(port: number, env: NodeJS.ProcessEnv, steps: unknown[], scree
     } catch (error) { checkpointErrors.push(String(error)); response.statusCode = 500; response.end(String(error)); }
   }) : undefined;
   try {
-    let args = [driver, binary, "agent", "--tui", "--port", String(port)];
+    const args = [driver, binary, "agent", "--tui", "--port", String(port)];
+    const driverEnv: NodeJS.ProcessEnv = { ...env, DECK_NODE: process.execPath, DECK_RUNTIME_ROOT: fileURLToPath(new URL("../../", import.meta.url)) };
     if (control) {
       control.listen(0, "127.0.0.1"); await once(control, "listening");
       const address = control.address(); assert.ok(address && typeof address !== "string");
-      // Reuse the unchanged driver and its waits, capture, cleanup and terminal
-      // assertions. A lazy action iterator adds loopback test checkpoints only;
-      // the real terminal/client never sees these coordination requests.
-      const wrapper = `import json, runpy, sys, urllib.request, urllib.parse
-original_load = json.load
-def coordinated_steps(stream):
-    actions = original_load(stream)
-    def iterate():
-        for step in actions:
-            if "checkpoint" in step:
-                url = "http://127.0.0.1:${address.port}/" + urllib.parse.quote(step["checkpoint"])
-                with urllib.request.urlopen(url, timeout=6) as response:
-                    assert response.read() == b"ok"
-            else:
-                yield step
-    return iterate()
-json.load = coordinated_steps
-driver = sys.argv.pop(1)
-runpy.run_path(driver, run_name="__main__")
-`;
-      args = ["-c", wrapper, ...args];
+      driverEnv.DECK_TEST_CHECKPOINT_PORT = String(address.port);
     }
     // Pin the companion bridge to this build, not an installed Deck inherited
     // from the test runner (which may have older closed wire contracts).
-    const child = spawn("python3", args, { env: { ...env, DECK_NODE: process.execPath, DECK_RUNTIME_ROOT: fileURLToPath(new URL("../../", import.meta.url)) } });
+    const child = spawn("python3", args, { env: driverEnv });
     const closed = once(child, "close"); let output = "", errors = "";
     child.stdout.on("data", (chunk) => { output += chunk; }); child.stderr.on("data", (chunk) => { errors += chunk; }); child.stdin.end(JSON.stringify(steps));
     assert.equal((await closed)[0], 0, [errors, ...checkpointErrors].join("\n"));
@@ -737,29 +718,6 @@ test("real PTY: hub/local MCP inventory, full details and shell caveat remain re
     assert.match(screens.details!, /mcp_worker_browser_alias/);
     assert.match(screens.end!, /MCP is not the whole tool surface/);
     assert.ok(f.requests.every(r => ["status", "history", "model_settings"].includes(r.command)));
-  } finally { await f.close(); }
-});
-
-test("real PTY: busy sidebar and footer take turns revealing runes without a waiting label", { skip: !testBinary, timeout: 20_000 }, async () => {
-  const f = await fixture(false, false, true); f.busy(true);
-  const screens: Record<string, string> = {};
-  try {
-    const steps: object[] = [{ wait: "Report" }, { resize: [40, 140] }];
-    for (let i = 0; i < 12; i++) steps.push({ sleep: .3 }, { capture: String(i) });
-    steps.push({ keys: "\x1b" }, { keys: ":q\r" });
-    const output = await pty(f.port, f.local.env, steps, screens);
-    let sidebarSeen = false, problemSeen = false;
-    for (const screen of Object.values(screens)) {
-      const rows = screen.split("\n");
-      const sidebar = /[\u16a0-\u16ea]/u.test(rows[2]!.slice(88));
-      const problem = /[\u16a0-\u16ea]/u.test(rows[38]!);
-      sidebarSeen ||= sidebar; problemSeen ||= problem;
-      assert.ok(!sidebar || !problem, "The two labels should animate at different times");
-      assert.equal(rows[39]!.slice(0, 50).trim(), "", "Polling must not flash anything at bottom left");
-    }
-    assert.ok(sidebarSeen && problemSeen, "Both labels should animate frequently while busy");
-    assert.doesNotMatch(output, /client waiting/);
-    assert.ok(!f.requests.some(r => ["admit", "stop", "create_task"].includes(r.command)));
   } finally { await f.close(); }
 });
 

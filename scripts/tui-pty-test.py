@@ -17,12 +17,12 @@ import sys
 import termios
 import time
 
-# Also resolve this sibling when the checkpoint harness runs us with runpy.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.dont_write_bytecode = True
 from tui_pty_screen import committed_output
 
 steps = json.load(sys.stdin)
+# Test coordination only. Never expose the control endpoint to the client.
+checkpoint_port = os.environ.pop("DECK_TEST_CHECKPOINT_PORT", None)
 ready_r, ready_w = os.pipe()
 pid, master = pty.fork()
 if pid == 0:
@@ -90,7 +90,7 @@ def program_status():
 status = None
 exited = False
 
-def pump(seconds):
+def pump(seconds, frame_after=None):
     end = time.monotonic() + seconds
     while time.monotonic() < end:
         readers, _, _ = select.select([master], [], [], min(.02, max(0, end - time.monotonic())))
@@ -105,7 +105,7 @@ def pump(seconds):
                 # Fault injection: expose each PTY fragment to the next wait
                 # observation, independent of OS read coalescing. No sleeps or
                 # longer deadlines; normal input/capture behavior is unchanged.
-                if read_chunk is not None:
+                if read_chunk is not None or (frame_after is not None and output.find(b"\x1b[?2026l", frame_after) >= 0):
                     return
             except OSError as error:
                 if error.errno == errno.EIO:
@@ -114,7 +114,14 @@ def pump(seconds):
 
 try:
     for step in steps:
-        if "wait" in step or "wait_row" in step:
+        if "checkpoint" in step:
+            from urllib.parse import quote
+            from urllib.request import urlopen
+            assert checkpoint_port is not None, "Checkpoint without a control server"
+            url = "http://127.0.0.1:%d/%s" % (int(checkpoint_port), quote(step["checkpoint"], safe=""))
+            with urlopen(url, timeout=6) as reply:
+                assert reply.read() == b"ok"
+        elif "wait" in step or "wait_row" in step:
             target = step["wait"] if "wait" in step else step["wait_row"]["text"]
             def visible():
                 return rendered() if "wait" in step else rendered().split("\n")[step["wait_row"]["row"]]
@@ -136,19 +143,24 @@ try:
                 raise AssertionError("Missing status %s: %r" % (wanted, program_status()))
         elif "keys" in step:
             os.write(master, step["keys"].encode())
-            pump(.12)  # Disambiguate a literal Escape from Alt-prefixed keys.
+            # A bare Escape needs an inter-byte gap. Otherwise advance on the
+            # next committed redraw, with a short cap for keys that do not draw.
+            # Tests use wait/wait_row/checkpoint for specific state transitions.
+            pump(.12, None if step["keys"].endswith("\x1b") else len(output))
         elif "sleep" in step:
             pump(step["sleep"])
         elif "resize" in step:
             rows, cols = step["resize"]
             fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 800, 600))
             os.kill(pid, signal.SIGWINCH)
-            pump(.12)
+            pump(.12, len(output))
         elif "read_chunk" in step:
             read_chunk = step["read_chunk"]
             assert read_chunk is None or (type(read_chunk) is int and 1 <= read_chunk <= 65536)
         elif "signal" in step:
             os.kill(pid, getattr(signal, step["signal"]))
+        else:
+            raise ValueError("Unknown PTY step: %r" % step)
     end = time.monotonic() + 4
     while time.monotonic() < end:
         pump(.02)

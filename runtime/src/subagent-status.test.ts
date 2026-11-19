@@ -19,7 +19,7 @@ async function fixture(run: (runtime: DeckRuntime, faux: ReturnType<typeof fauxP
   const directory = await mkdtemp(join(tmpdir(), "deck-subagent-status-")); const path = join(directory, "pi.sqlite");
   const faux = fauxProvider(); const models = createModels(); models.setProvider(faux.provider);
   const options: RuntimeOptions = {
-    models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: "offline", cwd: "/saved" },
+    implementation: "a".repeat(64), models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: "offline", cwd: "/saved" },
     environment: () => { throw new Error("Projection must not resolve a worker"); },
     hostFiles: { call: async () => { throw new Error("No native effects expected"); } },
   };

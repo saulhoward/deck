@@ -61,7 +61,7 @@ test("Pi grants start empty, reject wrong hosts, preserve strict arguments and r
   const calls: {id:string;plan:any;binding:any}[]=[];
   const service={...profile,id:"service",workspace:"fixed" as const};const worker={...profile,id:"worker",machineId:remote};
   const third={...service,id:"third",machineId:"c".repeat(32)};
-  const options={models,model:{provider:"faux",modelId:"faux-1"},binding:{machineId:local,cwd:"/saved exact 😀"},environment:()=>undefined,mcpCatalog:{version:1 as const,profiles:[profile,service,worker,third]},hostFiles:{call:async(binding:any,id:string,operation:any,args:any)=>{
+  const options={implementation:"a".repeat(64),models,model:{provider:"faux",modelId:"faux-1"},binding:{machineId:local,cwd:"/saved exact 😀"},environment:()=>undefined,mcpCatalog:{version:1 as const,profiles:[profile,service,worker,third]},hostFiles:{call:async(binding:any,id:string,operation:any,args:any)=>{
     assert.equal(operation,"mcp_call");const plan=JSON.parse(args.plan);calls.push({id,plan,binding});assert.equal(plan.argumentsJSON,'{"mode":"normal"}');
     return {ok:true,code:"mcp_result",output:JSON.stringify({jsonrpc:"2.0",id:`call:${id}`,result:{content:[{type:"text",text:"native result"}],structuredContent:{count:1}}})};
   }}};
@@ -102,7 +102,7 @@ test("Pi grants start empty, reject wrong hosts, preserve strict arguments and r
 test("owned delegation inherits only parent's grants; active work blocks grant changes",async()=>{
   const root=await mkdtemp(join(tmpdir(),"deck-mcp-child-")),faux=fauxProvider(),models=createModels();models.setProvider(faux.provider);
   const entered=Promise.withResolvers<void>(),release=Promise.withResolvers<void>();let calls=0;
-  const runtime=await DeckRuntime.open(join(root,"pi.sqlite"),{models,model:{provider:"faux",modelId:"faux-1"},binding:{machineId:local,cwd:"/saved"},environment:()=>undefined,mcpCatalog:catalog,hostFiles:{call:async(_binding,id)=>{calls++;entered.resolve();await release.promise;return{ok:true,code:"mcp_result",output:JSON.stringify({jsonrpc:"2.0",id:`call:${id}`,result:{content:[],structuredContent:{count:1}}})};}}});
+  const runtime=await DeckRuntime.open(join(root,"pi.sqlite"),{implementation:"a".repeat(64),models,model:{provider:"faux",modelId:"faux-1"},binding:{machineId:local,cwd:"/saved"},environment:()=>undefined,mcpCatalog:catalog,hostFiles:{call:async(_binding,id)=>{calls++;entered.resolve();await release.promise;return{ok:true,code:"mcp_result",output:JSON.stringify({jsonrpc:"2.0",id:`call:${id}`,result:{content:[],structuredContent:{count:1}}})};}}});
   const id=String(runtime.main.id);
   try {
     await runtime.setToolProfiles({chatId:id,expectedRevision:0,profiles:[profileGrant(profile)]});

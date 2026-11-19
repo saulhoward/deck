@@ -16,7 +16,7 @@ async function within<T>(promise: Promise<T>): Promise<T> {
 }
 function setup(hostFiles: RuntimeOptions["hostFiles"] = { call: async () => { throw new Error("No native effects expected"); } }) {
   const faux = fauxProvider(); const models = createModels(); models.setProvider(faux.provider);
-  return { faux, options: { models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: "offline-host", cwd: "/saved" }, environment: () => undefined, hostFiles } };
+  return { faux, options: { implementation: "a".repeat(64), models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: "offline-host", cwd: "/saved" }, environment: () => undefined, hostFiles } };
 }
 const isChild = (messages: readonly { role: string; content?: unknown }[]) => messages.some((message) => message.role === "user" && typeof message.content === "string" && message.content.startsWith("[Foreground delegation"));
 

@@ -47,7 +47,7 @@ test("allocation shuffles the existing bank, with no fixed first name or exclude
 async function fixture() {
   const directory = await mkdtemp(join(tmpdir(), "deck-agent-names-"));
   const faux = fauxProvider(); const models = createModels(); models.setProvider(faux.provider);
-  const options = { models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: "host", cwd: directory }, environment: () => undefined };
+  const options = { implementation: "a".repeat(64), models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: "host", cwd: directory }, environment: () => undefined };
   const path = join(directory, "pi.sqlite"); let runtime = await DeckRuntime.open(path, options);
   return { directory, options, faux, get runtime() { return runtime; },
     restart: async () => { await runtime.close(); runtime = await DeckRuntime.open(path, options); },

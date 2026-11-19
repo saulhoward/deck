@@ -21,7 +21,7 @@ async function fixture(run: (runtime: DeckRuntime, options: RuntimeOptions, path
   const faux = fauxProvider();
   const models = createModels(); models.setProvider(faux.provider);
   const model = faux.getModel();
-  const options: RuntimeOptions = { models, model: { provider: model.provider, modelId: model.id }, binding: { machineId: "worker-a", cwd: directory }, environment: () => undefined };
+  const options: RuntimeOptions = { implementation: "a".repeat(64), models, model: { provider: model.provider, modelId: model.id }, binding: { machineId: "worker-a", cwd: directory }, environment: () => undefined };
   const runtime = await DeckRuntime.open(path, options);
   try { await run(runtime, options, path, faux, directory); }
   finally { await runtime.close(); await rm(directory, { recursive: true, force: true }); }
