@@ -72,7 +72,9 @@ pub fn parseRequest(allocator: std.mem.Allocator, body: []const u8) !std.json.Pa
     const raw = try std.json.parseFromSlice(V, allocator, body, .{});
     defer raw.deinit();
     if (!validRequest(allocator, raw.value)) return error.InvalidContract;
-    return wire.parseNativeRequest(allocator, body);
+    // validRequest already ran the generated schema guard. Decode from that
+    // tree rather than reparsing the same JSON twice in the generated parser.
+    return std.json.parseFromValue(wire.NativeRequest, allocator, raw.value, .{ .ignore_unknown_fields = true });
 }
 pub fn validReply(request_id: []const u8, operation: wire.NativeOperation, v: V) bool {
     if (!wire.validNativeResponse(v) or !eq(field(v, "id"), request_id)) return false;

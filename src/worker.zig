@@ -74,13 +74,12 @@ fn execute(io: Io, allocator: std.mem.Allocator, request: Request) !Result {
 }
 
 pub fn operation(native: Native, allocator: std.mem.Allocator, journal: Io.Dir, machine_id: []const u8, body: []const u8) ![]const u8 {
-    return controlled(native, allocator, journal, machine_id, body, null, null, null, null, false);
-}
-fn controlled(native: Native, allocator: std.mem.Allocator, journal: Io.Dir, machine_id: []const u8, body: []const u8, cancelled: ?*std.atomic.Value(bool), progress: ?shell.Progress, rex_client: ?contracts.WorkerRexClient, mcp: ?*const @import("mcp_profiles.zig").Profiles, hub_service: bool) ![]const u8 {
-    const io = native.io;
     const parsed = try boundary.parseRequest(allocator, body);
     defer parsed.deinit();
-    const request = parsed.value;
+    return controlled(native, allocator, journal, machine_id, body, parsed.value, null, null, null, null, false);
+}
+fn controlled(native: Native, allocator: std.mem.Allocator, journal: Io.Dir, machine_id: []const u8, body: []const u8, request: Request, cancelled: ?*std.atomic.Value(bool), progress: ?shell.Progress, rex_client: ?contracts.WorkerRexClient, mcp: ?*const @import("mcp_profiles.zig").Profiles, hub_service: bool) ![]const u8 {
+    const io = native.io;
     if (request.operation == .bash_progress or request.operation == .link_status) return error.InvalidArguments;
     var result: Result = undefined;
     if (!std.mem.eql(u8, machine_id, request.machineId)) {
@@ -287,10 +286,20 @@ fn control(state: *State, fd: std.posix.fd_t) void {
         state.mutex.unlock(io);
     }
 }
-fn processJob(state: *State, slot: *Slot, body: []u8) void {
+// Dispatch uses the validated fields, while receipts still hash the exact
+// original frame. Both allocations move to the job together on spawn.
+const OwnedFrame = struct {
+    bytes: []u8,
+    parsed: std.json.Parsed(Request),
+    fn deinit(frame: OwnedFrame) void {
+        frame.parsed.deinit();
+        std.heap.page_allocator.free(frame.bytes);
+    }
+};
+fn processJob(state: *State, slot: *Slot, frame: OwnedFrame) void {
     const io = state.native.io;
     defer state.jobs.finish(io);
-    defer std.heap.page_allocator.free(body);
+    defer frame.deinit();
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -304,7 +313,7 @@ fn processJob(state: *State, slot: *Slot, body: []u8) void {
             state.mutex.unlock(io);
         }
         var progress = ProgressContext{ .state = state, .slot = slot };
-        break :completed controlled(state.native, allocator, state.journal, state.machine_id, body, &slot.cancelled, .{ .context = &progress, .publish = ProgressContext.publish }, state.rex_client, state.mcp, !state.network) catch blk: {
+        break :completed controlled(state.native, allocator, state.journal, state.machine_id, frame.bytes, frame.parsed.value, &slot.cancelled, .{ .context = &progress, .publish = ProgressContext.publish }, state.rex_client, state.mcp, !state.network) catch blk: {
             const id = std.fmt.allocPrint(allocator, "{d}", .{slot.id}) catch return;
             break :blk std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = id, .result = Result{ .ok = false, .output = if (slot.id >= (@as(u64, 1) << 63)) "Inspection inconclusive" else "effect_uncertain: worker failed; inspect effects before retrying", .code = if (slot.id >= (@as(u64, 1) << 63)) "inspection_failed" else "effect_uncertain" } }, .{}) catch return;
         };
@@ -334,10 +343,14 @@ test "completed worker releases its slot before reply I/O and never clears a reu
         state.writes.lockUncancelable(io);
         defer state.writes.unlock(io);
         const copy = try std.heap.page_allocator.dupe(u8, body);
-        state.jobs.start(io);
-        thread = std.Thread.spawn(.{}, processJob, .{ &state, slot, copy }) catch |err| {
-            state.jobs.finish(io);
+        const frame: OwnedFrame = .{ .bytes = copy, .parsed = boundary.parseRequest(std.heap.page_allocator, copy) catch |err| {
             std.heap.page_allocator.free(copy);
+            return err;
+        } };
+        state.jobs.start(io);
+        thread = std.Thread.spawn(.{}, processJob, .{ &state, slot, frame }) catch |err| {
+            state.jobs.finish(io);
+            frame.deinit();
             return err;
         };
         const started = Io.Clock.awake.now(io);
@@ -431,13 +444,16 @@ fn serveImplTracked(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix
         if (!network) readExact(input, &header) catch return else tcp.readUntil(io, input.handle, &header, deadline) catch return;
         const length = std.mem.readInt(u32, &header, .big);
         if (length == 0 or length > frame_limit) return;
-        const body = allocator.alloc(u8, length) catch return;
+        var handed_off = false;
+        const body = std.heap.page_allocator.alloc(u8, length) catch return;
+        defer if (!handed_off) std.heap.page_allocator.free(body);
         if (!network) readExact(input, body) catch return else tcp.readUntil(io, input.handle, body, deadline) catch return;
         // Observed control failure refuses subsequent requests. In-flight file
         // operations still drain; process groups are independently cancelled.
         if (state.stopping.load(.acquire)) return;
         if (drain) |d| if (d.requested.load(.acquire)) continue;
-        const parsed = boundary.parseRequest(allocator, body) catch return;
+        const parsed = boundary.parseRequest(std.heap.page_allocator, body) catch return;
+        defer if (!handed_off) parsed.deinit();
         if (if (parsed.value.operation == .mcp_call) mcp == null else !allow_rex and !@import("remote_link.zig").supported(parsed.value.operation)) {
             const response = resultFrame(allocator, parsed.value, .{ .ok = false, .code = "offline", .output = "Remote Rex capability unavailable; no operation accepted" }) catch return;
             state.send(response) catch return;
@@ -495,16 +511,16 @@ fn serveImplTracked(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix
             };
             state.mutex.unlock(io);
             if (selected) |slot| {
-                const copy = std.heap.page_allocator.dupe(u8, body) catch return;
+                const frame: OwnedFrame = .{ .bytes = body, .parsed = parsed };
                 state.jobs.start(io);
-                const thread = std.Thread.spawn(.{}, processJob, .{ &state, slot, copy }) catch {
+                const thread = std.Thread.spawn(.{}, processJob, .{ &state, slot, frame }) catch {
                     state.jobs.finish(io);
-                    std.heap.page_allocator.free(copy);
                     state.mutex.lockUncancelable(io);
                     slot.id = 0;
                     state.mutex.unlock(io);
                     return;
                 };
+                handed_off = true;
                 thread.detach();
             } else {
                 const response = std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = parsed.value.id, .result = Result{ .ok = false, .output = if (duplicate) "busy: operation already active; original effects may be underway; not repeated" else "busy: native process capacity reached; command not accepted", .code = "busy" } }, .{}) catch return;
@@ -524,7 +540,7 @@ fn serveImplTracked(native: Native, read_fd: std.posix.fd_t, write_fd: std.posix
                 state.send(response) catch return;
                 continue;
             }
-            const response = operation(native, allocator, journal, machine_id, body) catch return;
+            const response = controlled(native, allocator, journal, machine_id, body, parsed.value, null, null, null, null, false) catch return;
             state.send(response) catch return;
         }
     }
