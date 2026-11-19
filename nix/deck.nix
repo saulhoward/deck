@@ -75,7 +75,7 @@ let
       mkdir -p "$out/runtime" "$testkit/runtime"
       cp -r runtime/dist "$testkit/runtime/"
       cp package.json "$testkit/"
-      mv node_modules/typescript "$testkit/"
+      cp -r node_modules/typescript "$testkit/"
       npm prune --omit=dev --no-save --ignore-scripts --offline
       find runtime/dist -name '*.test.*' -delete
       mv runtime/dist "$out/runtime/"
@@ -136,11 +136,20 @@ let
         wrapProgram "$out/bin/deck-worker" --prefix PATH : "${bashPath}"
         "$out/bin/deck-worker" --help > /dev/null
       '';
-  integrationSrc = source [
-    ../scripts
-    ../contracts
-    (lib.fileset.fileFilter (f: lib.hasSuffix ".test.json" f.name) ../src)
+  terminalScripts = lib.fileset.unions [
+    ../scripts/tui-pty-test.py
+    ../scripts/tui_pty_screen.py
+    ../scripts/tui_pty_screen_test.py
+    ../scripts/tui-pty-screen.test.mjs
   ];
+  integrationSrc =
+    suite:
+    source [
+      (if suite == "terminal" then terminalScripts else lib.fileset.difference ../scripts terminalScripts)
+      ../scripts/test-runtime.mjs
+      ../contracts
+      (lib.fileset.fileFilter (f: lib.hasSuffix ".test.json" f.name) ../src)
+    ];
   checkRuntime =
     suite:
     pkgs.runCommand "deck-${suite}-tests"
@@ -154,7 +163,7 @@ let
       }
       ''
         export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
-        cp -r ${integrationSrc}/. .
+        cp -r ${integrationSrc suite}/. .
         cp -r ${runtime.testkit}/{package.json,runtime} .
         chmod -R u+w runtime
         mkdir node_modules

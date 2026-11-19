@@ -14,7 +14,9 @@ const files = [
 ].sort();
 // The real terminal suites dominate the forwarding fixtures. Keep them serial
 // but independently schedulable by Nix/CI, without subdividing timed cases.
-const terminal = new Set(["tui.test.js", "tui-tasks.test.js", "tui-history.test.js"].map(f => `${dist}/${f}`));
+const terminal = new Set([
+  "tui.test.js", "tui-tasks.test.js", "tui-history.test.js", "mcp-pi.test.js", "agent-startup.test.js",
+].map(f => `${dist}/${f}`));
 terminal.add("scripts/tui-pty-screen.test.mjs");
 const suite = process.argv[2] ?? "all";
 if (!["all", "integration", "terminal"].includes(suite)) throw new Error(`Unknown suite: ${suite}`);
