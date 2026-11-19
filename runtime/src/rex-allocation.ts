@@ -1,7 +1,7 @@
 import { isAbsolute } from "node:path";
 import { rexSocketPath } from "./rex-endpoint.js";
 import { AgentDoc, defineDoc, defineDocFamily, defineExtension, defineTask, type TaskId, type Tx, type ConversationId } from "@earendil-works/pi-durable";
-import { ChatDoc, type Binding } from "./deck.js";
+import { ChatDoc, type Binding } from "./chat-doc.js";
 import type { HostFiles } from "./host-files.js";
 import { validRexUuid, validRexBlockId, validRexCreation, validRexBootstrapClaim, type RexAllocationPlan } from "./generated/contracts.js";
 

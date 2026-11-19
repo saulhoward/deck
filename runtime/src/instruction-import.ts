@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { AgentDoc, configure, defineDoc, defineDocFamily, defineExtension, defineTask, InboxDoc, type ConversationId, type TaskId, type Tx } from "@earendil-works/pi-durable";
-import { ChatDoc, type Binding } from "./deck.js";
+import { ChatDoc, type Binding } from "./chat-doc.js";
 import type { HostFiles } from "./host-files.js";
 
 export const INSTRUCTION_BYTES = 32 * 1024;

@@ -1,6 +1,8 @@
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { Readable, Writable } from "node:stream";
-import { ChatDoc, DeckError, type DeckRuntime } from "./deck.js";
+import { ChatDoc } from "./chat-doc.js";
+import { DeckError } from "./deck-error.js";
+import type { DeckRuntime } from "./deck.js";
 import { agentNameFields } from "./agent-names.js";
 import { briefFields } from "./task-brief.js";
 import { validMcpArgs } from "./mcp-api.js";

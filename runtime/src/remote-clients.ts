@@ -3,7 +3,9 @@
 import { Socket } from "node:net";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { AgentDoc, type TaskId } from "@earendil-works/pi-durable";
-import { ChatDoc, DeckError, type DeckRuntime } from "./deck.js";
+import { ChatDoc } from "./chat-doc.js";
+import { DeckError } from "./deck-error.js";
+import type { DeckRuntime } from "./deck.js";
 import { RexDoc, REX_KIND, type RexInput } from "./rex-allocation.js";
 import { dispatch } from "./ipc.js";
 import { launcherResponse } from "./launcher-hub.js";

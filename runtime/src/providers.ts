@@ -3,7 +3,7 @@ import type { Credential, CredentialStore } from "@earendil-works/pi-ai";
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { fauxProvider, fauxAssistantMessage, type FauxResponseFactory } from "@earendil-works/pi-ai/providers/faux";
 import { FileCredentials } from "./credentials.js";
-import { DeckError } from "./deck.js";
+import { DeckError } from "./deck-error.js";
 import { Login } from "./login.js";
 
 export type ProviderMode = "--mock" | "--chatgpt" | "--api-key";

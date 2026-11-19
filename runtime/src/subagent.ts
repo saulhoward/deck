@@ -2,7 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { configure, defineExtension, defineTool, type EntryRecord, type Extension } from "@earendil-works/pi-durable";
 import { inheritedGrants } from "./mcp-tools.js";
 import { assignAgentName } from "./agent-names.js";
-import { ChatDoc } from "./deck.js";
+import { ChatDoc } from "./chat-doc.js";
 import { instructionHash, InstructionSourceDoc } from "./instruction-import.js";
 
 // Text-only, bounded final answer. The full child transcript stays canonical in Pi.

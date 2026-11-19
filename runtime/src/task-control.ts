@@ -1,7 +1,8 @@
 import { Type } from "@earendil-works/pi-ai";
 import { defineExtension, defineTool, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import type { Context } from "@earendil-works/chord";
-import { ChatDoc, type DeckRuntime } from "./deck.js";
+import { ChatDoc } from "./chat-doc.js";
+import type { DeckRuntime } from "./deck.js";
 import { briefFields, validForm } from "./task-brief.js";
 import { messageCausality, toolMessageOrigin, MAX_MESSAGE_HOPS } from "./message-causality.js";
 

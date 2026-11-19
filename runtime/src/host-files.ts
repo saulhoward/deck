@@ -3,7 +3,7 @@ import { Type } from "@earendil-works/pi-ai";
 import type { Context } from "@earendil-works/chord";
 import { defineExtension, defineTool, type ToolExecutionApi } from "@earendil-works/pi-durable";
 import { FrameDecoder, encodeFrame } from "./protocol.js";
-import { ChatDoc, type Binding } from "./deck.js";
+import { ChatDoc, type Binding } from "./chat-doc.js";
 import { validNativeRequest, validNativeReply, type NativeRequest } from "./native-contracts.js";
 import type { NativeArguments } from "./generated/contracts.js";
 export type { NativeResult as FileResult, NativeProgress as ShellProgress } from "./generated/contracts.js";

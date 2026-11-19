@@ -2,7 +2,8 @@ import { Type } from "@earendil-works/pi-ai";
 import { groupedTasks } from "./task-groups.js";
 import { validMessageChain, type MessageChain } from "./generated/contracts.js";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
-import { ChatDoc, type DeckRuntime } from "./deck.js";
+import { ChatDoc } from "./chat-doc.js";
+import type { DeckRuntime } from "./deck.js";
 import type { Context } from "@earendil-works/chord";
 
 const id = Type.String({ pattern: "^[1-9][0-9]*$", maxLength: 16 });

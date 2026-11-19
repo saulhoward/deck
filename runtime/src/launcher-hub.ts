@@ -5,7 +5,9 @@
 // select an arbitrary process or create a replacement terminal.
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { AgentDoc, type ConversationId } from "@earendil-works/pi-durable";
-import { ChatDoc, DeckError, type DeckRuntime } from "./deck.js";
+import { ChatDoc } from "./chat-doc.js";
+import { DeckError } from "./deck-error.js";
+import type { DeckRuntime } from "./deck.js";
 import { briefFields } from "./task-brief.js";
 import { agentNameFields } from "./agent-names.js";
 import { prefixUnits } from "./view-text.js";

@@ -3,7 +3,7 @@ import type { Models } from "@earendil-works/pi-ai";
 import type { LoginEvent, LoginPrompt } from "./generated/contracts.js";
 import { validLoginArgs, validLoginSnapshot } from "./status-login-contracts.js";
 import { projectLoginEvent, projectLoginPrompt } from "./login-view.js";
-import { DeckError } from "./deck.js";
+import { DeckError } from "./deck-error.js";
 
 // One transient provider interaction, not another durable conversation or inbox.
 export class Login {

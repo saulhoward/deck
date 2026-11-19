@@ -14,7 +14,7 @@ import { configurationIdle, importingInstructions, instructionHash, instructionI
 import { RexInspector } from "./rex-inspection.js";
 import { rexReconciliation, RexReconcileRequest, allocationRequest, type ReconcileResult } from "./rex-reconciliation.js";
 import { validOpenArgs, validAdoptArgs, validResolvedTarget } from "./rex-open-contracts.js";
-import { validRexAllocationPlan, validRexAllocationReceiptQuery, type RexOpenArgs, type RexOpenAck, type RexAdoptArgs, type RexAdoptAck, type RexStatusSnapshot, type ChatListPage, type ActivitySnapshot, type KnownCommandErrorCode } from "./generated/contracts.js";
+import { validRexAllocationPlan, validRexAllocationReceiptQuery, type RexOpenArgs, type RexOpenAck, type RexAdoptArgs, type RexAdoptAck, type RexStatusSnapshot, type ChatListPage, type ActivitySnapshot } from "./generated/contracts.js";
 import { prefixUnits } from "./view-text.js";
 import { REX_KIND, rexAllocation, RexDoc, RexRequest, rexCoherent, rexTarget, rexUuid, rexBlock, rexStartup, type RexInput, type RexTarget, type RexResult } from "./rex-allocation.js";
 import { bindImplementation, checkCompatibility, defaultImplementation, stampImplementation } from "./compatibility.js";
@@ -29,17 +29,14 @@ import { projectToolInventory } from "./tool-inventory.js";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 
-export type Binding = { machineId: string; cwd: string };
+import { ChatDoc, type Binding } from "./chat-doc.js";
+import { DeckError } from "./deck-error.js";
+export { ChatDoc, DeckError, type Binding };
 import { validHosts } from "./host-inventory.js";
 import { briefFields, briefInstructions, validBriefBinding } from "./task-brief.js";
 import { validChain, type MessageChain } from "./message-causality.js";
 import { validMachineIdentity, type TaskBrief, type HostInventory } from "./generated/contracts.js";
-import { assignAgentName, agentNameFields, type AgentNameMetadata } from "./agent-names.js";
-type Chat = AgentNameMetadata & { kind: "main" | "task" | "subagent"; title: string; machineId: string; cwd: string; parentChatId?: string; ownerTaskId?: string; brief?: TaskBrief };
-export const ChatDoc = defineDoc<Chat>({
-  kind: "deck.chat", version: 1, scope: "conversation", history: "latest", fork: "initial",
-  initial: () => ({ kind: "main", title: "Main", machineId: "", cwd: "" }), checkpointWhen: () => true,
-});
+import { assignAgentName, agentNameFields } from "./agent-names.js";
 // A reservation is not an ACK. A crash between this commit and submit is repaired by retrying
 // the same Pi request ID. Pi 1.4.0 has no public submit(tx, draft) API.
 const Admission = defineDocFamily<{ hash: string; capture: string }, { hash: string; capture: string }>({
@@ -51,9 +48,6 @@ const TaskRequest = defineDocFamily<{ hash: string; chatId: number }, string>({
   initial: (hash) => ({ hash, chatId: 0 }), checkpointWhen: () => true,
 });
 const Identity = defineDoc<{ id: string }>({ kind: "deck.identity", version: 1, scope: "session", initial: () => ({ id: randomUUID() }), checkpointWhen: () => true });
-export class DeckError extends Error {
-  constructor(public readonly code: KnownCommandErrorCode, message: string) { super(message); }
-}
 function positiveId(id: string, kind: string): number {
   const value = Number(id);
   if (typeof id !== "string" || !/^[1-9]\d*$/.test(id) || !Number.isSafeInteger(value)) throw new DeckError("invalid", `Invalid ${kind} ID`);
@@ -83,9 +77,27 @@ export type RuntimeOptions = {
   implementation?: string;
 };
 
+type RuntimeConfig = {
+  hubId: string;
+  implementation: string;
+  models: Models;
+  defaultModel: ModelRef;
+  host: HostFiles | undefined;
+  machineId: string;
+  rexClient: string | undefined;
+  authentication: RuntimeOptions["authentication"];
+  admissionGuard: RuntimeOptions["admissionGuard"];
+};
+type InstalledExtensions = {
+  importInstructions: ReturnType<typeof instructionImport>["task"];
+  allocate: ReturnType<typeof rexAllocation>["task"];
+  reconcile: ReturnType<typeof rexReconciliation>["task"];
+  catalog: McpCatalog;
+  mcp: ReturnType<typeof mcpExtensions>;
+};
+
 export class DeckRuntime {
   private readonly workerPauses = new Map<string, string>();
-  private storage!: import("@earendil-works/pi-durable").Storage;
   private requireWorkerAdmission(machine: string) { if (this.workerPauses.has(machine)) throw new DeckError("busy", "Worker upgrade in progress; input was not admitted"); }
   private async mutableChat(id: string) {
     const chat = await this.chat(id);
@@ -121,7 +133,18 @@ export class DeckRuntime {
     return this.serial(async () => { const chat = await this.chat(id); void chat.abort(context).catch(() => { process.stderr.write("deck runtime: stop failed; inspect activity\n"); }); });
   }
   private readonly inspector: RexInspector;
-  private constructor(readonly harness: Harness, readonly main: Conversation, private readonly guard: () => Promise<void>, readonly localFiles: boolean, readonly hubId: string, readonly implementation: string, private readonly instructionTask: ReturnType<typeof instructionImport>["task"], private readonly rexTask: ReturnType<typeof rexAllocation>["task"], private readonly reconcileTask: ReturnType<typeof rexReconciliation>["task"], private readonly models: Models, private readonly defaultModel: ModelRef, private readonly host?: HostFiles, readonly rexClient?: string, readonly localMachineId?: string, private readonly mcpCatalogValue: McpCatalog = { version: 1, profiles: [] }, private readonly mcpInstalled: ReturnType<typeof mcpExtensions> = [], readonly authentication?: RuntimeOptions["authentication"]) { this.inspector = new RexInspector(this, host); }
+  private constructor(
+    readonly harness: Harness, readonly main: Conversation,
+    private readonly storage: import("@earendil-works/pi-durable").Storage,
+    private readonly config: RuntimeConfig, private readonly extensions: InstalledExtensions,
+  ) { this.inspector = new RexInspector(this, config.host); }
+
+  get hubId() { return this.config.hubId; }
+  get implementation() { return this.config.implementation; }
+  get localFiles() { return !!this.config.host; }
+  get localMachineId() { return this.config.machineId; }
+  get rexClient() { return this.config.rexClient; }
+  get authentication() { return this.config.authentication; }
 
   static async open(path: string, options: RuntimeOptions): Promise<DeckRuntime> {
     let runtime: DeckRuntime | undefined;
@@ -201,8 +224,11 @@ export class DeckRuntime {
       }
       const hubId = await harness.commit(async (tx) => (await tx.doc(Identity)).id, context);
       // Bind Deck tool callbacks before recovered Pi tool tasks can run.
-      runtime = new DeckRuntime(harness, main, options.admissionGuard ?? (async () => {}), !!options.hostFiles, hubId, implementation, importer.task, rex.task, reconciler.task, options.models, { provider: options.model.provider, modelId: options.model.modelId }, options.hostFiles, options.rexClient, options.binding.machineId, catalog, installed, options.authentication);
-      runtime.storage = storage;
+      runtime = new DeckRuntime(harness, main, storage, {
+        hubId, implementation, models: options.models, defaultModel: { ...options.model },
+        host: options.hostFiles, machineId: options.binding.machineId, rexClient: options.rexClient,
+        authentication: options.authentication, admissionGuard: options.admissionGuard,
+      }, { importInstructions: importer.task, allocate: rex.task, reconcile: reconciler.task, catalog, mcp: installed });
       harness.resume();
       return runtime;
     } catch (error) {
@@ -254,7 +280,7 @@ export class DeckRuntime {
   mcpBindingAllowed(profile: import("./generated/contracts.js").McpProfile, taskMachine: string): boolean {
     return validMachineIdentity(taskMachine) && (profile.machineId===taskMachine || (profile.workspace==="fixed" && profile.machineId===this.localMachineId));
   }
-  mcpCatalog(): McpCatalog { return structuredClone(this.mcpCatalogValue); }
+  mcpCatalog(): McpCatalog { return structuredClone(this.extensions.catalog); }
   // Serialize with grant/configuration changes so the public surface and saved
   // grant revision cannot be spliced across a concurrent control request.
   toolInventory(id: string) {
@@ -263,7 +289,7 @@ export class DeckRuntime {
       const agent = await chat.agent(context);
       const binding = await this.harness.snapshot(ChatDoc, chat.id, context);
       const grants = await this.harness.snapshot(McpGrantsDoc, chat.id, context);
-      return projectToolInventory(String(chat.id), agent, this.mcpCatalogValue, grants?.profiles ?? [], this.localMachineId, binding?.machineId, profile => this.mcpBindingAllowed(profile, binding?.machineId ?? ""));
+      return projectToolInventory(String(chat.id), agent, this.extensions.catalog, grants?.profiles ?? [], this.localMachineId, binding?.machineId, profile => this.mcpBindingAllowed(profile, binding?.machineId ?? ""));
     });
   }
   async toolProfiles(id: string): Promise<McpGrantSnapshot> {
@@ -281,9 +307,9 @@ export class DeckRuntime {
         if(saved.revision!==args.expectedRevision) throw new DeckError("settings_changed","MCP grants changed; observe before another change");
         const selected=[]; const keys=new Set<string>();
         for(const grant of args.profiles) {
-          const key=grantKey(grant); const profile=this.mcpCatalogValue.profiles.find(p=>grantKey(profileGrant(p))===key);
+          const key=grantKey(grant); const profile=this.extensions.catalog.profiles.find(p=>grantKey(profileGrant(p))===key);
           if(keys.has(key) || !profile || !this.mcpBindingAllowed(profile,binding.machineId)) throw new DeckError("invalid","MCP profile/host/revision is not approved for this binding");
-          keys.add(key); selected.push(this.mcpInstalled.find(e=>e.name===extensionName(profile))!);
+          keys.add(key); selected.push(this.extensions.mcp.find(e=>e.name===extensionName(profile))!);
         }
         if(selected.reduce((count,e)=>count+(e.tools?.length??0),0)>64) throw new DeckError("invalid","At most 64 MCP tools can be granted to one conversation");
         if(JSON.stringify(saved.profiles)!==JSON.stringify(args.profiles)) {
@@ -300,7 +326,7 @@ export class DeckRuntime {
     const sampledAtMs = Date.now();
     const items: HostInventory["items"] = [];
     if (this.localMachineId && validMachineIdentity(this.localMachineId)) items.push({ machineId: this.localMachineId, kind: "local", rex: !!this.rexClient, connection: "local" });
-    items.push(...(await this.host?.registeredHosts?.() ?? []));
+    items.push(...(await this.config.host?.registeredHosts?.() ?? []));
     const inventory = { sampledAtMs, items };
     if (!validHosts(inventory)) throw new DeckError("invalid", "Invalid registered-host inventory");
     return inventory;
@@ -378,7 +404,7 @@ export class DeckRuntime {
         return existing;
       }, context);
       signal?.throwIfAborted();
-      if (!existing) await this.guard();
+      if (!existing) await this.config.admissionGuard?.();
       signal?.throwIfAborted();
       const hash = createHash("sha256").update(JSON.stringify(origin ? [input.text, input.mode, origin] : [input.text, input.mode])).digest("hex");
       const agent = await chat.agent(context);
@@ -441,7 +467,7 @@ export class DeckRuntime {
         if (!this.localFiles) throw new DeckError("offline", "Instruction import requires the assigned native worker");
         if (!await configurationIdle(tx, chat.id)) throw new DeckError("busy", "Conversation has unfinished work; stop/drain it before importing instructions");
         signal?.throwIfAborted();
-        const taskId = await tx.createTask(this.instructionTask, { binding: { machineId: binding.machineId, cwd: binding.cwd }, previousHash: instructionHash(agent.instructions) }, { ownership: { kind: "conversation" } });
+        const taskId = await tx.createTask(this.extensions.importInstructions, { binding: { machineId: binding.machineId, cwd: binding.cwd }, previousHash: instructionHash(agent.instructions) }, { ownership: { kind: "conversation" } });
         receipt.taskId = taskId; return taskId;
       }, context);
     });
@@ -476,7 +502,7 @@ export class DeckRuntime {
         const plan = { ...saved, chatId: id, hubId: this.hubId, label: `deck-${this.hubId.slice(0, 8)}-chat-${id}`, allocationId: randomUUID(), ...(replacement?.sessionId ? { sessionId: replacement.sessionId } : {}) };
         if (Buffer.byteLength(JSON.stringify(plan)) > 16 * 1024) throw new DeckError("invalid", "Rex launch intent is too large");
         signal?.throwIfAborted();
-        const taskId = await tx.createTask(this.rexTask, { binding: { machineId: current.machineId, cwd: current.cwd }, plan }, { ownership: { kind: "conversation" } });
+        const taskId = await tx.createTask(this.extensions.allocate, { binding: { machineId: current.machineId, cwd: current.cwd }, plan }, { ownership: { kind: "conversation" } });
         if (doc.binding) doc.previousBinding = doc.binding;
         delete doc.binding; delete doc.startup; delete doc.reconciliationTaskId;
         doc.taskId = taskId; doc.allocationId = plan.allocationId; receipt.taskId = taskId;
@@ -493,7 +519,7 @@ export class DeckRuntime {
     const chat = await this.chat(args.chatId);
     const binding = await this.harness.snapshot(ChatDoc, chat.id, context);
     if (!binding || binding.kind !== "task") throw new DeckError("invalid", "Bootstrap adoption requires a saved task");
-    const remote = binding.machineId === this.localMachineId ? undefined : this.host?.rexClientFor?.(binding.machineId);
+    const remote = binding.machineId === this.localMachineId ? undefined : this.config.host?.rexClientFor?.(binding.machineId);
     if (binding.machineId !== this.localMachineId && !remote) throw new DeckError("offline", "Assigned worker lacks a registered client; no fallback");
     const target = rexTarget({ ...args.target, client: remote?.executable ?? this.rexClient, port: args.port, bootstrap: args.bootstrap, clientState: args.bootstrap.root, ...(remote ? { workerSocket: remote.socket } : {}) });
     const taskId = await this.allocateTerminal(args.chatId, args.requestId, target, undefined, { machineId: binding.machineId, cwd: binding.cwd });
@@ -517,7 +543,7 @@ export class DeckRuntime {
     const target = original?.plan ?? (validResolvedTarget(args.target) ? args.target : await this.inspector.resolveTarget(args.chatId, args.target ?? {}));
     const machine = (await this.harness.snapshot(ChatDoc, chat.id, context))?.machineId;
     if (!machine) throw new DeckError("invalid", "Task has no saved execution binding");
-    const remote = machine === this.localMachineId ? undefined : this.host?.rexClientFor?.(machine);
+    const remote = machine === this.localMachineId ? undefined : this.config.host?.rexClientFor?.(machine);
     if (machine !== this.localMachineId && !remote) throw new DeckError("offline", "Assigned worker lacks a registered task client; no local fallback");
     const saved = rexTarget({ ...target, client: remote?.executable ?? this.rexClient, port: args.port, ...(remote ? { workerSocket: remote.socket } : {}) });
     // An ordinary explicit reopen creates a new terminal, never another claim
@@ -589,7 +615,7 @@ export class DeckRuntime {
         const request = allocationRequest(doc.taskId, input);
         if (!validRexAllocationReceiptQuery({ operationId: String(doc.taskId), request }) || Buffer.byteLength(request) > 128 * 1024) throw new DeckError("invalid", "Rex reconciliation intent is too large");
         signal?.throwIfAborted();
-        const taskId = await tx.createTask(this.reconcileTask, { allocationTaskId: doc.taskId, binding: { machineId: current.machineId, cwd: current.cwd }, request }, { ownership: { kind: "conversation" } });
+        const taskId = await tx.createTask(this.extensions.reconcile, { allocationTaskId: doc.taskId, binding: { machineId: current.machineId, cwd: current.cwd }, request }, { ownership: { kind: "conversation" } });
         doc.reconciliationTaskId = taskId; receipt.taskId = taskId; return taskId;
       }, context);
     });
@@ -653,13 +679,13 @@ export class DeckRuntime {
     const chat = await this.chat(id);
     // Registered chat catalog only: no network refresh, credential/header exposure
     // or claim that the account is entitled to every catalog entry.
-    const models = this.models.getModels().flatMap((model) => {
+    const models = this.config.models.getModels().flatMap((model) => {
       const thinkingLevels = getSupportedThinkingLevels(model);
       return thinkingLevels.length ? [{ provider: model.provider, modelId: model.id, name: prefixUnits(model.name, 160), thinkingLevels, defaultThinkingLevel: clampThinkingLevel(model, "medium") }] : [];
     }).sort((a, b) => a.provider.localeCompare(b.provider) || a.modelId.localeCompare(b.modelId));
     if (models.length > 256) throw new DeckError("too_large", "Model catalog exceeds client limit");
     const selection = this.selection(await this.harness.snapshot(AgentDoc, chat.id, context) ?? {});
-    return { hubId: this.hubId, chatId: id, selection, defaultModel: { ...this.defaultModel }, models };
+    return { hubId: this.hubId, chatId: id, selection, defaultModel: { ...this.config.defaultModel }, models };
   }
 
   setModelSettings(args: SetModelSettingsArgs): Promise<ModelSettingsAck> {
@@ -675,7 +701,7 @@ export class DeckRuntime {
         if (!await configurationIdle(tx, chat.id)) throw new DeckError("busy", "Conversation has unfinished work; wait for it to settle before changing model/thinking");
         const agent = await tx.doc(AgentDoc, chat.id);
         if (!sameSelection(this.selection(agent), args.expected)) throw new DeckError("conflict", "Model settings changed; refresh before choosing again");
-        const model = this.models.getModel(args.selection.provider, args.selection.modelId);
+        const model = this.config.models.getModel(args.selection.provider, args.selection.modelId);
         if (!model || !getSupportedThinkingLevels(model).includes(args.selection.thinkingLevel)) throw new DeckError("invalid", "Model or thinking level is not supported by this hub");
         // Keep model extensions intact when changing only thinking. No cwd,
         // instructions, bindings, prior captures or outstanding inputs are rewritten.
