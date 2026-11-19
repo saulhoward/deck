@@ -294,7 +294,7 @@ Here forms use the existing durable creation request/receipt path, with no adopt
 | `scripts/generate-contracts.mjs` | Deterministic Zig/TypeScript contract generation |
 | `src/*.test.json`, `src/*test*.zig`, `runtime/src/*.test.ts` | Shared fixtures, native tests, and runtime/fault tests |
 | `scripts/tui-pty-test.py` | Real-PTY input, screen, status, and restoration checks |
-| `flake.nix`, `flake.lock`, `build.zig*`, `package*.json` | Toolchain, dependency, build, and package definitions |
+| `flake.nix`, `nix/deck.nix`, `flake.lock`, `build.zig*`, `package*.json` | Toolchain, dependency, build, and package definitions |
 
 Paths in the table are relative to the repository root. Internal adapter methods are not permission to bypass the running hub.
 
@@ -335,7 +335,7 @@ nix develop path:. -c sh -c '
 git diff --check
 ```
 
-`npm run check` verifies generated contracts without rewriting them, then checks TypeScript. `npm test` does one strict compile and runs the offline suites. `node scripts/test-runtime.mjs [integration|terminal]` reruns emitted tests without compiling. A short allowlist of audited contract files shares one Node process; new files get process isolation by default. The terminal shard is serial. Other isolated files also default to serial; set `DECK_TEST_CONCURRENCY=2` only on runners with headroom for subprocesses and fixed response deadlines. `DECK_TEST_BINARY` enables real Zig supervisor and native-effect tests. Without it, those tests skip. Native test execution is uncached: socket/process tests and opt-in Rex checks depend on the live environment, so an earlier ordinary run cannot substitute for an enabled integration run.
+`npm run check` verifies generated contracts without rewriting them, then checks TypeScript. `npm test` does one strict compile and runs the offline suites. `node scripts/test-runtime.mjs [integration|terminal]` reruns emitted tests without compiling. A short allowlist of audited contract files shares one Node process; new files get process isolation by default. Add files that use the PTY driver to the terminal shard in `scripts/test-runtime.mjs`; it runs serially. Other isolated files also default to serial; set `DECK_TEST_CONCURRENCY=2` only on runners with headroom for subprocesses and fixed response deadlines. `DECK_TEST_BINARY` enables real Zig supervisor and native-effect tests. Without it, those tests skip. Native test execution is uncached: socket/process tests and opt-in Rex checks depend on the live environment, so an earlier ordinary run cannot substitute for an enabled integration run.
 
 New-flow integration is opt-in and uses a separately supplied API-14-or-newer Rex binary, private Unix servers and disposable state:
 
@@ -385,7 +385,7 @@ nix develop path:. -c sh -c '
 
 The package installs the Zig executable, compiled runtime, complete locked production npm packages, private Node, and Bash. Complete packages preserve lazy SDK imports and assets. It excludes development dependencies and compiled Deck tests. The wrapper sets `DECK_RUNTIME_ROOT` and `DECK_NODE`. Checkout binaries instead use `runtime/dist` relative to cwd and Node on PATH. `serve --runtime PATH` is an explicit development override.
 
-Keep the source allowlist and `npmDepsHash` in `flake.nix` current. When intentionally changing the npm lockfile, update its fixed hash and repeat recovery tests. Never replace a fixed hash with unrestricted downloads.
+Keep the source filesets and the `fetchNpmDeps` hash in `nix/deck.nix` current. When intentionally changing the npm lockfile, update the fixed hash and repeat recovery tests. Never replace a fixed hash with unrestricted downloads.
 
 For an installed Rex check, supply an explicit executable:
 

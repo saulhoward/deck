@@ -2968,10 +2968,12 @@ test "warm viewport draw allocations do not scale with offscreen retained pages"
     for (0..Scrollback.max_pages) |i| {
         _ = try model.scrollback.retain(a, &entries, 0);
         for (0..2) |pass| {
-            var counter = std.testing.FailingAllocator.init(a, .{});
-            var arena = std.heap.ArenaAllocator.init(counter.allocator());
+            var arena = std.heap.ArenaAllocator.init(a);
             defer arena.deinit();
-            const ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{}, .cell_size = .{ .width = 8, .height = 16 } };
+            // Count layout requests, not backing arena chunks: their capacities
+            // depend on whether the backing allocator can grow them in place.
+            var counter = std.testing.FailingAllocator.init(arena.allocator(), .{ .resize_fail_index = 0 });
+            const ctx: fw.DrawContext = .{ .arena = counter.allocator(), .min = .{}, .max = .{}, .cell_size = .{ .width = 8, .height = 16 } };
             const view = try model.historyViewport(ctx, 80, 2, "empty");
             try std.testing.expectEqual(2, view.len);
             if (pass == 1) {

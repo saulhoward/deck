@@ -163,6 +163,9 @@ let
       }
       ''
         export ZIG_GLOBAL_CACHE_DIR="$TMPDIR/zig-cache"
+        # Keep the ESM package.json out of TMPDIR. Native handoff fixtures
+        # create independent CommonJS .js entrypoints there.
+        mkdir checkout && cd checkout
         cp -r ${integrationSrc suite}/. .
         cp -r ${runtime.testkit}/{package.json,runtime} .
         chmod -R u+w runtime
