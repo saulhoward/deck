@@ -34,6 +34,8 @@ fn save(io: Io, allocator: std.mem.Allocator, dir: Io.Dir, name: []const u8, rec
     try file.writeStreamingAll(io, data);
     try file.sync(io);
     try dir.rename(temporary, dir, name, io);
+    // Acceptance must be durably named before dispatch; completion before ACK.
+    try Native.syncDirectory(io, dir);
 }
 fn readText(io: Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const file = Io.File{ .handle = try std.posix.openat(std.posix.AT.FDCWD, path, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0), .flags = .{ .nonblocking = true } };

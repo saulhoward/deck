@@ -81,6 +81,21 @@ pub fn readAll(io: std.Io, file: std.Io.File, allocator: std.mem.Allocator, limi
     return reader.interface.allocRemaining(allocator, .limited(limit));
 }
 
+/// Persist changes to directory entries. A default Dir on Linux is O_PATH,
+/// which cannot itself be fsynced; open the same directory for reading.
+pub fn syncDirectory(io: std.Io, dir: std.Io.Dir) !void {
+    const file = try dir.openFile(io, ".", .{});
+    defer file.close(io);
+    try file.sync(io);
+}
+
+/// Create one journal path component. Also sync existing names: a previous
+/// startup may have failed between mkdir and fsync.
+pub fn ensureJournalDir(io: std.Io, parent: std.Io.Dir, name: []const u8) !void {
+    parent.createDir(io, name, .fromMode(0o700)) catch |err| if (err != error.PathAlreadyExists) return err;
+    try syncDirectory(io, parent);
+}
+
 /// A manually reaped child must not be passed to Child.wait/kill a second time.
 pub fn closeStreams(io: std.Io, child: *std.process.Child) void {
     if (child.stdin) |file| file.close(io);

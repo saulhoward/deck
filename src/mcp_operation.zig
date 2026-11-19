@@ -25,14 +25,6 @@ fn retained(native: Native, a: std.mem.Allocator, dir: std.Io.Dir, name: []const
     if (!boundary.validResult(.mcp_call, raw.value.object.get("result").?)) return error.InvalidReceipt;
     return .{ .ok = result.ok, .output = result.output, .code = result.code orelse return error.InvalidReceipt, .truncated = result.truncated orelse false };
 }
-fn syncDirectory(native: Native, dir: std.Io.Dir) !void {
-    // File fsync alone does not make a newly published receipt name durable.
-    // A default Dir is O_PATH on Linux, which cannot be fsynced. Open a readable
-    // handle relative to it so we sync the same directory without closing the caller's handle.
-    const file = try dir.openFile(native.io, ".", .{});
-    defer file.close(native.io);
-    try file.sync(native.io);
-}
 fn save(native: Native, a: std.mem.Allocator, dir: std.Io.Dir, name: []const u8, hash: []const u8, result: ?Result) !void {
     const bytes = try std.json.Stringify.valueAlloc(a, .{ .version = 2, .kind = "mcp", .hash = hash, .result = result }, .{});
     var nonce: [16]u8 = undefined;
@@ -45,7 +37,7 @@ fn save(native: Native, a: std.mem.Allocator, dir: std.Io.Dir, name: []const u8,
     try f.writeStreamingAll(native.io, bytes);
     try f.sync(native.io);
     if (result == null) try dir.hardLink(temp, dir, name, native.io, .{}) else try dir.rename(temp, dir, name, native.io);
-    try syncDirectory(native, dir);
+    try Native.syncDirectory(native.io, dir);
 }
 pub fn operation(native: Native, a: std.mem.Allocator, dir: std.Io.Dir, machine: []const u8, body: []const u8, request: wire.NativeRequest, cancelled: *std.atomic.Value(bool), configured: ?*const profiles.Profiles, hub_service: bool) !Result {
     if (!std.mem.eql(u8, machine, request.machineId)) return .{ .ok = false, .code = "offline", .output = "Assigned MCP host unavailable; no fallback" };
@@ -83,7 +75,7 @@ pub fn operation(native: Native, a: std.mem.Allocator, dir: std.Io.Dir, machine:
         if (marker) |file| {
             defer file.close(native.io);
             try file.sync(native.io);
-            try syncDirectory(native, dir);
+            try Native.syncDirectory(native.io, dir);
         }
     }
     const frame = try std.json.Stringify.valueAlloc(a, .{ .version = 1, .id = request.id, .result = result }, .{});

@@ -47,6 +47,7 @@ pub fn markRestore(io: Io, dir: Io.Dir) !void {
     defer marker.close(io);
     try marker.writeStreamingAll(io, "Incomplete restore; init and serve must refuse this directory.\n");
     try marker.sync(io);
+    try Native.syncDirectory(io, dir);
 }
 
 pub fn initialize(io: Io, allocator: std.mem.Allocator, path: []const u8) !void {
@@ -89,6 +90,7 @@ pub fn initializeLocked(io: Io, allocator: std.mem.Allocator, dir: Io.Dir) !void
     try file.writeStreamingAll(io, data);
     try file.sync(io);
     try dir.rename("config.json.tmp", dir, "config.json", io);
+    try Native.syncDirectory(io, dir);
 }
 
 pub fn load(io: Io, allocator: std.mem.Allocator, dir: Io.Dir) !std.json.Parsed(Config) {

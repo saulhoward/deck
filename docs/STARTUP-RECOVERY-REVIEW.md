@@ -54,7 +54,9 @@ Linux validation passed **88 native tests with one optional skip** and **54 focu
 
 ## Follow-up 1: complete the power-loss durability protocol
 
-**Priority: high. This review does not fix this gap.**
+**Update:** ordinary receipts now sync the journal after rename and before dispatch/ACK. Startup syncs the journal directory entries, and config, restore markers, backup manifests and restored payloads have explicit directory-sync ordering. This is not power-cut test evidence. Injection/VM coverage and durability of arbitrary newly created state-root ancestors remain follow-ups.
+
+Original finding:
 
 `src/worker.zig` saves ordinary file/bash/Rex acceptance and result receipts by syncing the temporary file and renaming it, without syncing the journal directory. `src/state.zig` likewise does not consistently sync directory publication. `runtime/src/backup.ts` syncs payload and manifest files, but not all directories before publishing a completed backup or activating a restore.
 

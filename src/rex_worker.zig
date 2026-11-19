@@ -134,7 +134,7 @@ pub fn run(native: Native, args: []const []const u8) !void {
     connection.executable = executable;
     try storage.save(native, a, dir, "rex-connection.json", connection);
     const journal = try std.fs.path.join(a, &.{ opts.directory, "operations" });
-    _ = try dir.createDirPathStatus(native.io, "operations", .fromMode(0o700));
+    try Native.ensureJournalDir(native.io, dir, "operations");
     const action: std.posix.Sigaction = .{ .handler = .{ .handler = stop }, .mask = std.posix.sigemptyset(), .flags = 0 };
     std.posix.sigaction(.TERM, &action, null);
     std.posix.sigaction(.INT, &action, null);

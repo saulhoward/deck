@@ -80,6 +80,19 @@ async function contents(root: string, state: boolean): Promise<string[]> {
   }
   check(paths.includes("config.json") && paths.length <= MAX_FILES); return paths.sort();
 }
+async function syncDirectory(path: string) {
+  const handle = await open(path, constants.O_RDONLY | constants.O_DIRECTORY);
+  try { await handle.sync(); } finally { await handle.close(); }
+}
+// Files are synced individually by copy(). Publish their directory entries
+// bottom-up before making a manifest or restored identity visible.
+async function syncPayload(root: string, paths: string[]) {
+  if (paths.some(path => path.startsWith("worker/"))) {
+    await syncDirectory(join(root, "worker", "operations"));
+    await syncDirectory(join(root, "worker"));
+  }
+  await syncDirectory(root);
+}
 async function copy(source: string, destination: string | undefined, path: string, budget: { used: number }, name = path, expected?: FileRecord): Promise<FileRecord> {
   const { handle, size } = await file(join(source, path), path === "auth.json" || path === "rex-workers.json");
   let output: Awaited<ReturnType<typeof open>> | undefined;
@@ -150,10 +163,14 @@ export async function makeBackup(sourcePath: string, destination: string, includ
       manifest.files.push(await copy(files, undefined, path, budget));
     } else manifest.files.push(await copy(source, files, path, budget));
   }
+  await syncPayload(files, paths);
+  await syncDirectory(out); // files/ itself
   const bytes = Buffer.from(JSON.stringify(manifest)); check(bytes.length <= MAX_MANIFEST);
   const temporary = join(out, ".manifest.tmp"); const handle = await open(temporary, "wx", 0o600);
   try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
   await link(temporary, join(out, "manifest.json")); await unlink(temporary);
+  await syncDirectory(out);
+  await syncDirectory(dirname(out));
   return { files: manifest.files.length, credentials: manifest.credentials };
 }
 
@@ -176,9 +193,13 @@ export async function restoreBackup(backupPath: string, destination: string) {
   if (paths.includes("session.sqlite")) quickCheck(join(out, "session.sqlite"));
   // Publish config only after every payload file is verified/synced. Even an
   // older serve that does not know the marker cannot open a partial image.
+  await syncPayload(out, paths);
   await link(join(out, ".restore-config"), join(out, "config.json"));
   await unlink(join(out, ".restore-config"));
+  await syncDirectory(out);
   // Updated init/serve also reject any marker left by an interrupted restore.
   await unlink(join(out, RESTORE_MARKER));
+  await syncDirectory(out);
+  await syncDirectory(dirname(out));
   return { files: manifest.files.length, credentials: paths.includes("auth.json") };
 }
