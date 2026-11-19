@@ -317,6 +317,8 @@ Use `nix develop path:.`, not an unrelated system compiler. On memory-constraine
 
 The dev shell and package seed Zig's cache from hash-pinned, unpacked Nix sources. This avoids the observed Zig 0.17.1 archive-root cache mismatch. `zig-pkg/` is generated cache, not vendored source. Python and pyte are test dependencies only. Preserve the notices in `licenses/` verbatim.
 
+The PTY driver projects only completed Vaxis synchronized-output updates (DEC mode 2026); pyte itself does not defer a partial redraw. A PTY read or a matching text fragment is not a frame boundary. Keep raw bytes for protocol/restoration checks, and exercise fragmented reads—including split SET/RESET sequences—without sleeps, wider deadlines or weaker cell comparisons. `scripts/tui_pty_screen_test.py` covers the projection via the normal `scripts/*.test.mjs` run.
+
 ### Local checks
 
 Run from the repository root:

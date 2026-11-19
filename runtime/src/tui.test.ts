@@ -891,9 +891,18 @@ test("real PTY: automatic scrollback keyboard gestures traverse finite short pag
       const prior = held; if (i < gestures.length - 1) held = f.holdNext("older"); prior.release();
     };
   }
+  // :latest redraws its new top rows before clearing older rows below them.
+  // Release that reply only after Enter, then expose every 32-byte PTY chunk:
+  // seeing "line 14" mid-frame is not evidence of a completed screen update.
   steps.push({ keys: "gg" }, { wait: "Start of history · :latest to return" }, { wait: "line 1" }, { capture: "start" },
     { keys: "ggkk\x1b[A\x1b[5~\x15\x02" }, { checkpoint: "exhausted" }, { capture: "stillStart" },
-    { keys: ":latest" }, { wait: "client idle" }, { keys: "\r" }, { wait: "line 14" }, { capture: "latest" }, { keys: ":q!\r" });
+    { checkpoint: "hold latest" }, { keys: ":latest" }, { wait: "client idle" }, { keys: "\r" },
+    { checkpoint: "latest entered" }, { read_chunk: 32 }, { checkpoint: "release latest" },
+    { wait: "line 14" }, { capture: "latest" }, { read_chunk: null }, { keys: ":q!\r" });
+  let latest: ReturnType<typeof f.holdNext>;
+  checkpoints["hold latest"] = () => { latest = f.holdNext("history"); };
+  checkpoints["latest entered"] = async () => { assert.equal((await latest.entered).args.before, undefined); };
+  checkpoints["release latest"] = () => { latest.release(); };
   checkpoints.exhausted = async () => {
     const poll = f.holdNext("activity"); await poll.entered;
     assert.deepEqual(f.requests.filter(r => r.command === "history" && r.args.before).map(r => r.args.before), ["13", "11", "9", "7", "5", "3"]);

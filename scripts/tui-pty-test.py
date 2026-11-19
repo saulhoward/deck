@@ -17,6 +17,11 @@ import sys
 import termios
 import time
 
+# Also resolve this sibling when the checkpoint harness runs us with runpy.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.dont_write_bytecode = True
+from tui_pty_screen import committed_output
+
 steps = json.load(sys.stdin)
 ready_r, ready_w = os.pipe()
 pid, master = pty.fork()
@@ -33,6 +38,7 @@ os.close(ready_w)
 output = bytearray()
 screens = {}
 rows, cols = 40, 100
+read_chunk = None
 
 class SilentScreen(pyte.Screen):
     # Intentionally emulate a legacy terminal that doesn't answer capability
@@ -47,13 +53,14 @@ render_cache = None
 
 def rendered():
     global render_cache
-    key = (len(output), cols, rows)
+    visible = committed_output(bytes(output))
+    key = (len(visible), cols, rows)
     if render_cache is not None and render_cache[0] == key:
         return render_cache[1]
     screen = SilentScreen(cols, rows)
     # Assertions concern text/cursor layout, not color. pyte 0.8 predates colon
     # SGR parameters. Reparse the bounded capture so chunk-split SGR/UTF-8 is safe.
-    text_only = re.sub(rb"\x1b\[[0-9:;]*m", b"", bytes(output))
+    text_only = re.sub(rb"\x1b\[[0-9:;]*m", b"", visible)
     pyte.ByteStream(screen).feed(text_only)
     value = "\n".join(screen.display)
     render_cache = (key, value)
@@ -89,12 +96,17 @@ def pump(seconds):
         readers, _, _ = select.select([master], [], [], min(.02, max(0, end - time.monotonic())))
         if readers:
             try:
-                data = os.read(master, 65536)
+                data = os.read(master, read_chunk or 65536)
                 if not data:
                     return
                 output.extend(data)
                 if len(output) > 4 * 1024 * 1024:
                     raise AssertionError("Unbounded terminal output")
+                # Fault injection: expose each PTY fragment to the next wait
+                # observation, independent of OS read coalescing. No sleeps or
+                # longer deadlines; normal input/capture behavior is unchanged.
+                if read_chunk is not None:
+                    return
             except OSError as error:
                 if error.errno == errno.EIO:
                     return
@@ -132,6 +144,9 @@ try:
             fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 800, 600))
             os.kill(pid, signal.SIGWINCH)
             pump(.12)
+        elif "read_chunk" in step:
+            read_chunk = step["read_chunk"]
+            assert read_chunk is None or (type(read_chunk) is int and 1 <= read_chunk <= 65536)
         elif "signal" in step:
             os.kill(pid, getattr(signal, step["signal"]))
     end = time.monotonic() + 4
