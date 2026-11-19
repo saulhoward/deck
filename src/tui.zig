@@ -358,11 +358,10 @@ fn chatRows(ctx: fw.DrawContext, chat: *std.ArrayList(Row), entries: []const wir
     }
     try bash.flush(ctx, chat, width, assistant);
 }
-fn historyPageRows(ctx: fw.DrawContext, chat: *std.ArrayList(Row), entries: []const wire.TuiEntry, width: u16, assistant: []const u8) !usize {
+fn historyPageRows(ctx: fw.DrawContext, entries: []const wire.TuiEntry, width: u16, assistant: []const u8) ![]const Row {
     var page: std.ArrayList(Row) = .empty;
     try chatRows(ctx, &page, entries, width, assistant);
-    try chat.appendSlice(ctx.arena, page.items);
-    return page.items.len;
+    return page.items;
 }
 fn shortDirectory(a: std.mem.Allocator, directory: []const u8, home: ?[]const u8) ![]const u8 {
     if (home) |prefix| if (prefix.len > 0 and std.mem.startsWith(u8, directory, prefix) and (directory.len == prefix.len or directory[prefix.len] == '/')) return std.fmt.allocPrint(a, "~{s}", .{directory[prefix.len..]});
@@ -732,6 +731,59 @@ const Model = struct {
         // Independent page layout keeps old Markdown/bash groups and margins
         // identical. Keeping the bottom-relative offset anchors the viewport.
         if (self.older_budget > 0) self.older_check_rows = self.rendered_rows;
+    }
+    // Retain only row counts, never draw-arena cells or borrowed graphemes.
+    // On resize measure one immutable page at a time. On ordinary redraws,
+    // lay out the active snapshot and only the saved pages touching the viewport.
+    fn historyViewport(self: *Model, ctx: fw.DrawContext, width: u16, height: u16, fallback: []const u8) ![]const Row {
+        const snap = self.state();
+        const speaker = if (snap) |s| rune(s) else "·";
+        var active = try historyPageRows(ctx, if (snap) |s| s.entries else &.{}, width, speaker);
+        self.page_rows = active.len;
+        self.rendered_rows = active.len;
+        const pages = self.scrollback.pages.items;
+        for (pages) |*page| {
+            if (page.width != width) {
+                var scratch = std.heap.ArenaAllocator.init(self.a);
+                defer scratch.deinit();
+                var measure = ctx;
+                measure.arena = scratch.allocator();
+                page.rows = (try historyPageRows(measure, page.entries(), width, speaker)).len;
+                page.width = width;
+            }
+            self.rendered_rows += page.rows;
+        }
+        const newest_rows = if (pages.len > 0) pages[0].rows else active.len;
+        var total = self.rendered_rows + if (self.pad_newest) height -| newest_rows else 0;
+        if (total == 0) {
+            var hint: std.ArrayList(Row) = .empty;
+            try rows(ctx, &hint, fallback, width, dim);
+            active = hint.items;
+            total = active.len;
+        }
+        self.scroll_max = total -| height;
+        self.scroll = if (self.pin_top) self.scroll_max else @min(self.scroll, self.scroll_max);
+        self.pin_top = false;
+        if (self.older_check_rows) |before| {
+            self.older_check_rows = null;
+            if (self.rendered_rows == before and self.scroll == self.scroll_max and self.older_budget > 0 and (if (snap) |s| s.hasOlder else false)) self.older_wanted = true;
+        }
+        const first = self.scroll_max - self.scroll;
+        const end = first + height;
+        var visible: std.ArrayList(Row) = .empty;
+        if (first < active.len) try visible.appendSlice(ctx.arena, active[first..@min(end, active.len)]);
+        var pos = active.len;
+        var i = pages.len;
+        while (i > 0 and pos < end) {
+            i -= 1;
+            const page = pages[i];
+            if (page.rows > 0 and pos + page.rows > first) {
+                const content = try historyPageRows(ctx, page.entries(), width, speaker);
+                try visible.appendSlice(ctx.arena, content[first -| pos..@min(end - pos, content.len)]);
+            }
+            pos += page.rows;
+        }
+        return visible.items; // Trailing padding is already blank on the surface.
     }
     fn note(self: *Model, text: []const u8) void {
         var n = @min(text.len, self.notice.len);
@@ -1540,31 +1592,8 @@ const Model = struct {
         const notice_y = upper - 1 - @as(u16, if (away) 1 else 0);
         const chat_h = notice_y;
         self.chat_height = chat_h;
-        var chat: std.ArrayList(Row) = .empty;
-        if (s) |snap| {
-            self.page_rows = try historyPageRows(ctx, &chat, snap.entries, layout.body, rune(snap));
-            var i = self.scrollback.pages.items.len;
-            while (i > 0) {
-                i -= 1;
-                const page = &self.scrollback.pages.items[i];
-                page.rows = try historyPageRows(ctx, &chat, page.entries(), layout.body, rune(snap));
-            }
-        }
-        self.rendered_rows = chat.items.len;
-        if (self.pad_newest) {
-            const newest_rows = if (self.scrollback.pages.items.len > 0) self.scrollback.pages.items[0].rows else self.page_rows;
-            try chat.appendNTimes(ctx.arena, .{}, chat_h -| newest_rows);
-        }
-        if (chat.items.len == 0) try rows(ctx, &chat, if (s == null) (if (self.bridge.failed) "Selected hub connection failed; no local fallback." else if (self.worker_transport) "Connecting to the selected hub via this worker…" else "Connecting to the selected hub…") else if (self.readOnly()) "Read-only inspection · :rex open to participate" else "Enter to send · Esc for Normal mode · :help", layout.body, dim);
-        self.scroll_max = chat.items.len -| chat_h;
-        self.scroll = if (self.pin_top) self.scroll_max else @min(self.scroll, self.scroll_max);
-        self.pin_top = false;
-        if (self.older_check_rows) |before| {
-            self.older_check_rows = null;
-            if (self.rendered_rows == before and self.scroll == self.scroll_max and self.older_budget > 0 and (if (s) |snap| snap.hasOlder else false)) self.older_wanted = true;
-        }
-        const first = self.scroll_max - self.scroll;
-        for (chat.items[first..@min(chat.items.len, first + chat_h)], 0..) |row, y| {
+        const fallback = if (s == null) (if (self.bridge.failed) "Selected hub connection failed; no local fallback." else if (self.worker_transport) "Connecting to the selected hub via this worker…" else "Connecting to the selected hub…") else if (self.readOnly()) "Read-only inspection · :rex open to participate" else "Enter to send · Esc for Normal mode · :help";
+        for (try self.historyViewport(ctx, layout.body, chat_h, fallback), 0..) |row, y| {
             if (row.user) for (0..layout.main) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = Theme.user });
             var speaker_style = row.speaker_style;
             if (row.user) speaker_style.bg = Theme.user.bg;
@@ -1815,6 +1844,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
         } // Event loop joined, raw mode/alternate screen/title restored first.
         if (!model.external_edit or stopping.load(.monotonic)) break;
         model.external_edit = false;
+        for (model.scrollback.pages.items) |*page| page.width = 0; // Next app negotiates terminal width handling anew.
         model.online = false;
         model.animations.mode = .idle;
         const edited = ExternalEditor.run(.{ .io = init.io, .environ = init.minimal.environ }, init.gpa, init.environ_map, model.editor.text.items, &stopping) catch |err| {
@@ -2925,6 +2955,31 @@ test "automatic scrollback anchors Markdown and bash page boundaries through pre
     model.resetHistory();
     try std.testing.expectEqual(0, model.scrollback.pages.items.len);
     try std.testing.expect(!model.history_browsing and !model.pad_newest and !model.older_wanted);
+}
+
+test "warm viewport draw allocations do not scale with offscreen retained pages" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    var model = try testChatModel(a, &bridge);
+    defer model.deinit();
+    fw.DrawContext.init(.unicode);
+    const entries = [_]wire.TuiEntry{.{ .id = 42, .role = .assistant, .text = "# Title\n\n```zig\nconst x = 1;\n```\n\nMore than one row" }};
+    var one_page: usize = 0;
+    for (0..Scrollback.max_pages) |i| {
+        _ = try model.scrollback.retain(a, &entries, 0);
+        for (0..2) |pass| {
+            var counter = std.testing.FailingAllocator.init(a, .{});
+            var arena = std.heap.ArenaAllocator.init(counter.allocator());
+            defer arena.deinit();
+            const ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{}, .cell_size = .{ .width = 8, .height = 16 } };
+            const view = try model.historyViewport(ctx, 80, 2, "empty");
+            try std.testing.expectEqual(2, view.len);
+            if (pass == 1) {
+                if (i == 0) one_page = counter.allocated_bytes;
+                try std.testing.expectEqual(one_page, counter.allocated_bytes);
+            }
+        }
+    }
 }
 
 test "automatic older intent waits for the slot, yields to sends, cancels on down and stays out of dialogs" {

@@ -11,8 +11,9 @@ pub const max_page_bytes = 1024 * 1024;
 
 pub const Page = struct {
     parsed: std.json.Parsed([]const wire.TuiEntry),
-    /// The caller refreshes this count each draw, including after reflow.
+    /// Immutable content; measure again only when the layout width changes.
     rows: usize,
+    width: u16 = 0,
     /// Serialized entries size, not the parsed arena's allocation size.
     bytes: usize,
 
