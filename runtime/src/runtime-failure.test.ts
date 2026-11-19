@@ -7,7 +7,6 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { encodeFrame } from "./protocol.js";
 
 const binary = process.env.DECK_TEST_BINARY;
 for (const mode of ["killed", "clean exit", "in-flight killed", "active shell killed", "failed harness"] as const) {
@@ -89,11 +88,10 @@ for (const mode of ["killed", "clean exit", "in-flight killed", "active shell ki
       }
       const replacement = createServer(); replacement.listen(port, "127.0.0.1"); await once(replacement, "listening");
       await new Promise<void>((resolve) => replacement.close(() => resolve()));
-      const reopened = spawnSync(binary!, ["serve", "--stdio", "--mock", "--directory", directory, "--runtime", resolve("runtime/dist/main.js")], {
-        input: encodeFrame({ version: 1, id: "reopen", command: "status" }), timeout: 5000,
-      });
-      assert.equal(reopened.status, 0, reopened.stderr.toString());
-      assert.equal(JSON.parse(reopened.stdout.subarray(4).toString()).ok, true);
+      // Reopen proves writer exclusion was released, not Pi recovery or code
+      // compatibility (covered by their own suites). init takes the same lock.
+      const reopened = spawnSync(binary!, ["init", "--directory", directory], { timeout: 2000 });
+      assert.equal(reopened.status, 0, reopened.error?.message ?? reopened.stderr.toString());
     } finally {
       clearTimeout(timer); transport.abort();
       if (shellPid) { try { process.kill(-shellPid, "SIGKILL"); } catch { /* Already cleaned up. */ } }

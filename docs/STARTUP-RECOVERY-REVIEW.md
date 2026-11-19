@@ -74,7 +74,9 @@ Do not weaken the backup permission checks or automatically repair uncertain rec
 
 ## Follow-up 2: explicit readiness and bounded supervision
 
-**Priority: medium. This review does not redesign the hub transport.**
+**Update:** the single-writer HTTP transport now fails closed on an overall exchange timeout, without retry, respawn or a second dispatcher. Cold startup and command execution currently share that budget when a request arrives before readiness; a distinct public readiness signal remains a follow-up.
+
+Original finding:
 
 `src/hub.zig` handles an IPC exchange synchronously. Its polling loop notices writer death, but has no reply deadline for a living, stalled writer. That can block subsequent HTTP commands, including a stop request. Listener/PID availability also precedes runtime fingerprinting and store readiness. This is an existing documented limitation, not evidence that the current test failures replayed or corrupted tasks.
 

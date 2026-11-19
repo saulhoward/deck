@@ -312,7 +312,23 @@ fn run(native: Native, allocator: std.mem.Allocator, options: Options) !void {
         defer {
             if (child.stdin) |file| file.close(io);
             child.stdin = null;
-            if (child.id != null) _ = child.wait(io) catch {};
+            // EOF normally drains the writer. A stalled writer may never read
+            // it: reap only our own child and keep the writer lock through the
+            // native thread join. Do not respawn or retry the lost request.
+            const deadline = @import("remote_io.zig").now(io) + 1000;
+            while (child.id) |pid| {
+                const result = Native.waitNoHang(pid) catch break;
+                if (result.pid != 0) {
+                    child.id = null;
+                    break;
+                }
+                if (@import("remote_io.zig").now(io) >= deadline) break;
+                io.sleep(.fromMilliseconds(10), .awake) catch break;
+            }
+            if (child.id) |pid| {
+                std.posix.kill(pid, .KILL) catch {};
+                _ = child.wait(io) catch {};
+            }
             Native.closeStreams(io, &child);
         }
         return hub.serve(io, allocator, &child, options.port);
@@ -599,7 +615,7 @@ pub fn main(init: std.process.Init) void {
             error.BackupFailed => "deck: backup/restore did not complete; originals were not replaced\n",
             error.WouldBlock => "deck: this state directory already has a running writer\n",
             error.FileNotFound => "deck: missing state, backup or runtime; check paths, init and installation\n",
-            error.RuntimeFailed, error.RuntimeClosed, error.InvalidFrame, error.BrokenPipe => "deck: runtime unavailable; hub stopped; inspect pending work before restarting serve\n",
+            error.RuntimeFailed, error.RuntimeTimeout, error.RuntimeClosed, error.InvalidFrame, error.BrokenPipe => "deck: runtime unavailable; hub stopped; inspect pending work before restarting serve\n",
             else => "deck: command failed; check arguments, config and runtime\n",
         };
         std.Io.File.stderr().writeStreamingAll(init.io, message) catch {};

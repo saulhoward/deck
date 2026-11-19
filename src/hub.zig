@@ -17,32 +17,66 @@ fn runtimeExited(child: *std.process.Child) !bool {
     return true;
 }
 
-fn readAll(child: *std.process.Child, bytes: []u8) !void {
-    const file = child.stdout.?;
+const pipe_io = @import("remote_io.zig");
+const exchange_budget_ms = 60_000; // Includes cold startup when the first request arrives early.
+const Direction = enum { read, write };
+
+// Both pipe ends used by the supervisor are nonblocking. A single absolute
+// budget covers the request and reply, even if a writer stops mid-frame.
+fn transfer(io: std.Io, child: *std.process.Child, comptime direction: Direction, bytes: if (direction == .read) []u8 else []const u8, deadline: i64) !void {
+    const fd = if (direction == .read) child.stdout.?.handle else child.stdin.?.handle;
     var offset: usize = 0;
     while (offset < bytes.len) {
         if (try runtimeExited(child)) return error.RuntimeFailed;
-        var polls = [_]std.posix.pollfd{.{ .fd = file.handle, .events = std.posix.POLL.IN, .revents = 0 }};
-        if (try std.posix.poll(&polls, 100) == 0) continue;
-        const n = try std.posix.read(file.handle, bytes[offset..]);
-        if (n == 0) return error.RuntimeClosed;
-        offset += n;
+        const left = deadline - pipe_io.now(io);
+        if (left <= 0) return error.RuntimeTimeout;
+        var polls = [_]std.posix.pollfd{.{ .fd = fd, .events = if (direction == .read) std.posix.POLL.IN else std.posix.POLL.OUT, .revents = 0 }};
+        if (try std.posix.poll(&polls, @intCast(@min(100, left))) == 0) continue;
+        const rest = bytes[offset..];
+        const n = if (direction == .read) std.c.read(fd, rest.ptr, rest.len) else std.c.write(fd, rest.ptr, rest.len);
+        switch (std.c.errno(n)) {
+            .SUCCESS => if (n == 0) return error.RuntimeClosed else {
+                offset += @intCast(n);
+            },
+            .INTR, .AGAIN => continue,
+            else => return error.RuntimeClosed,
+        }
     }
 }
 
-fn exchange(io: std.Io, allocator: std.mem.Allocator, child: *std.process.Child, payload: []const u8) ![]u8 {
+fn exchange(io: std.Io, allocator: std.mem.Allocator, child: *std.process.Child, payload: []const u8, deadline: i64) ![]u8 {
     if (payload.len == 0 or payload.len > max_frame) return error.InvalidFrame;
     var header: [4]u8 = undefined;
     std.mem.writeInt(u32, &header, @intCast(payload.len), .big);
-    try child.stdin.?.writeStreamingAll(io, &header);
-    try child.stdin.?.writeStreamingAll(io, payload);
-    try readAll(child, &header);
+    try transfer(io, child, .write, &header, deadline);
+    try transfer(io, child, .write, payload, deadline);
+    try transfer(io, child, .read, &header, deadline);
     const length = std.mem.readInt(u32, &header, .big);
     if (length == 0 or length > max_frame) return error.InvalidFrame;
     const response = try allocator.alloc(u8, length);
     errdefer allocator.free(response);
-    try readAll(child, response);
+    try transfer(io, child, .read, response, deadline);
     return response;
+}
+
+test "private exchange budget includes partial replies and blocked request writes" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    var child = try std.process.spawn(io, .{ .argv = &.{ "sh", "-c", "printf '\\000\\000\\000\\005x'; kill -STOP $$" }, .stdin = .pipe, .stdout = .pipe });
+    defer {
+        if (child.id) |pid| {
+            std.posix.kill(pid, .KILL) catch {};
+            _ = child.wait(io) catch {};
+        }
+        Native.closeStreams(io, &child);
+    }
+    try pipe_io.nonblock(child.stdin.?.handle, true);
+    try pipe_io.nonblock(child.stdout.?.handle, true);
+    try std.testing.expectError(error.RuntimeTimeout, exchange(io, a, &child, "request", pipe_io.now(io) + 100));
+    const large = try a.alloc(u8, max_frame);
+    defer a.free(large);
+    @memset(large, ' ');
+    try std.testing.expectError(error.RuntimeTimeout, transfer(io, &child, .write, large, pipe_io.now(io) + 100));
 }
 
 fn safePiId(value: std.json.Value) bool {
@@ -321,7 +355,10 @@ fn handle(io: std.Io, allocator: std.mem.Allocator, connection: std.Io.net.Strea
         try request.respond("Invalid command envelope", .{ .status = .bad_request, .keep_alive = false });
         return;
     }
-    const response = try exchange(io, allocator, child, body);
+    const response = exchange(io, allocator, child, body, pipe_io.now(io) + exchange_budget_ms) catch |err| switch (err) {
+        error.RuntimeTimeout => return error.RuntimeTimeout,
+        else => return error.RuntimeFailed, // Never reuse a partially exchanged stream.
+    };
     defer allocator.free(response);
     // A bad/mis-correlated private reply cannot be forwarded as a mutation ACK.
     // Stop this transport rather than leaving an out-of-sync writer available.
@@ -334,6 +371,9 @@ fn handle(io: std.Io, allocator: std.mem.Allocator, connection: std.Io.net.Strea
 }
 
 pub fn serve(io: std.Io, allocator: std.mem.Allocator, child: *std.process.Child, port: u16) !void {
+    pipe_io.ignorePipe();
+    try pipe_io.nonblock(child.stdin.?.handle, true);
+    try pipe_io.nonblock(child.stdout.?.handle, true);
     const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", port);
     var listener = try address.listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
@@ -347,7 +387,7 @@ pub fn serve(io: std.Io, allocator: std.mem.Allocator, child: *std.process.Child
         if (polls[0].revents & (std.posix.POLL.ERR | std.posix.POLL.HUP | std.posix.POLL.NVAL) != 0) return error.ListenerFailed;
         const connection = try listener.accept(io);
         handle(io, allocator, connection, child, port) catch |err| switch (err) {
-            error.RuntimeFailed, error.RuntimeClosed, error.InvalidFrame, error.BrokenPipe => return err,
+            error.RuntimeFailed, error.RuntimeTimeout, error.InvalidFrame => return err,
             else => {}, // A malformed/disconnected client must not stop the writer.
         };
     }
