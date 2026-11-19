@@ -80,6 +80,7 @@ deck hub --here                # alternatively, use this terminal
 # Execution machine, from the project directory:
 cd /absolute/project
 deck agent                    # local hub by default
+deck agent --here             # creation form and new task in this terminal
 # Or explicitly select an authenticated Rex host for the coordinator:
 deck agent --hub https://your-hub-rex.example
 # Equivalent persistent selection:
@@ -94,9 +95,9 @@ The worker, task terminal and cwd stay on the **invoking machine**. Remote start
 
 Legacy workers without the handoff endpoint still reuse their verified original client, including its older UI and compiled Rex checks. Keep that package installed; use the checked offline transition once to reach a handoff-capable version. Identity conflicts, unconfirmed session creation, missing/changed packages and unsupported wrappers still refuse. Automatic enrollment has eight pinned worker slots; it is not automatic worker migration/retirement. Worker-local MCP configuration still uses the explicit advanced setup below; automatic enrollment advertises files/bash/Rex/launcher, not MCP.
 
-The form shows the cwd and requires a nonblank **Problem** (2,048 UTF-8 bytes maximum). **Description** is optional (8,192 bytes); omitted and explicitly empty are distinct. Enter moves between fields/buttons; Shift-Enter or Insert-mode Ctrl-J inserts a newline. Ctrl-E toggles description presence. Choose **Create & open**, or press Ctrl-S, to create the task and open its chat. Paste is literal. Problem and description are saved exactly as the task brief; the display title is derived separately. Neither field is sent as a user message or saved as an input draft.
+The form shows the cwd and requires a nonblank **Problem** (2,048 UTF-8 bytes maximum). **Description** is optional (8,192 bytes); omitted and explicitly empty are distinct. Enter moves between fields/buttons; Shift-Enter or Insert-mode Ctrl-J inserts a newline. Ctrl-E toggles description presence. Choose **Create & open** (**Create & attach here** with `--here`), or press Ctrl-S, to create the task and open its chat. Paste is literal. Problem and description are saved exactly as the task brief; the display title is derived separately. Neither field is sent as a user message or saved as an input draft.
 
-After durable creation acknowledgement, Deck verifies/adopts this exact Rex block and process, transitions into the task TUI **in the same terminal**, verifies allocation startup, and opens an **empty chat**. The agent waits until you explicitly send a message. Creation and allocation receipts do not imply input admission or generation.
+Without `--here`, after durable creation acknowledgement, Deck verifies/adopts this exact Rex block and process, transitions into the task TUI **in the same terminal**, verifies allocation startup, and opens an **empty chat**. The agent waits until you explicitly send a message. Creation and allocation receipts do not imply input admission or generation.
 
 ```sh
 # Use the same connection options for all of these:
@@ -108,13 +109,14 @@ deck agent --recover STARTUP_UUID --confirm
 deck agent --discard REQUEST_UUID --confirm
 ```
 
-For a remote task in the current terminal:
+For a new or existing remote task in the current terminal:
 
 ```sh
+deck agent --hub https://YOUR-HUB --here                    # create, then attach
 deck agent --hub https://YOUR-HUB --resume wintermute --here
 ```
 
-`--here` requires an interactive terminal and a hub with attachment support; update the hub and invoking client together using the normal drained upgrade procedure. It resolves the name on the selected worker, loads existing history and enables task-scoped input. It does **not** create/reopen a Rex task terminal, register the current `REX_BLOCK`, change the saved workspace, or stop work on detach. Remote traffic uses the selected worker's private relay, never a local-hub fallback. An existing worker's executable pins and receipts remain unchanged; this explicitly selected renderer uses the installed client rather than dispatching its UI to the worker's older pinned package. Unsupported/offline peers refuse instead of silently opening elsewhere. Ordinary resume without `--here` retains managed Rex behavior.
+`--here` requires an interactive terminal and a hub with attachment support; update the hub and invoking client together using the normal drained upgrade procedure. Without `--resume`, it opens the creation form here, saves a new task only when you confirm, then opens its empty task TUI in the same process. The brief is not automatically submitted as input. With `--resume NAME`, it resolves the name on the selected worker and loads existing history. Both enable task-scoped input. Local `--here` creation needs no Rex installation; remote selection still needs Rex for authenticated worker transport. It does **not** create/reopen a Rex task terminal, register the current `REX_BLOCK`, change the saved workspace, or stop work on detach. Remote traffic uses the selected worker's private relay, never a local-hub fallback. An existing worker's executable pins and receipts remain unchanged; this explicitly selected renderer uses the installed client rather than dispatching its UI to the worker's older pinned package. Unsupported/offline peers refuse instead of silently opening elsewhere. Ordinary creation/resume without `--here` retains managed Rex behavior. Cancelling an untouched form creates no task. If creation was attempted and its outcome is unconfirmed, the exact draft remains for **Retry**, `--recover ID --confirm`, or explicit discard; starting a fresh form cannot silently repeat it.
 
 Names resolve to authoritative IDs among this worker's independent tasks. Resume reuses a running client or opens after definite exit; it creates no task and replays no initial input. Unconfirmed allocation/opening refuses instead of blindly creating another terminal. Recovery retrieves the original creation and its saved brief without opening a terminal or submitting input. If the original form remains open, choose **Retry** there; otherwise resume the task and send a message when ready. Input drafts left by older clients remain available for explicit `:retry` or `:discard`, but are never sent automatically. Discard only removes local recovery intent/drafts; it does not cancel/delete a task, stop a worker or kill a possible Rex session. Inspect ambiguous terminal creation before discarding its fence.
 

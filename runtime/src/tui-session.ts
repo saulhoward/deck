@@ -103,10 +103,11 @@ export class TuiSession {
     this.state!.notice = "Rex startup registered (historical observation, not current health).";
     this.startupBlocked = false;
   }
-  async registerAttachment(machineId: string) {
+  async registerAttachment(machineId: string, cwd?: string) {
     if (this.state || this.startupBlocked || !validMachineIdentity(machineId) || !validRexUuid(this.expectedHub) || !validSafePiId(this.selected)) throw new Error("Task attachment requires a pinned hub/task/worker");
     this.startupBlocked = true; this.mode = "task"; this.attachmentMachine = machineId;
     await this.initialize();
+    if (cwd !== undefined && this.binding?.cwd !== cwd) throw new Error("Created task workspace changed; no input enabled");
     const page = this.renderHistory(await this.history());
     this.state!.entries = page.entries; this.before = page.next; this.state!.hasOlder = !!page.next;
     this.state!.notice = "Attached in this terminal; no Rex allocation changed. Detach does not stop work.";

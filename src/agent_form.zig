@@ -16,6 +16,7 @@ const Model = struct {
     a: std.mem.Allocator,
     bridge: *Bridge,
     cwd: []const u8,
+    here: bool = false,
     problem: Editor,
     description: Editor,
     description_used: bool = false,
@@ -202,7 +203,7 @@ const Model = struct {
         const desc_y = 7 + field_height;
         render.line(ctx, surface, x, desc_y, if (self.description_used) "Description (included, even when empty)" else "Description (optional; omitted)", if (self.focus == 1) Theme.green else Theme.dim, null, 0);
         try self.field(ctx, &surface, x, desc_y + 1, width, field_height, 1);
-        const button = if (self.phase() == .waiting) "[ Waiting for exact allocation ]" else if (self.saved()) "[ Retry exact request ]" else "[ Create & open ]";
+        const button = if (self.phase() == .waiting) "[ Waiting for exact allocation ]" else if (self.saved()) "[ Retry exact request ]" else if (self.here) "[ Create & attach here ]" else "[ Create & open ]";
         render.line(ctx, surface, x, h - 5, button, if (self.focus == 2) Theme.green else Theme.dim, null, 0);
         if (self.saved()) render.line(ctx, surface, x + @min(width - 1, 27), h - 5, "[ Discard locally ]", if (self.focus == 3) Theme.green else Theme.dim, null, 0);
         render.line(ctx, surface, x, h - 3, self.notice, Theme.dim, null, 0);
@@ -210,7 +211,9 @@ const Model = struct {
         return surface;
     }
 };
-pub fn run(init: std.process.Init, record: wire.RexBootstrapRecord, a: std.mem.Allocator) !?wire.AgentWizardReady {
+pub const Result = union(enum) { rex: wire.AgentWizardReady, here: wire.AgentAttachment };
+pub fn run(init: std.process.Init, record: anytype, a: std.mem.Allocator) !?Result {
+    const here = @TypeOf(record) == wire.AgentHereRecord;
     if (std.c.isatty(0) != 1 or std.c.isatty(1) != 1) return error.InteractiveTerminalRequired;
     stopping.store(false, .release);
     const signals = [_]std.posix.SIG{ .TERM, .HUP, .INT, .PIPE };
@@ -220,9 +223,9 @@ pub fn run(init: std.process.Init, record: wire.RexBootstrapRecord, a: std.mem.A
         std.posix.sigaction(sig, &handler, &previous[n]);
     }
     defer for (signals, 0..) |sig, n| std.posix.sigaction(sig, &previous[n], null);
-    var bridge = try Bridge.start(.{ .io = init.io, .environ = init.minimal.environ }, init.gpa, record.draftRoot, record.id);
+    var bridge = try Bridge.start(.{ .io = init.io, .environ = init.minimal.environ }, init.gpa, record.draftRoot, record.id, here);
     defer bridge.deinit();
-    var model: Model = .{ .a = init.gpa, .bridge = &bridge, .cwd = record.cwd, .problem = Editor.init(init.gpa), .description = Editor.init(init.gpa) };
+    var model: Model = .{ .a = init.gpa, .bridge = &bridge, .cwd = record.cwd, .here = here, .problem = Editor.init(init.gpa), .description = Editor.init(init.gpa) };
     model.problem.mode = .insert;
     model.description.mode = .insert;
     defer model.deinit();
@@ -254,9 +257,16 @@ pub fn run(init: std.process.Init, record: wire.RexBootstrapRecord, a: std.mem.A
         }
         try model.editor().replace(edited);
         if (model.focus == 1) model.description_used = true;
-        try model.note("Editor contents loaded. Nothing submitted; choose Create & open explicitly.");
+        try model.note("Editor contents loaded. Nothing submitted; choose Create explicitly.");
     }
-    if (!stopping.load(.acquire)) if (model.response) |reply| if (reply.value.ready) |ready| return .{ .chatId = try a.dupe(u8, ready.chatId), .allocationId = try a.dupe(u8, ready.allocationId) };
+    if (!stopping.load(.acquire)) if (model.response) |reply| {
+        if (here) {
+            if (reply.value.attachment) |scope| {
+                if (!std.mem.eql(u8, scope.hubId, record.hubId) or !std.mem.eql(u8, scope.machineId, record.machineId)) return error.InvalidBootstrap;
+                return .{ .here = .{ .chatId = try a.dupe(u8, scope.chatId), .hubId = try a.dupe(u8, scope.hubId), .machineId = try a.dupe(u8, scope.machineId) } };
+            }
+        } else if (reply.value.ready) |ready| return .{ .rex = .{ .chatId = try a.dupe(u8, ready.chatId), .allocationId = try a.dupe(u8, ready.allocationId) } };
+    };
     return null;
 }
 

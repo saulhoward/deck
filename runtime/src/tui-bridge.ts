@@ -5,10 +5,10 @@ import { displayText, TuiSession, localSession, validRequest, validReply } from 
 import { validRexUuid, validMachineIdentity } from "./generated/contracts.js";
 import { attachedCommand } from "./attached-client.js";
 import { validMutationArgs } from "./mutation-contracts.js";
-import { bootstrapRecord, bootstrapPath, StartupFiles, finishStartup } from "./agent-storage.js";
+import { bootstrapRecord, hereRecord, bootstrapPath, StartupFiles, finishStartup } from "./agent-storage.js";
 import { startupDraft } from "./agent-wizard.js";
 
-const args = process.argv.slice(2); let attachMachine: string | undefined;
+const args = process.argv.slice(2); let attachMachine: string | undefined, hereStartup: string | undefined;
 let port = 52800, chatId: string | undefined, hubId: string | undefined, allocationId: string | undefined, workerSocket: string | undefined, bootstrapId: string | undefined, clientState: string | undefined;
 try {
   for (let i = 0; i < args.length; i++) {
@@ -19,6 +19,7 @@ try {
     else if (key === "--hub-id" && value.length <= 200) hubId = value;
     else if (key === "--rex-allocation" && validRexUuid(value)) allocationId = value;
     else if (key === "--worker-socket") workerSocket = value;
+    else if (key === "--here-startup" && validRexUuid(value)) hereStartup = value;
     else if (key === "--attach-machine" && validMachineIdentity(value)) attachMachine = value;
     else if (key === "--agent-bootstrap" && validRexUuid(value)) bootstrapId = value;
     else if (key === "--client-state" && value.startsWith("/") && !value.includes("\0") && Buffer.byteLength(value) <= 4096) clientState = value;
@@ -26,6 +27,7 @@ try {
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error();
   if (bootstrapId && (!allocationId || !clientState)) throw new Error();
+  if (hereStartup && (!attachMachine || !clientState || bootstrapId)) throw new Error();
   if (attachMachine && (allocationId || bootstrapId || !validRexUuid(hubId) || !chatId)) throw new Error();
   if (workerSocket && !attachMachine) taskScope(hubId, chatId, allocationId, process.env.REX_BLOCK);
   if (allocationId && (!hubId || !validMutationArgs("rex_startup", { chatId, allocationId, blockId: process.env.REX_BLOCK }))) throw new Error();
@@ -37,6 +39,8 @@ process.stdin.on("end", stop); process.stdin.on("error", stop); process.stdout.o
 const scope = workerSocket && !attachMachine ? taskScope(hubId, chatId, allocationId, process.env.REX_BLOCK) : undefined;
 const bootstrap = bootstrapId ? await bootstrapRecord(clientState!, bootstrapId).catch(() => undefined) : undefined;
 if (bootstrapId && (!bootstrap || bootstrap.hubId !== hubId || bootstrap.claim?.chatId !== chatId || bootstrap.claim?.allocationId !== allocationId || bootstrap.workerSocket !== workerSocket || bootstrap.port !== port)) process.exit(2);
+const here = hereStartup ? await hereRecord(clientState!, hereStartup).catch(() => undefined) : undefined;
+if (hereStartup && (!here || here.hubId !== hubId || here.machineId !== attachMachine || here.workerSocket !== workerSocket || here.port !== port)) process.exit(2);
 const session = attachMachine && workerSocket
   ? new TuiSession((name, args, expected) => attachedCommand({ hubId: hubId!, machineId: attachMachine!, socket: workerSocket! }, chatId!, name, args, expected, abort.signal), chatId, hubId, clientState, port)
   : scope ? new TuiSession((name, args, expected) => taskCommand(workerSocket!, scope, name, args, expected, abort.signal), chatId, hubId, clientState, port) : localSession(port, chatId, hubId, abort.signal, clientState);
@@ -46,17 +50,22 @@ try {
   // Before any renderer snapshot or input: exact allocation-bound historical
   // registration. Failure closes this helper; there is no startup retry loop.
   if (allocationId) await session.registerStartup(allocationId, process.env.REX_BLOCK);
-  if (attachMachine) await session.registerAttachment(attachMachine);
-  if (bootstrap) {
-    const files = new StartupFiles(bootstrapPath(bootstrap.draftRoot, bootstrap.id));
-    const draft = await startupDraft(bootstrap, files);
+  if (attachMachine) await session.registerAttachment(attachMachine, here?.cwd);
+  const startup = bootstrap ?? here;
+  if (startup) {
+    const files = new StartupFiles(bootstrapPath(startup.draftRoot, startup.id));
+    const draft = await startupDraft(startup, files);
     if (!draft) throw new Error("Startup form missing");
+    if (here) {
+      const created = await files.read("created.json") as { requestId?: unknown; chatId?: unknown } | undefined;
+      if (!created || created.requestId !== draft.creationId || created.chatId !== chatId || JSON.stringify(created) !== JSON.stringify({ requestId: created.requestId, chatId: created.chatId })) throw new Error("Current-terminal creation receipt changed");
+    }
     // Opening a task is not input admission. In particular, never replay an
     // older client's saved problem draft; it remains for explicit user handling.
     if (await files.read("discarded.json") === undefined) {
       try {
         if (await files.read("completed.json") === undefined) await files.publish("completed.json", { version: 1 });
-        await finishStartup(bootstrap);
+        await finishStartup(startup);
       } catch { /* Startup was verified; retain cleanup metadata without replaying or stopping work. */ }
     }
   }

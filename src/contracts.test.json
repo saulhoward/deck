@@ -1,5 +1,7 @@
 {
   "bases": {
+    "AgentHereRecord": { "version": 1, "mode": "here", "id": "00000000-0000-4000-8000-000000000001", "hubId": "00000000-0000-4000-8000-000000000002", "machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "cwd": "/work", "client": "/tools/deck", "draftRoot": "/private/client", "port": 52800, "pid": 123 },
+    "AgentStartupDraft": { "version": 1, "bootstrapId": "00000000-0000-4000-8000-000000000001", "hubId": "00000000-0000-4000-8000-000000000002", "machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "cwd": "/work", "creationId": "00000000-0000-4000-8000-000000000003", "title": "Here", "problem": "Exact problem" },
     "AgentAttachment": { "hubId": "00000000-0000-4000-8000-000000000001", "machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "chatId": "2" },
     "LauncherTaskCommand": { "chatId": "2", "body": "{}" },
     "LauncherTaskReply": { "hubId": "00000000-0000-4000-8000-000000000001", "machineId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "chatId": "2", "body": "{}" },
@@ -143,6 +145,14 @@
     }
   },
   "cases": [
+    { "name": "current terminal creation provenance", "schema": "AgentHereRecord", "valid": true },
+    { "name": "current terminal has no Rex block authority", "schema": "AgentHereRecord", "set": { "blockId": "block:00000000-0000-4000-8000-000000000001" }, "valid": false },
+    { "name": "current terminal requires native process", "schema": "AgentHereRecord", "remove": ["pid"], "valid": false },
+    { "name": "current terminal rejects invalid pid", "schema": "AgentHereRecord", "set": { "pid": 0 }, "valid": false },
+    { "name": "current terminal requires explicit mode", "schema": "AgentHereRecord", "remove": ["mode"], "valid": false },
+    { "name": "creation only draft needs no adoption id", "schema": "AgentStartupDraft", "valid": true },
+    { "name": "legacy adoption draft remains valid", "schema": "AgentStartupDraft", "set": { "adoptionId": "00000000-0000-4000-8000-000000000004" }, "valid": true },
+    { "name": "creation draft still requires stable identity", "schema": "AgentStartupDraft", "remove": ["creationId"], "valid": false },
     { "name": "attachment pins hub task and worker", "schema": "AgentAttachment", "valid": true },
     { "name": "attachment requires task", "schema": "AgentAttachment", "remove": ["chatId"], "valid": false },
     { "name": "attachment cannot claim a Rex block", "schema": "AgentAttachment", "set": { "blockId": "block:00000000-0000-4000-8000-000000000001" }, "valid": false },

@@ -148,8 +148,11 @@ try:
     assert b"\x1b[?1049l" in output, "Alternate screen not restored"
     assert b"memory address" not in output and b"[gpa]" not in output, repr(output[-6000:])
     reports = program_status()
-    assert reports and reports[-1] == {"state": "clear", "id": "deck"}, "Status not cleared on detach"
-    assert b"\x1b[22;2t" in output and b"\x1b[23;2t" in output, "Window title not restored"
+    if os.environ.get("DECK_TEST_FORM_ONLY") == "1":
+        assert not reports, "Unsubmitted creation form must not advertise task status"
+    else:
+        assert reports and reports[-1] == {"state": "clear", "id": "deck"}, "Status not cleared on detach"
+        assert b"\x1b[22;2t" in output and b"\x1b[23;2t" in output, "Window title not restored"
     print(json.dumps({"output": base64.b64encode(output).decode(), "restored": True, "programStatus": reports, "screens": screens}))
 finally:
     if not exited:

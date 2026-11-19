@@ -6,10 +6,18 @@ const Bridge = @This();
 pub const Action = @FieldType(wire.AgentWizardRequest, "action");
 pipe: Pipe,
 pending: ?Action = null,
+here: bool = false,
 id: [32]u8 = undefined,
 id_len: usize = 0,
-pub fn start(native: Native, a: std.mem.Allocator, root: []const u8, id: []const u8) !Bridge {
-    return .{ .pipe = try Pipe.startEntry(native, a, "agent-wizard-main.js", &.{ root, id }) };
+pub fn start(native: Native, a: std.mem.Allocator, root: []const u8, id: []const u8, here: bool) !Bridge {
+    return .{ .pipe = try Pipe.startEntry(native, a, "agent-wizard-main.js", if (here) &.{ root, id, "--here" } else &.{ root, id }), .here = here };
+}
+pub fn validResponse(value: wire.AgentWizardResponse, here: bool) bool {
+    if (here) {
+        if (value.ready != null or value.phase == .waiting or (value.phase == .ready) != (value.attachment != null)) return false;
+    } else if (value.attachment != null or (value.phase == .ready) != (value.ready != null)) return false;
+    const chat = if (value.ready) |scope| scope.chatId else if (value.attachment) |scope| scope.chatId else return true;
+    return value.saved and (std.fmt.parseInt(u64, chat, 10) catch return false) <= 9007199254740991;
 }
 pub fn deinit(self: *Bridge) void {
     self.pipe.deinit();
@@ -72,10 +80,30 @@ fn receive(self: *Bridge) !?std.json.Parsed(wire.AgentWizardResponse) {
     if (!std.unicode.utf8ValidateSlice(body) or !wire.validAgentWizardResponse(raw.value)) return error.InvalidFrame;
     const parsed = try std.json.parseFromSlice(wire.AgentWizardResponse, p.a, body, .{ .allocate = .alloc_always });
     errdefer parsed.deinit();
-    if (!std.mem.eql(u8, parsed.value.id, self.id[0..self.id_len]) or (parsed.value.phase == .ready) != (parsed.value.ready != null)) return error.InvalidFrame;
-    if (parsed.value.ready) |ready| if ((std.fmt.parseInt(u64, ready.chatId, 10) catch return error.InvalidFrame) > 9007199254740991) return error.InvalidFrame;
+    if (!std.mem.eql(u8, parsed.value.id, self.id[0..self.id_len]) or !validResponse(parsed.value, self.here)) return error.InvalidFrame;
     p.input.clearRetainingCapacity();
     p.output.clearRetainingCapacity();
     self.pending = null;
     return parsed;
+}
+
+test "form replies keep current-terminal attachment distinct from Rex allocation" {
+    const a = std.testing.allocator;
+    const here = "{\"version\":1,\"id\":\"1\",\"phase\":\"ready\",\"notice\":\"Created\",\"saved\":true,\"attachment\":{\"hubId\":\"00000000-0000-4000-8000-000000000001\",\"machineId\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"chatId\":\"2\"}}";
+    const rex = "{\"version\":1,\"id\":\"1\",\"phase\":\"ready\",\"notice\":\"Created\",\"saved\":true,\"ready\":{\"chatId\":\"2\",\"allocationId\":\"00000000-0000-4000-8000-000000000001\"}}";
+    const h = try wire.parseAgentWizardResponse(a, here);
+    defer h.deinit();
+    const r = try wire.parseAgentWizardResponse(a, rex);
+    defer r.deinit();
+    try std.testing.expect(validResponse(h.value, true) and !validResponse(h.value, false));
+    try std.testing.expect(validResponse(r.value, false) and !validResponse(r.value, true));
+    var mixed = h.value;
+    mixed.ready = r.value.ready;
+    try std.testing.expect(!validResponse(mixed, true) and !validResponse(mixed, false));
+    mixed = h.value;
+    mixed.phase = .blocked;
+    try std.testing.expect(!validResponse(mixed, true));
+    mixed = h.value;
+    mixed.attachment.?.chatId = "9007199254740992";
+    try std.testing.expect(!validResponse(mixed, true));
 }

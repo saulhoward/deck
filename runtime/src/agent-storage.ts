@@ -4,7 +4,7 @@ import { constants } from "node:fs";
 import { link, lstat, mkdir, open, readdir, rm } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { privateJson, privateOwner } from "./launcher-client.js";
-import { validRexBootstrapRecord, validRexBootstrapIndex, validRexUuid, type RexBootstrapRecord, type RexBootstrapIndex } from "./generated/contracts.js";
+import { validAgentHereRecord, type AgentHereRecord, validRexBootstrapRecord, validRexBootstrapIndex, validRexUuid, type RexBootstrapRecord, type RexBootstrapIndex } from "./generated/contracts.js";
 import { validResolvedTarget } from "./rex-open-contracts.js";
 export function missing(error: unknown): boolean { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
 export async function privateDirectory(path: string, create = false) {
@@ -21,8 +21,26 @@ export async function bootstrapRecord(clientRoot: string, id: string, currentPro
   await privateDirectory(clientRoot); await privateDirectory(join(clientRoot, "startups")); await privateDirectory(root);
   const record = await privateJson(join(root, "record.json"), 16 * 1024);
   if (!validRexBootstrapRecord(record) || record.id !== id || record.draftRoot !== clientRoot || !validResolvedTarget(record.target) || !record.cwd.startsWith("/") || record.cwd.includes("\0") || !record.client.startsWith("/") || !record.draftRoot.startsWith("/")) throw new Error("Invalid native bootstrap record");
+  if (await new StartupFiles(root).read("here.json") !== undefined) throw new Error("Conflicting creation provenance");
   if (currentProcess && (!record.binding || record.binding.pid !== process.ppid || record.binding.blockId !== process.env.REX_BLOCK)) throw new Error("Bootstrap is not this managed terminal");
   return record;
+}
+export type StartupRecord = RexBootstrapRecord | AgentHereRecord;
+export function isHere(record: StartupRecord): record is AgentHereRecord { return "mode" in record && record.mode === "here"; }
+export async function hereRecord(clientRoot: string, id: string, currentProcess = true): Promise<AgentHereRecord> {
+  const root = bootstrapPath(clientRoot, id);
+  await privateDirectory(clientRoot); await privateDirectory(join(clientRoot, "startups")); await privateDirectory(root);
+  const record = await privateJson(join(root, "here.json"), 16 * 1024);
+  if (!validAgentHereRecord(record) || record.id !== id || record.draftRoot !== clientRoot || !record.cwd.startsWith("/") || record.cwd.includes("\0") || !record.client.startsWith("/") || (record.workerSocket !== undefined && (!record.workerSocket.startsWith("/") || record.workerSocket.includes("\0")))) throw new Error("Invalid current-terminal creation record");
+  if (await new StartupFiles(root).read("record.json") !== undefined) throw new Error("Conflicting creation provenance");
+  if (currentProcess && record.pid !== process.ppid) throw new Error("Creation form is not this native process");
+  return record;
+}
+export async function startupRecord(root: string, id: string): Promise<StartupRecord> {
+  // Only absence chooses the legacy format. Invalid/unsafe new records refuse.
+  try { return await hereRecord(root, id, false); }
+  catch (error) { if (!missing(error)) throw error; }
+  return bootstrapRecord(root, id, false);
 }
 export async function startupIndexes(root: string, hubId: string, machineId: string): Promise<RexBootstrapIndex[]> {
   const directory = join(root, "startups");

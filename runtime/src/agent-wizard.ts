@@ -4,13 +4,20 @@ import { randomUUID } from "node:crypto";
 import { DraftStore } from "./drafts.js";
 import { hubCommand } from "./hub-client.js";
 import { launcherCommand } from "./launcher-client.js";
-import { StartupFiles, finishStartup } from "./agent-storage.js";
+import { StartupFiles, finishStartup, isHere, type StartupRecord } from "./agent-storage.js";
 import { briefFields, validBrief, validBriefBinding } from "./task-brief.js";
 import { validSafePiId } from "./mutation-contracts.js";
 import { validRexReply } from "./rex-open-contracts.js";
-import { validAgentStartupDraft, validAgentWizardRequest, validRexAdoptAck, type AgentStartupDraft, type AgentWizardRequest, type AgentWizardResponse, type LauncherRequest, type RexBootstrapRecord, type RexAdoptAck, type RexStatusSnapshot } from "./generated/contracts.js";
+import { responseResult } from "./responses.js";
+import { validStatusSnapshot, validLauncherTaskReply, validAgentStartupDraft, validAgentWizardRequest, validAgentWizardResponse, validRexAdoptAck, type AgentStartupDraft, type AgentWizardRequest, type AgentWizardResponse, type LauncherRequest, type RexAdoptAck, type RexStatusSnapshot } from "./generated/contracts.js";
 export function validWizardRequest(value: unknown): value is AgentWizardRequest {
   return validAgentWizardRequest(value) && (value.action === "create" ? typeof value.problem === "string" && !!value.problem.trim() && validBrief({ problem: value.problem, ...(value.description === undefined ? {} : { description: value.description }) }) : value.problem === undefined && value.description === undefined);
+}
+export function validWizardReply(value: unknown, here: boolean): value is AgentWizardResponse {
+  if (!validAgentWizardResponse(value)) return false;
+  if (here ? value.ready !== undefined || value.phase === "waiting" : value.attachment !== undefined) return false;
+  const scope = here ? value.attachment : value.ready;
+  return (value.phase === "ready") === (scope !== undefined) && (!scope || (value.saved && validSafePiId(scope.chatId)));
 }
 function title(problem: string): string {
   let value = "";
@@ -20,14 +27,14 @@ function title(problem: string): string {
   }
   return value || "New task";
 }
-export async function startupDraft(record: RexBootstrapRecord, files: StartupFiles): Promise<AgentStartupDraft | undefined> {
+export async function startupDraft(record: StartupRecord, files: StartupFiles): Promise<AgentStartupDraft | undefined> {
   const form = await files.read("form.json");
   if (form === undefined) return;
-  if (!validAgentStartupDraft(form) || form.bootstrapId !== record.id || form.hubId !== record.hubId || form.machineId !== record.machineId || form.cwd !== record.cwd || !form.problem.trim() || !validBriefBinding(form.title, form.cwd) || !validBrief(briefFields(form))) throw new Error("Invalid exact startup draft; nothing replayed");
+  if (!validAgentStartupDraft(form) || (isHere(record) ? form.adoptionId !== undefined || form.inputId !== undefined : !form.adoptionId) || form.bootstrapId !== record.id || form.hubId !== record.hubId || form.machineId !== record.machineId || form.cwd !== record.cwd || !form.problem.trim() || !validBriefBinding(form.title, form.cwd) || !validBrief(briefFields(form))) throw new Error("Invalid exact startup draft; nothing replayed");
   return form;
 }
 export type WizardTransport = { hub: (command: string, args: Record<string, unknown>) => Promise<any>; launcher: (request: LauncherRequest) => Promise<any> };
-export function wizardTransport(record: RexBootstrapRecord, signal: AbortSignal): WizardTransport {
+export function wizardTransport(record: StartupRecord, signal: AbortSignal): WizardTransport {
   return {
     hub: (command, args) => hubCommand(record.port, command, args, record.hubId, signal),
     launcher: request => {
@@ -40,8 +47,10 @@ export class AgentWizard {
   private phase: AgentWizardResponse["phase"] = "form";
   private notice = "Nothing created. Create & open saves the brief without sending a message.";
   private ready: AgentWizardResponse["ready"];
-  constructor(readonly record: RexBootstrapRecord, readonly files: StartupFiles, private readonly transport: WizardTransport) {
-    if (!record.binding) throw new Error("Bootstrap has no verified terminal");
+  private attachment: AgentWizardResponse["attachment"];
+  constructor(readonly record: StartupRecord, readonly files: StartupFiles, private readonly transport: WizardTransport) {
+    if (!isHere(record) && !record.binding) throw new Error("Bootstrap has no verified terminal");
+    if (isHere(record)) this.notice = "Nothing created. Create & attach saves the brief; no Rex terminal or input is created.";
   }
   private async creation(form: AgentStartupDraft): Promise<string> {
     const saved = await this.files.read("created.json");
@@ -59,6 +68,7 @@ export class AgentWizard {
     return ack.chatId;
   }
   private async adoption(form: AgentStartupDraft, chatId: string): Promise<RexAdoptAck> {
+    if (isHere(this.record) || !form.adoptionId) throw new Error("Current-terminal creation cannot adopt Rex");
     let ack = await this.files.read("adopted.json");
     if (ack === undefined) {
       const args = { chatId, requestId: form.adoptionId, port: this.record.port, target: this.record.target, bootstrap: { id: this.record.id, root: this.record.draftRoot, blockId: this.record.binding!.blockId } };
@@ -72,6 +82,7 @@ export class AgentWizard {
     return ack;
   }
   private async verify(form: AgentStartupDraft, ack: RexAdoptAck): Promise<void> {
+    if (isHere(this.record)) throw new Error("Current-terminal creation has no Rex allocation");
     const status: RexStatusSnapshot = this.record.workerSocket
       ? (await this.transport.launcher({ version: 1, id: randomUUID(), command: "launch_inspect", args: { chatId: ack.chatId } })).status
       : await this.transport.hub("rex_status", { chatId: ack.chatId });
@@ -84,6 +95,19 @@ export class AgentWizard {
   }
   private async advance(form: AgentStartupDraft): Promise<void> {
     const chatId = await this.creation(form);
+    if (isHere(this.record)) {
+      const request = { version: 1 as const, id: randomUUID(), command: "status", args: { chatId }, hubId: form.hubId };
+      let status: unknown;
+      if (this.record.workerSocket) {
+        const reply = await this.transport.launcher({ version: 1, id: randomUUID(), command: "launch_task", args: { chatId, body: JSON.stringify(request) } });
+        if (!validLauncherTaskReply(reply) || reply.hubId !== form.hubId || reply.machineId !== form.machineId || reply.chatId !== chatId) throw new Error("Invalid attachment acknowledgement");
+        status = responseResult(JSON.parse(reply.body), request.id, request);
+      } else status = await this.transport.hub("status", { chatId });
+      if (!validStatusSnapshot(status) || status.hubGuard !== 1 || status.hubId !== form.hubId || status.chatId !== chatId || chatId === status.mainChatId || status.binding?.kind !== "task" || status.binding.machineId !== form.machineId || status.binding.cwd !== form.cwd) throw new Error("Created task attachment scope changed");
+      this.attachment = { hubId: form.hubId, machineId: form.machineId, chatId };
+      this.phase = "ready"; this.notice = "Task created. Attaching here; send a message when ready. No Rex allocation changed.";
+      return;
+    }
     // The brief is creation metadata, not an input draft or an admission.
     const ack = await this.adoption(form, chatId);
     await this.verify(form, ack);
@@ -106,7 +130,7 @@ export class AgentWizard {
         this.phase = "blocked"; this.notice = "Startup request discarded. Work was not cancelled. Detach; use --list / --resume to inspect any created task.";
       } else if (request.action === "create") {
         if (form) throw new Error("Exact startup draft already exists");
-        form = { version: 1, bootstrapId: this.record.id, hubId: this.record.hubId, machineId: this.record.machineId, cwd: this.record.cwd, creationId: randomUUID(), adoptionId: randomUUID(), title: title(request.problem!), problem: request.problem!, ...(request.description === undefined ? {} : { description: request.description }) };
+        form = { version: 1, bootstrapId: this.record.id, hubId: this.record.hubId, machineId: this.record.machineId, cwd: this.record.cwd, creationId: randomUUID(), ...(isHere(this.record) ? {} : { adoptionId: randomUUID() }), title: title(request.problem!), problem: request.problem!, ...(request.description === undefined ? {} : { description: request.description }) };
         await this.files.publish("form.json", form); saved = true;
         await this.advance(form);
       } else if (request.action === "retry") {
@@ -128,6 +152,6 @@ export class AgentWizard {
       this.phase = "blocked";
       this.notice = "Startup outcome unconfirmed. Exact requests retained where saved. Retry uses their original identities; detach never stops work. No replacement or input replayed.";
     }
-    return { version: 1, id: request.id, phase: this.phase, notice: this.notice, saved, ...(this.phase === "ready" && this.ready ? { ready: this.ready } : {}) };
+    return { version: 1, id: request.id, phase: this.phase, notice: this.notice, saved, ...(this.phase === "ready" && this.ready ? { ready: this.ready } : {}), ...(this.phase === "ready" && this.attachment ? { attachment: this.attachment } : {}) };
   }
 }

@@ -11,7 +11,7 @@ const Mode = enum { create, list, @"resume", drafts, discard, recover };
 const Options = struct { hub: ?[]const u8 = null, local: bool = false, here: bool = false, directory: ?[]const u8 = null, rex: ?[]const u8 = null, server: ?[]const u8 = null, port: u16 = 52800, mode: Mode = .create, value: ?[]const u8 = null, confirm: bool = false };
 const Ready = struct { hubId: []const u8, machineId: []const u8 };
 const help =
-    \\deck agent [--hub REX_HOST | --local] [--directory STATE] [--port 52800]
+    \\deck agent [--here] [--hub REX_HOST | --local] [--directory STATE] [--port 52800]
     \\deck agent [same connection options] --list
     \\deck agent [same connection options] --resume NAME [--here]
     \\deck agent [same connection options] --drafts
@@ -27,7 +27,7 @@ const help =
     \\The chat stays empty until you send a message.
     \\Detach never stops work. Uncertain input requires explicit :retry / :discard.
     \\--resume resolves a name on this worker, never creates a new task.
-    \\--here resumes in this terminal without creating/replacing a Rex allocation.
+    \\--here creates or resumes in this terminal without a Rex task allocation.
     \\It preserves the saved task workspace and requires attachment support on the hub.
     \\Advanced direct/legacy clients retain --tui, --no-tui and --launch-from.
     \\
@@ -36,7 +36,7 @@ pub fn managed(args: []const []const u8) bool {
     if (args.len > 0 and std.mem.eql(u8, args[0], "--wizard")) return true;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
-        for ([_][]const u8{ "--tui", "--no-tui", "--message", "--task", "--hub-id", "--rex-allocation", "--worker-socket", "--attach-machine", "--agent-bootstrap", "--client-state", "--launch-from" }) |flag| if (std.mem.eql(u8, args[i], flag)) return false;
+        for ([_][]const u8{ "--tui", "--no-tui", "--message", "--task", "--hub-id", "--rex-allocation", "--worker-socket", "--attach-machine", "--here-startup", "--agent-bootstrap", "--client-state", "--launch-from" }) |flag| if (std.mem.eql(u8, args[i], flag)) return false;
         if (std.mem.eql(u8, args[i], "--here") or std.mem.eql(u8, args[i], "--local") or std.mem.eql(u8, args[i], "--list") or std.mem.eql(u8, args[i], "--drafts") or std.mem.eql(u8, args[i], "--confirm") or std.mem.eql(u8, args[i], "--help")) continue;
         i += 1;
     }
@@ -79,7 +79,7 @@ fn options(args: []const []const u8) !Options {
             seen_mode = true;
         } else return error.InvalidArguments;
     }
-    if (o.hub != null and o.local or (o.mode == .discard or o.mode == .recover) != o.confirm or (o.here and o.mode != .@"resume")) return error.InvalidArguments;
+    if (o.hub != null and o.local or (o.mode == .discard or o.mode == .recover) != o.confirm or (o.here and o.mode != .@"resume" and o.mode != .create)) return error.InvalidArguments;
     if (o.value) |value| {
         if (o.mode == .@"resume") {
             if (!wire.validAgentName(.{ .string = value })) return error.InvalidArguments;
@@ -285,7 +285,9 @@ fn wizard(init: std.process.Init, a: std.mem.Allocator, root: []const u8, id: []
     }
     const binding = record.binding orelse return error.BootstrapLaunchUnconfirmed;
     if (binding.pid != std.c.getpid() or !std.mem.eql(u8, binding.blockId, native.environ.getPosix("REX_BLOCK") orelse return error.InvalidBootstrap) or record.claim != null) return error.InvalidBootstrap;
-    const scope = (try @import("agent_form.zig").run(init, record, a)) orelse return;
+    const result = (try @import("agent_form.zig").run(init, record, a)) orelse return;
+    if (result != .rex) return error.InvalidBootstrap;
+    const scope = result.rex;
     record = try @import("rex_bootstrap.zig").load(native, a, root, id);
     const claim = record.claim orelse return error.InvalidBootstrap;
     if (!std.mem.eql(u8, claim.chatId, scope.chatId) or !std.mem.eql(u8, claim.allocationId, scope.allocationId)) return error.InvalidBootstrap;
@@ -293,6 +295,28 @@ fn wizard(init: std.process.Init, a: std.mem.Allocator, root: []const u8, id: []
     try args.appendSlice(a, &.{ "--tui", "--port", try std.fmt.allocPrint(a, "{d}", .{record.port}), "--hub-id", record.hubId, "--task", scope.chatId, "--rex-allocation", scope.allocationId, "--agent-bootstrap", id, "--client-state", root });
     if (record.workerSocket) |socket| try args.appendSlice(a, &.{ "--worker-socket", socket });
     try @import("tui.zig").run(init, args.items); // Same process, session and block.
+}
+fn hereRecovery(native: Native, a: std.mem.Allocator, root: []const u8, worker_path: []const u8, o: Options) !bool {
+    if (o.mode != .recover and o.mode != .discard) return false;
+    const path = try std.fs.path.join(a, &.{ try @import("rex_bootstrap.zig").path(native, a, root, o.value.?), "here.json" });
+    const bytes = @import("mcp_profiles.zig").readPrivate(native, a, path, 16 * 1024) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    const record = (try wire.parseAgentHereRecord(a, bytes)).value;
+    const c = try connection(native, a, worker_path);
+    var directory = try storage.openDirectory(native, worker_path, false);
+    defer directory.close(native.io);
+    const machine = (try @import("state.zig").load(native.io, a, directory)).value.machine_id;
+    if (!std.mem.eql(u8, record.id, o.value.?) or !std.mem.eql(u8, record.draftRoot, root) or !std.mem.eql(u8, record.hubId, c.hubId orelse return error.InvalidBootstrap) or !std.mem.eql(u8, record.machineId, machine) or !std.mem.eql(u8, record.workerSocket orelse return error.InvalidBootstrap, c.rexClient.socket)) return error.InvalidBootstrap;
+    return true; // Creation-only recovery uses its installed helper, never Rex.
+}
+fn attach(init: std.process.Init, a: std.mem.Allocator, root: []const u8, port: []const u8, socket: ?[]const u8, scope: wire.AgentAttachment, startup_id: ?[]const u8) !void {
+    var args: std.ArrayList([]const u8) = .empty;
+    try args.appendSlice(a, &.{ "--tui", "--port", port, "--hub-id", scope.hubId, "--task", scope.chatId, "--attach-machine", scope.machineId, "--client-state", root });
+    if (socket) |value| try args.appendSlice(a, &.{ "--worker-socket", value });
+    if (startup_id) |id| try args.appendSlice(a, &.{ "--here-startup", id });
+    try @import("tui.zig").run(init, args.items);
 }
 pub fn run(init: std.process.Init, args: []const []const u8) !void {
     const native: Native = .{ .io = init.io, .environ = init.minimal.environ };
@@ -313,6 +337,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var cancelled = std.atomic.Value(bool).init(false);
     var target: ?wire.RexOpenTarget = null;
     var worker_path: ?[]const u8 = null;
+    var here_recovery = false;
     if (selected) |hub| {
         const executable = o.rex orelse try @import("rex_resolve.zig").findRex(native, a);
         const remote = try forward.identity(native, a, executable, hub, &cancelled);
@@ -323,7 +348,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
             same_host = std.mem.eql(u8, remote.value.host_id, observed.value.host_id) and std.mem.eql(u8, remote.value.account, observed.value.account);
         }
         if (!same_host) {
-            const selected_worker = workerDirectory(native, a, root, hub, executable, remote.value, o.port, client, cwd, &cancelled, o.mode == .create or o.mode == .list) catch |err| blk: {
+            const selected_worker = workerDirectory(native, a, root, hub, executable, remote.value, o.port, client, cwd, &cancelled, !o.here and (o.mode == .create or o.mode == .list)) catch |err| blk: {
                 if (err != error.WorkerUpgradeDeferred or o.mode != .list) return err;
                 try std.Io.File.stderr().writeStreamingAll(native.io, "deck: upgrade deferred; listing through the verified pinned client without changing the worker\n");
                 break :blk try workerDirectory(native, a, root, hub, executable, remote.value, o.port, client, cwd, &cancelled, false);
@@ -332,14 +357,17 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
             // not a Rex allocation under the worker's executable pin. Verify
             // old pins as usual, but run the installed renderer without changing
             // the daemon/client pins or asking a legacy client to parse --here.
-            if (!o.here) if (selected_worker.reuse_client) |saved_client| return worker_client.replace(native, a, saved_client, args);
+            if (!o.here) if (selected_worker.reuse_client) |saved_client| {
+                here_recovery = try hereRecovery(native, a, root, selected_worker.directory, o);
+                if (!here_recovery) return worker_client.replace(native, a, saved_client, args);
+            };
             worker_path = selected_worker.directory;
         }
     }
     const kind: []const u8 = if (worker_path != null) "worker" else "local";
     const endpoint = worker_path orelse port;
     const connected = try ready(native, a, cwd, kind, endpoint, root, &cancelled);
-    if (o.here) {
+    if (o.here and o.mode == .@"resume") {
         if (worker_path) |path| if (try @import("worker_handoff.zig").load(native, a, path)) |pending| if (pending.phase != .deferred) return error.WorkerUpgradeUnconfirmed;
         const result = try control(native, a, cwd, kind, endpoint, root, "attach", o.value, &cancelled);
         if (!result.result.ok or result.stderr.len != 0) {
@@ -348,11 +376,8 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
         }
         const attachment = (try wire.parseAgentAttachment(a, result.stdout)).value;
         if (!std.mem.eql(u8, attachment.hubId, connected.hubId) or !std.mem.eql(u8, attachment.machineId, connected.machineId) or (std.fmt.parseInt(u64, attachment.chatId, 10) catch return error.InvalidHubIdentity) > 9007199254740991) return error.InvalidHubIdentity;
-        var client_args: std.ArrayList([]const u8) = .empty;
-        try client_args.appendSlice(a, &.{ "--tui", "--port", port, "--hub-id", attachment.hubId, "--task", attachment.chatId, "--attach-machine", attachment.machineId, "--client-state", root });
-        if (worker_path) |path| try client_args.appendSlice(a, &.{ "--worker-socket", (try connection(native, a, path)).rexClient.socket });
         // No startup/creation lock is held for the lifetime of this renderer.
-        return @import("tui.zig").run(init, client_args.items);
+        return attach(init, a, root, port, if (worker_path) |path| (try connection(native, a, path)).rexClient.socket else null, attachment, null);
     }
     const starts_path = try std.fs.path.join(a, &.{ root, "startups" });
     var starts = try storage.directory(native, starts_path);
@@ -362,12 +387,13 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     std.crypto.hash.sha2.Sha256.hash(scope_bytes, &scope_hash, .{});
     const scope_key = std.fmt.bytesToHex(scope_hash, .lower);
     const launch_lock = try storage.lock(native, starts, try std.fmt.allocPrint(a, "{s}.lock", .{scope_key}));
-    defer launch_lock.close(native.io);
+    var lock_held = true;
+    defer if (lock_held) launch_lock.close(native.io);
     // Recheck after acquiring creation exclusion: another CLI may have begun
     // a handoff since this invocation first contacted the worker.
     if (worker_path) |path| {
         const c = try connection(native, a, path);
-        if (!std.mem.eql(u8, c.rexClient.executable, client)) return error.WorkerConflict;
+        if (!o.here and !here_recovery and !std.mem.eql(u8, c.rexClient.executable, client)) return error.WorkerConflict;
         if (try @import("worker_handoff.zig").load(native, a, path)) |pending| if (pending.phase != .deferred) return error.WorkerUpgradeUnconfirmed;
     }
     const pending_name = try std.fmt.allocPrint(a, "{s}.pending.json", .{scope_key});
@@ -401,6 +427,41 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
         if (!result.result.ok) return error.AgentActionUnconfirmed;
         return;
     }
+    if (o.here) {
+        const prepared = try control(native, a, cwd, kind, endpoint, root, "prepare", null, &cancelled);
+        if (!prepared.result.ok) {
+            try std.Io.File.stderr().writeStreamingAll(native.io, prepared.stderr);
+            return error.AgentActionUnconfirmed;
+        }
+        const record: wire.AgentHereRecord = .{ .version = 1, .mode = "here", .id = try uuid(native, a), .hubId = connected.hubId, .machineId = connected.machineId, .cwd = cwd, .client = client, .draftRoot = root, .port = o.port, .workerSocket = if (worker_path) |path| (try connection(native, a, path)).rexClient.socket else null, .pid = @intCast(std.c.getpid()) };
+        const path = try @import("rex_bootstrap.zig").path(native, a, root, record.id);
+        var directory = try storage.directory(native, path);
+        defer directory.close(native.io);
+        try storage.save(native, a, directory, "here.json", record);
+        const index_name = try std.fmt.allocPrint(a, "{s}.json", .{record.id});
+        try storage.save(native, a, starts, index_name, wire.RexBootstrapIndex{ .version = 1, .id = record.id, .hubId = record.hubId, .machineId = record.machineId });
+        const result = try @import("agent_form.zig").run(init, record, a);
+        if (result) |created| {
+            if (created != .here) return error.InvalidBootstrap;
+            launch_lock.close(native.io);
+            lock_held = false;
+            return attach(init, a, root, port, record.workerSocket, created.here, record.id);
+        }
+        // The helper has closed before this read. No durable form means it
+        // could not have dispatched creation; retain every uncertain draft.
+        const form = @import("mcp_profiles.zig").readPrivate(native, a, try std.fs.path.join(a, &.{ path, "form.json" }), 64 * 1024) catch |err| switch (err) {
+            error.FileNotFound => null,
+            else => return err,
+        };
+        if (form == null) {
+            starts.deleteFile(native.io, index_name) catch |err| switch (err) {
+                error.FileNotFound => {},
+                else => return err,
+            };
+            try (std.Io.File{ .handle = starts.handle, .flags = .{ .nonblocking = false } }).sync(native.io);
+        }
+        return;
+    }
     if (target == null) target = try localTarget(native, a, cwd, o, &cancelled);
     _ = try forward.identity(native, a, target.?.executable, target.?.server, &cancelled);
     const socket = if (worker_path) |path| (try connection(native, a, path)).rexClient.socket else null;
@@ -431,7 +492,9 @@ test "agent selection honors explicit/env/local and never treats URL spellings a
     try std.testing.expectError(error.InvalidArguments, options(&.{ "--resume", "unsafe\nname" }));
     try std.testing.expect((try options(&.{ "--here", "--resume", "dustspill" })).here);
     try std.testing.expect((try options(&.{ "--resume", "dustspill", "--here" })).here);
-    for ([_][]const []const u8{ &.{"--here"}, &.{ "--here", "--list" }, &.{ "--resume", "dustspill", "--here", "--here" } }) |invalid| try std.testing.expectError(error.InvalidArguments, options(invalid));
+    try std.testing.expect((try options(&.{"--here"})).here);
+    try std.testing.expect((try options(&.{"--here"})).mode == .create);
+    for ([_][]const []const u8{ &.{ "--here", "--list" }, &.{ "--resume", "dustspill", "--here", "--here" } }) |invalid| try std.testing.expectError(error.InvalidArguments, options(invalid));
     try std.testing.expect(managed(&.{ "--here", "--resume", "dustspill" }));
     try std.testing.expect(!managed(&.{ "--here", "--tui" }));
     try std.testing.expect(managed(&.{}));

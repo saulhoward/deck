@@ -32,7 +32,7 @@ const help =
     \\  deck hub [--port 52800] [--directory STATE]
     \\    Print/reuse or launch the managed local hub Rex session, then exit.
     \\  deck hub --here [--tui | --no-tui] [--port 52800] [--task CHAT_ID] [--message TEXT]
-    \\  deck agent [--hub REX_HOST | --local] [--directory STATE] [--port 52800]
+    \\  deck agent [--here] [--hub REX_HOST | --local] [--directory STATE] [--port 52800]
     \\    Create & open form in local Rex; worker/cwd/terminal stay on this machine.
     \\  deck agent [connection options] --list | --resume NAME [--here] | --drafts
     \\  deck agent [connection options] --recover STARTUP_ID | --discard REQUEST_ID --confirm
@@ -496,7 +496,7 @@ pub fn main(init: std.process.Init) void {
                 error.BootstrapLaunchUnconfirmed => "deck: task-form terminal creation unconfirmed. Inspect saved startup metadata and Rex; do not blindly launch a duplicate.\n",
                 error.ClientAlreadyStarting => "deck: another launcher is starting this connection; wait for it to finish.\n",
                 error.AgentActionUnconfirmed => "deck: agent action not confirmed; no fallback or automatic retry.\n",
-                error.InteractiveTerminalRequired => "deck: --resume --here requires an interactive terminal; no task or Rex terminal opened.\n",
+                error.InteractiveTerminalRequired => "deck: agent --here requires an interactive terminal; no task or Rex terminal opened.\n",
                 else => "deck: agent startup refused; check private client storage, selected hub and Rex authentication/version. No fallback, worker replacement or effect replay.\n",
             };
             std.Io.File.stderr().writeStreamingAll(init.io, message) catch {};

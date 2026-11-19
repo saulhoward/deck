@@ -1709,6 +1709,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     var chat_id: ?[]const u8 = null;
     var allocation_id: ?[]const u8 = null;
     var attach_machine: ?[]const u8 = null;
+    var here_startup: ?[]const u8 = null;
     var worker_socket: ?[]const u8 = null;
     var bootstrap_id: ?[]const u8 = null;
     var client_state: ?[]const u8 = null;
@@ -1716,7 +1717,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--tui")) continue;
         const key = args[i];
-        if (!std.mem.eql(u8, key, "--port") and !std.mem.eql(u8, key, "--task") and !std.mem.eql(u8, key, "--hub-id") and !std.mem.eql(u8, key, "--rex-allocation") and !std.mem.eql(u8, key, "--worker-socket") and !std.mem.eql(u8, key, "--attach-machine") and !std.mem.eql(u8, key, "--agent-bootstrap") and !std.mem.eql(u8, key, "--client-state")) return error.UnsupportedTuiOption;
+        if (!std.mem.eql(u8, key, "--port") and !std.mem.eql(u8, key, "--task") and !std.mem.eql(u8, key, "--hub-id") and !std.mem.eql(u8, key, "--rex-allocation") and !std.mem.eql(u8, key, "--worker-socket") and !std.mem.eql(u8, key, "--attach-machine") and !std.mem.eql(u8, key, "--here-startup") and !std.mem.eql(u8, key, "--agent-bootstrap") and !std.mem.eql(u8, key, "--client-state")) return error.UnsupportedTuiOption;
         i += 1;
         if (i == args.len) return error.MissingOptionValue;
         if (std.mem.eql(u8, key, "--port")) {
@@ -1744,6 +1745,10 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
             if (!wire.validRexUuid(.{ .string = args[i] })) return error.InvalidAllocation;
             bootstrap_id = args[i];
         }
+        if (std.mem.eql(u8, key, "--here-startup")) {
+            if (here_startup != null or !wire.validRexUuid(.{ .string = args[i] })) return error.InvalidArguments;
+            here_startup = args[i];
+        }
         if (std.mem.eql(u8, key, "--attach-machine")) {
             if (attach_machine != null or !wire.validMachineIdentity(.{ .string = args[i] })) return error.InvalidArguments;
             attach_machine = args[i];
@@ -1754,6 +1759,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
         }
         try forwarded.appendSlice(init.gpa, &.{ key, args[i] });
     }
+    if (here_startup != null and (attach_machine == null or bootstrap_id != null)) return error.InvalidAllocation;
     if (attach_machine != null and (allocation_id != null or bootstrap_id != null or hub_id == null or chat_id == null)) return error.InvalidAllocation;
     if (attach_machine != null and !wire.validRexUuid(.{ .string = hub_id.? })) return error.InvalidHub;
     if ((worker_socket != null or bootstrap_id != null) and allocation_id == null and attach_machine == null) return error.InvalidAllocation;

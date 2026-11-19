@@ -181,6 +181,50 @@ for (const { remote, upgrading, live = false, interrupted = false } of [{ remote
     assert.equal(afterHere.items.filter((e: any) => e.kind === "deck.input").length, 2); assert.ok(afterHere.items.some((e: any) => e.data?.text === attachedText));
     if (daemon) assert.deepEqual(await readFile(join(daemon.directory, "rex-connection.json")), connectionAtAttach);
     if (remote) assert.deepEqual(await readFile(join(root, "hub", "rex-workers.json")), registrationAtAttach);
+    const createFlags = remote ? flags : ["--local", "--port", String(port), "--rex", "/definitely-unavailable-rex"];
+    const createHere = async (steps: object[], formOnly = false) => {
+      const driver = spawn("python3", [resolve("scripts/tui-pty-test.py"), deck!, "agent", ...createFlags, "--here"], { cwd: work, env: { ...env, PATH: `${root}/bin:${process.env.PATH}`, ...(formOnly ? { DECK_TEST_FORM_ONLY: "1" } : {}), REX_BLOCK: "block:11111111-1111-4111-8111-111111111111" } });
+      let out = "", err = ""; driver.stdout!.on("data", b => { out += b; }); driver.stderr!.on("data", b => { err += b; });
+      const closed = once(driver, "close"); driver.stdin!.end(JSON.stringify(steps));
+      assert.equal((await closed)[0], 0, err); return JSON.parse(out);
+    };
+    const beforeCreate = await readdir(join(client, "startups"));
+    assert.equal((await createHere([{ wait: "Create a task" }, { wait: "Nothing created" }, { keys: "Cancel without creating" }, { keys: "\u0003" }], true)).restored, true);
+    assert.equal((await hubCommand(port, "list_chats", {}, status.hubId) as any).items.length, 2);
+    assert.equal((await readdir(join(client, "startups"))).filter(n => n.endsWith(".json") && validRexUuid(n.slice(0, -5))).length, 0, "empty cancelled forms leave no blocking index");
+    const hereProblem = "A new agent in this terminal", hereDescription = "Exact optional brief 日本語", hereInput = "Explicit input after here creation";
+    const newHere = await createHere([{ wait: "Create a task" }, { wait: "Nothing created" }, { keys: hereProblem }, { keys: "\r" }, { keys: hereDescription }, { keys: "\r" }, { wait: "Create & attach here" }, { capture: "form" }, { keys: "\r" }, { wait: "Enter to send" }, { capture: "empty" }, { keys: hereInput }, { keys: "\r" }, { wait: "Input admitted" }, { keys: "\u0003" }]);
+    assert.equal(newHere.restored, true); assert.match(newHere.screens.form, /Create & attach here/);
+    const herePage: any = await hubCommand(port, "list_chats", {}, status.hubId);
+    assert.equal(herePage.items.length, 3); const newTask = herePage.items.find((c: any) => c.title === hereProblem); assert.ok(newTask);
+    assert.equal(newTask.machineId, record.machineId); assert.equal(newTask.cwd, work);
+    assert.deepEqual((await hubCommand(port, "status", { chatId: newTask.chatId }, status.hubId) as any).binding.brief, { problem: hereProblem, description: hereDescription });
+    assert.equal((await hubCommand(port, "rex_status", { chatId: newTask.chatId }, status.hubId) as any).status, "unallocated");
+    const hereHistory: any = await hubCommand(port, "history", { chatId: newTask.chatId }, status.hubId);
+    assert.deepEqual(hereHistory.items.filter((e: any) => e.kind === "deck.input").map((e: any) => e.data.text), [hereInput]);
+    assert.equal((await rexJson(localHome, "session", "ls", "--json", "--short=false")).sessions.length, 1, "here creation and cancellation allocate no Rex terminals");
+    const newStarts = (await readdir(join(client, "startups"))).filter(n => validRexUuid(n) && !beforeCreate.includes(n));
+    assert.equal(newStarts.length, 2);
+    const completed = []; for (const id of newStarts) if (await access(join(client, "startups", id, "completed.json")).then(() => true, () => false)) completed.push(id);
+    assert.equal(completed.length, 1); const saved = JSON.parse(await readFile(join(client, "startups", completed[0]!, "here.json"), "utf8"));
+    assert.equal(saved.mode, "here"); assert.equal(saved.binding, undefined); assert.equal(saved.target, undefined);
+    // Crash boundary: task creation is retained, but TUI completion/index
+    // cleanup did not commit. Recovery must use the installed here helper even
+    // when the verified worker's pinned client is a different path/version.
+    const hereDirectory = join(client, "startups", saved.id);
+    await rm(join(hereDirectory, "completed.json"));
+    await writeFile(join(client, "startups", `${saved.id}.json`), JSON.stringify({ version: 1, id: saved.id, hubId: saved.hubId, machineId: saved.machineId }), { mode: 0o600 });
+    const hereForm = await readFile(join(hereDirectory, "form.json"));
+    const recoveredHere = await new Promise<{ out: string; err: string }>((accept, reject) => {
+      execFile(deck!, ["agent", ...flags, "--recover", saved.id, "--confirm"], { cwd: work, env, timeout: 20000 }, (error, out, err) => error ? reject(new Error(err)) : accept({ out, err }));
+    });
+    assert.match(recoveredHere.out, /Creation recovered/); assert.doesNotMatch(recoveredHere.err, /reusing the existing worker/);
+    assert.deepEqual(await readFile(join(hereDirectory, "form.json")), hereForm);
+    assert.equal((await hubCommand(port, "list_chats", {}, status.hubId) as any).items.length, 3);
+    assert.equal((await hubCommand(port, "history", { chatId: newTask.chatId }, status.hubId) as any).items.filter((e: any) => e.kind === "deck.input").length, 1);
+    assert.equal((await readdir(join(client, "startups"))).filter(n => n.endsWith(".json") && validRexUuid(n.slice(0, -5))).length, 0);
+    if (daemon) assert.deepEqual(await readFile(join(daemon.directory, "rex-connection.json")), connectionAtAttach);
+    if (remote) assert.deepEqual(await readFile(join(root, "hub", "rex-workers.json")), registrationAtAttach);
     }
     if (daemon) {
       assert.equal(JSON.parse(await readFile(join(daemon.directory, "rex-connection.json"), "utf8")).pid, daemon.pid);

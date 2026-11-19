@@ -6,7 +6,7 @@ import { launcherCommand, rexLauncherTarget } from "./launcher-client.js";
 import { LauncherDrafts } from "./launcher-drafts.js";
 import { validStatusSnapshot, type LauncherRequest, type LauncherTask, type ChatListPage } from "./generated/contracts.js";
 import { displayText } from "./tui-session.js";
-import { startupIndexes, bootstrapPath, bootstrapRecord, StartupFiles, finishStartup, missing } from "./agent-storage.js";
+import { startupIndexes, bootstrapPath, startupRecord, StartupFiles, finishStartup, missing } from "./agent-storage.js";
 import { AgentWizard, wizardTransport, startupDraft } from "./agent-wizard.js";
 import { DraftStore } from "./drafts.js";
 import { attachedCommand } from "./attached-client.js";
@@ -43,7 +43,7 @@ async function main() {
     return;
   }
   if (action === "drafts") {
-    for (const index of indexes) process.stdout.write(`${index.id} startup (inspect original Rex form, or --recover ID --confirm; no automatic replay)\n`);
+    for (const index of indexes) process.stdout.write(`${index.id} startup (inspect original creation form, or --recover ID --confirm; no automatic replay)\n`);
     for (const draft of await store.list()) process.stdout.write(`${draft.args.requestId} ${draft.command}\n`);
     return;
   }
@@ -54,7 +54,7 @@ async function main() {
     if (index || action === "discard-startup") {
       const id = index?.id ?? value!;
       const files = new StartupFiles(bootstrapPath(root, id));
-      const record = await bootstrapRecord(root, id, false).catch(error => { if (missing(error)) return undefined; throw error; });
+      const record = await startupRecord(root, id).catch(error => { if (missing(error)) return undefined; throw error; });
       if (record && (record.hubId !== hubId || record.machineId !== machineId || record.draftRoot !== root)) throw new Error("Invalid startup scope");
       await files.publish("discarded.json", { version: 1 }).catch(error => { if (!missing(error)) throw error; });
       if (record) {
@@ -69,7 +69,7 @@ async function main() {
   if (action === "recover") {
     const index = indexes.find(index => index.id === value);
     if (!index) throw new Error("Unresolved startup ID not found on this worker");
-    const record = await bootstrapRecord(root, index.id, false);
+    const record = await startupRecord(root, index.id);
     if (record.hubId !== hubId || record.machineId !== machineId || record.draftRoot !== root || record.workerSocket !== remote?.socket || (!remote && record.port !== port)) throw new Error("Invalid startup scope");
     recoveredChat = await new AgentWizard(record, new StartupFiles(bootstrapPath(root, record.id)), wizardTransport(record, new AbortController().signal)).recoverCreation();
   }
