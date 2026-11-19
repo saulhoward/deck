@@ -17,12 +17,19 @@ jobs:
       - uses: cachix/install-nix-action@v31
       - name: Evaluate every advertised platform without cross-system builds
         run: nix flake check --all-systems --no-build
-      - run: nix flake check
+      - run: nix flake check --max-jobs 2 -L
       - run: nix develop -c zig fmt --check build.zig src
-      - run: nix develop -c npm ci --ignore-scripts
-      - run: nix develop -c npm run check
-      - run: nix develop -c zig build
-      - run: DECK_TEST_BINARY="$PWD/zig-out/bin/deck" nix develop -c npm test
+      - name: Exercise Debug supervisor and worker from the checkout
+        run: |
+          # Reuse the exact strict compilation checked by the flake, including
+          # the test-only fixtures (not shipped in the profile's runtime).
+          tests="$(nix build --no-link --print-out-paths .#default.tests)"
+          runtime="$(nix build --no-link --print-out-paths .#default.runtime)"
+          cp -R "$tests/runtime/dist" runtime/dist
+          ln -s "$runtime/node_modules" node_modules
+          nix develop -c zig build -j1 -Dserial=true
+          DECK_TEST_BINARY="$PWD/zig-out/bin/deck" nix develop -c node --test --test-concurrency=1 \
+            runtime/dist/supervisor.test.js runtime/dist/worker.test.js runtime/dist/runtime-failure.test.js
       - name: Smoke-test the default package through a disposable Nix profile
         shell: bash
         run: |

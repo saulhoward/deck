@@ -329,13 +329,13 @@ nix develop path:. -c sh -c '
   zig fmt --check build.zig build.zig.zon src &&
   zig build &&
   zig build test --summary all &&
-  npm run check &&
+  npm run contracts:check &&
   DECK_TEST_BINARY="$PWD/zig-out/bin/deck" npm test
 '
 git diff --check
 ```
 
-`npm run check` verifies generated contracts without rewriting them, then checks TypeScript. `npm test` compiles TypeScript and runs offline tests with four test files at a time. `DECK_TEST_BINARY` enables real Zig supervisor and native-effect tests. Without it, those tests skip. Native test execution is uncached: socket/process tests and opt-in Rex checks depend on the live environment, so an earlier ordinary run cannot substitute for an enabled integration run.
+`npm run check` verifies generated contracts without rewriting them, then checks TypeScript. `npm test` does one strict compile and runs the offline suites. `node scripts/test-runtime.mjs [integration|terminal]` reruns emitted tests without compiling. A short allowlist of audited contract files shares one Node process; new files get process isolation by default. The terminal shard is serial. Other isolated files also default to serial; set `DECK_TEST_CONCURRENCY=2` only on runners with headroom for subprocesses and fixed response deadlines. `DECK_TEST_BINARY` enables real Zig supervisor and native-effect tests. Without it, those tests skip. Native test execution is uncached: socket/process tests and opt-in Rex checks depend on the live environment, so an earlier ordinary run cannot substitute for an enabled integration run.
 
 New-flow integration is opt-in and uses a separately supplied API-14-or-newer Rex binary, private Unix servers and disposable state:
 
@@ -362,7 +362,7 @@ Do not hand-edit `src/generated/contracts.zig` or `runtime/src/generated/contrac
 
 The public installation entry point is `nix profile add github:saulhoward/deck`. Nix selects `packages.<system>.default`; no extra fragment, registry entry or separate installer is needed. The default output is the full `deck`/`deck-worker` package for `aarch64-darwin`, `aarch64-linux` and `x86_64-linux`. The pinned Nixpkgs has dropped `x86_64-darwin`, so that system is not advertised; a successful native Zig cross-build is not evidence that the full Nix closure evaluates there. `#worker` selects the native-only alternative. The lockfile and source allowlist make GitHub builds independent of untracked checkout files. Do not replace the default with the worker-only package or require a development shell at runtime.
 
-CI evaluates all advertised systems with `nix flake check --all-systems --no-build`, builds/checks the runner's native system, and installs the checked-out default package into a disposable `--profile`, checks both executables, and runs `package.test.js` through that profile's `bin/deck`. This complements the derivation's installcheck: it exercises profile symlinks and wrappers, a temporary HOME/cwd, lazy SDK assets, native tools, history and backup/restore without provider calls or global Node on PATH. It does not modify the runner's default profile or start an operator service. For a published-source acceptance check, repeat the profile install with `github:saulhoward/deck` instead of `.`; use `--refresh` when checking a newly pushed default-branch revision.
+CI evaluates all advertised systems with `nix flake check --all-systems --no-build`, builds/checks the runner's native system, and installs the checked-out default package into a disposable `--profile`, checks both executables, and runs `package.test.js` through that profile's `bin/deck`. This complements the derivation's package smoke test: it exercises profile symlinks and wrappers, a temporary HOME/cwd, lazy SDK assets, native tools, history and backup/restore without provider calls or global Node on PATH. It does not modify the runner's default profile or start an operator service. For a published-source acceptance check, repeat the profile install with `github:saulhoward/deck` instead of `.`; use `--refresh` when checking a newly pushed default-branch revision.
 
 ```sh
 nix flake check path:.
@@ -381,7 +381,7 @@ nix develop path:. -c sh -c '
 '
 ```
 
-The Nix build checks contracts, Zig, TypeScript, and runtime behavior. It runs Zig build jobs and runtime test files serially to avoid exhausting small builders' memory; individual integration tests still exercise concurrent workers and cancellation. No test or production deadline is widened. `npm test` keeps its four-file development default. Fault-injection recovery fixtures use explicit test implementation identities, while native startup and compatibility tests still hash actual code and dependencies. Its post-install smoke uses a temporary HOME and cwd, with no global Node on PATH. It tests the packaged runtime, native tools, drafts, history, and backup/restore without provider calls.
+`nix build .` builds the ReleaseSafe binaries and strict compiled runtime and runs the installed-package smoke. `nix build .#worker` needs only the native build. **Use `nix flake check` for the complete gate**: generated contracts, native tests, runtime integration, terminal suite and both packages. On a 2 GiB machine use `--max-jobs 1` to serialize derivations as well as Zig compiler processes. On larger runners Nix can schedule the terminal and integration checks independently. `-L` shows Zig's build summary and elapsed times for each Node suite. Changing a PTY script no longer invalidates the native or TypeScript builds. Emitted tests are in the separate `.#default.tests` output for CI; production has neither fixtures nor TypeScript. Injected-provider fixtures can use explicit implementation identities, while production startup and compatibility tests still hash actual code and dependencies.
 
 The package installs the Zig executable, compiled runtime, complete locked production npm packages, private Node, and Bash. Complete packages preserve lazy SDK imports and assets. It excludes development dependencies and compiled Deck tests. The wrapper sets `DECK_RUNTIME_ROOT` and `DECK_NODE`. Checkout binaries instead use `runtime/dist` relative to cwd and Node on PATH. `serve --runtime PATH` is an explicit development override.
 

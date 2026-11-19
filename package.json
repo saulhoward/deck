@@ -9,7 +9,7 @@
     "contracts:check": "node scripts/generate-contracts.mjs --check",
     "build": "tsc -p runtime/tsconfig.json",
     "check": "npm run contracts:check && tsc -p runtime/tsconfig.json --noEmit",
-    "test": "npm run build && node --test --test-concurrency=4 runtime/dist/*.test.js scripts/*.test.mjs"
+    "test": "npm run build && node scripts/test-runtime.mjs"
   },
   "dependencies": {
     "@earendil-works/chord": "1.4.0",
