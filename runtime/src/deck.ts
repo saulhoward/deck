@@ -201,11 +201,26 @@ export class DeckRuntime {
       });
       // Upgrade Deck conversations before recovered work resumes. Do not create
       // Deck metadata for unmanaged Pi conversations or rewrite history/receipts.
+      // Parents precede children in creation order, so backfilled parent names are
+      // available before deriving a child's prefix. Snapshots stay outside commits.
+      const { assignSubagentName } = await import("./agent-names.js");
       let namesCursor: Cursor | undefined;
       do {
         const page = await harness.commit(tx => tx.scanConversations({ order: "ascending" }, 100, namesCursor), context);
         for (const record of page.items) {
-          if (await harness.snapshot(ChatDoc, record.id, context)) {
+          const saved = await harness.snapshot(ChatDoc, record.id, context);
+          if (!saved) continue;
+          if (saved.kind === "subagent") {
+            const owner = record.owner;
+            if (!owner) continue; // Forged/legacy display hints do not prove ownership.
+            const parent = await harness.snapshot(ChatDoc, owner.conversationId, context);
+            await harness.commit(async tx => {
+              const metadata = await tx.doc(ChatDoc, record.id);
+              if (metadata.parentChatId !== String(owner.conversationId) || metadata.ownerTaskId !== String(owner.taskId)
+                || (await tx.task(owner.taskId))?.conversationId !== owner.conversationId) return;
+              await assignSubagentName(tx, record.id, metadata, parent ?? {});
+            }, context);
+          } else {
             await harness.commit(async tx => assignAgentName(tx, record.id, await tx.doc(ChatDoc, record.id), undefined, record.id === main.id), context);
           }
         }

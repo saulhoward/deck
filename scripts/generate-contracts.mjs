@@ -75,7 +75,7 @@ export function compileSchema(schema) {
     if (node.$ref !== undefined) {
       insist(shapeKeys.length === 1, "reference siblings unsupported"); visit(definitions[target(node.$ref)]);
     } else if (node.anyOf !== undefined) {
-      insist(shapeKeys.length === 1 && Array.isArray(node.anyOf) && node.anyOf.length === 2 && node.anyOf[1]?.type === "null", "only nullable anyOf supported");
+      insist(shapeKeys.length === 1 && Array.isArray(node.anyOf) && ((node.anyOf.length === 2 && node.anyOf[1]?.type === "null") || (node.anyOf.length >= 2 && node.anyOf.length <= 8 && node.anyOf.every(child => child.type === "string"))), "only nullable or bounded string anyOf supported");
       for (const child of node.anyOf) visit(child);
       insist(!nullable(node.anyOf[0]), "nested nullable unsupported");
     } else if (node.oneOf !== undefined) {
@@ -118,12 +118,12 @@ export function compileSchema(schema) {
     walking.delete(node); return id;
   };
   const resolve = (node) => node.$ref ? resolve(definitions[target(node.$ref)]) : node;
-  const nullable = (node) => { const value = resolve(node); return value.type === "null" || value.anyOf !== undefined; };
+  const nullable = (node) => { const value = resolve(node); return value.type === "null" || value.anyOf?.some(child => resolve(child).type === "null") === true; };
   for (const node of Object.values(definitions)) visit(node);
   const fn = (node) => `v${seen.get(node)}`;
   const tsType = (node) => {
     if (node.$ref) return target(node.$ref);
-    if (node.anyOf) return `${tsType(node.anyOf[0])} | null`;
+    if (node.anyOf) return node.anyOf.map(tsType).join(" | ");
     if (node.enum) return node.enum.map(quote).join(" | ");
     if (node.oneOf) return node.oneOf.map(tsType).join(" | ");
     if (node.type === "array") return `(${tsType(node.items)})[]`;
@@ -133,7 +133,7 @@ export function compileSchema(schema) {
   };
   const zigType = (node) => {
     if (node.$ref) return target(node.$ref);
-    if (node.anyOf) return `?${zigType(node.anyOf[0])}`;
+    if (node.anyOf) return nullable(node) ? `?${zigType(node.anyOf[0])}` : "[]const u8";
     if (node.type === "array") return `[]const ${zigType(node.items)}`;
     if (node.enum) return node.enum.every(value => /^[a-z][A-Za-z0-9_]*$/.test(value)) ? `enum { ${node.enum.map((value) => `@${zigQuote(value)}`).join(", ")} }` : "[]const u8";
     if (node.oneOf) return `union(enum) {

@@ -138,3 +138,38 @@ test("pattern subset is anchored, bounded and unambiguous in both languages", ()
   ]);
   for (const pattern of ["uuid", "^x$", "^.*$(?![\\s\\S])", "^[a-z]{0,2}x$(?![\\s\\S])", "^[^x]$(?![\\s\\S])", "^x{4097}$(?![\\s\\S])", "^[z-a]$(?![\\s\\S])"]) assert.throws(() => patternTokens(pattern));
 });
+
+test("bounded string unions preserve nonnullable aliases and canonical child-name guards in TS and Zig", async () => {
+  const probe = { $schema: schema.$schema, $id: "https://deck.invalid/string-union", $ref: "#/$defs/AgentName", $defs: {
+    AgentName: schema.$defs.AgentName,
+    Wrapper: { type: "object", properties: { name: { $ref: "#/$defs/AgentName" } }, required: [], additionalProperties: false },
+  } };
+  const output = compileSchema(probe);
+  const javascript = ts.transpileModule(output.ts, { compilerOptions: { module: ts.ModuleKind.ESNext } }).outputText;
+  const guards = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString("base64")}`);
+  const good = ["wintermute", "parent-initials-v1", "HU001", "DS010", "WW099", "AB100", "XX1000", "AZ" + "9".repeat(62)];
+  const bad = [null, "Wintermute", "HU000", "HU01", "HU0001", "DS0a1", "hu 001", "AB100\n", "AA" + "9".repeat(63)];
+  for (const value of good) assert.equal(guards.validAgentName(value), true, value);
+  for (const value of bad) assert.equal(guards.validAgentName(value), false, String(value));
+  assert.equal(guards.validWrapper({}), true); assert.equal(guards.validWrapper({ name: null }), false);
+  const directory = mkdtempSync(join(tmpdir(), "deck-string-union-"));
+  try {
+    writeFileSync(join(directory, "contracts.zig"), output.zig);
+    const literals = values => values.map(value => JSON.stringify(JSON.stringify(value))).join(", ");
+    writeFileSync(join(directory, "probe.zig"), `const std = @import("std"); const c = @import("contracts.zig");
+      test "canonical child names and optional nonnullable strings" {
+        const a = std.testing.allocator;
+        for ([_][]const u8{${literals(good)}}) |encoded| {
+          const parsed = try c.parseAgentName(a, encoded); defer parsed.deinit();
+        }
+        for ([_][]const u8{${literals(bad)}}) |encoded| {
+          try std.testing.expectError(error.InvalidContract, c.parseAgentName(a, encoded));
+        }
+        const parsed = try c.parseWrapper(a, "{}"); defer parsed.deinit();
+        const encoded = try std.json.Stringify.valueAlloc(a, parsed.value, .{}); defer a.free(encoded);
+        try std.testing.expectEqualStrings("{}", encoded);
+        try std.testing.expectError(error.InvalidContract, c.parseWrapper(a, "{\\\"name\\\":null}"));
+      }`);
+    execFileSync("zig", ["test", "probe.zig"], { cwd: directory, stdio: "pipe", timeout: 60_000 });
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});

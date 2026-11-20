@@ -49,7 +49,8 @@ test("foreground child inherits agent/binding without widening selections, retur
     const item = chats.find((chat) => chat.kind === "subagent")!; assert.ok(item);
     assert.equal(item.parentChatId, String(runtime.main.id)); assert.match(item.ownerTaskId!, /^\d+$/);
     assert.equal(item.machineId, "offline-host"); assert.equal(item.cwd, "/saved");
-    assert.match(item.agentName!, /^[a-z]+$/); assert.equal(item.agentNameAlgorithm, "wintermute-v1");
+    assert.match(item.agentName!, /^HU[0-9]{3,}$/); assert.equal(item.agentNameAlgorithm, "parent-initials-v1"); assert.equal(item.agentRune, undefined);
+    assert.equal(item.title, "Foreground helper"); assert.equal(item.brief?.description, "CHILD_TASK");
     assert.notEqual(item.agentName, chats.find(chat => chat.kind === "main")!.agentName);
     const child = await runtime.chat(item.chatId); const agent = await child.agent(context);
     assert.deepEqual(agent.model, options.model); assert.equal(agent.instructions, "PARENT_INSTRUCTIONS");

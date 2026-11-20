@@ -22,6 +22,7 @@ failed: bool = false,
 hub_id: ?[]const u8 = null,
 chat_id: ?[]const u8 = null,
 hub_chat_id: ?[]const u8 = null,
+inspect_parent_id: ?[]const u8 = null,
 client_mode: wire.TuiClientMode = .hub,
 
 pub fn start(native: Native, a: std.mem.Allocator, args: []const []const u8) !Bridge {
@@ -76,6 +77,7 @@ pub fn deinit(self: *Bridge) void {
     if (self.hub_id) |id| self.a.free(id);
     if (self.chat_id) |id| self.a.free(id);
     if (self.hub_chat_id) |id| self.a.free(id);
+    if (self.inspect_parent_id) |id| self.a.free(id);
 }
 pub fn request(self: *Bridge, action: @FieldType(wire.TuiRequest, "action"), text: ?[]const u8, hold: ?bool) !bool {
     return self.requestConfigured(action, text, hold, null, null, null, null, null);
@@ -145,6 +147,7 @@ pub fn validRequest(value: std.json.Value) bool {
     if (value.object.contains("configuration")) return false;
     if (value.object.get("taskForm")) |form| return std.mem.eql(u8, action, "create") and text == null and @import("task_brief.zig").form(form);
     if (value.object.get("taskTarget")) |target| return std.mem.eql(u8, action, "create") and text == null and validTaskTarget(target);
+    if (std.mem.eql(u8, action, "subagent")) return wire.validAgentNameQuery(text orelse return false);
     if (std.mem.eql(u8, action, "send") or std.mem.eql(u8, action, "create")) {
         const content = text orelse return false;
         return content.string.len <= (if (std.mem.eql(u8, action, "create")) @as(usize, 200) else 16384) and std.mem.trim(u8, content.string, " \t\r\n").len > 0;
@@ -192,7 +195,11 @@ pub fn validReply(value: std.json.Value, expected: []const u8, hub_id: ?[]const 
     if (task_mode and (at_hub or s.object.contains("tasks") or s.object.contains("hosts"))) return false;
     if (s.object.get("hosts")) |hosts| if (!@import("hub.zig").validHosts(hosts)) return false;
     if (s.object.get("brief")) |brief| if (!@import("task_brief.zig").valid(brief)) return false;
-    if (!task_mode and !at_hub and s.object.get("draft").? != .null) return false;
+    const child = if (s.object.get("kind")) |kind| std.mem.eql(u8, kind.string, "subagent") else false;
+    if (((!task_mode and !at_hub) or child) and s.object.get("draft").? != .null) return false;
+    if (s.object.get("inspectParentChatId")) |parent| {
+        if (!safeId(parent) or !child or at_hub or s.object.contains("tasks") or s.object.contains("hosts") or s.object.contains("rex") or (task_mode and std.mem.eql(u8, parent.string, hub_chat.string)) or (std.fmt.parseInt(u64, parent.string, 10) catch return false) >= (std.fmt.parseInt(u64, chat, 10) catch return false)) return false;
+    }
     if (s.object.get("tasks")) |page| {
         var previous: u64 = 0;
         if (page.object.get("after")) |after| {
@@ -241,6 +248,20 @@ pub fn validReply(value: std.json.Value, expected: []const u8, hub_id: ?[]const 
     }
     return true;
 }
+// Inspection is the only task-client navigation exception. Ordinary replies
+// cannot enter/leave it, and every child/sibling retains its original parent.
+fn validNavigation(value: std.json.Value, action: @FieldType(wire.TuiRequest, "action"), chat: ?[]const u8, parent: ?[]const u8) bool {
+    if (!value.object.get("ok").?.bool) return true;
+    const snapshot = value.object.get("snapshot").?;
+    const next = snapshot.object.get("inspectParentChatId");
+    if (action == .subagent) {
+        const expected = parent orelse chat orelse return false;
+        return next != null and std.mem.eql(u8, expected, next.?.string);
+    }
+    if (action == .parent) return parent != null and next == null and std.mem.eql(u8, parent.?, snapshot.object.get("chatId").?.string);
+    if (action == .select) return next == null;
+    return (parent == null and next == null) or (parent != null and next != null and std.mem.eql(u8, parent.?, next.?.string));
+}
 pub fn poll(self: *Bridge) !?std.json.Parsed(wire.TuiResponse) {
     if (self.failed) return null;
     return self.receive() catch |err| {
@@ -276,7 +297,8 @@ fn receive(self: *Bridge) !?std.json.Parsed(wire.TuiResponse) {
     if (!std.unicode.utf8ValidateSlice(body)) return error.InvalidFrame;
     const raw = try std.json.parseFromSlice(std.json.Value, self.a, body, .{});
     defer raw.deinit();
-    if (!validReply(raw.value, pending.id, self.hub_id, if (pending.action == .select) pending.chatId else self.chat_id)) return error.InvalidFrame;
+    if (!validReply(raw.value, pending.id, self.hub_id, if (pending.action == .select) pending.chatId else if (pending.action == .subagent) null else if (pending.action == .parent) self.inspect_parent_id else self.chat_id)) return error.InvalidFrame;
+    if (!validNavigation(raw.value, pending.action, self.chat_id, self.inspect_parent_id)) return error.InvalidFrame;
     // Own all strings: the receive buffer is reused while the UI retains the
     // last valid snapshot. Shape/semantic guards ran on the original bytes above.
     const parsed = try std.json.parseFromSlice(wire.TuiResponse, self.a, body, .{ .allocate = .alloc_always });
@@ -295,11 +317,14 @@ fn receive(self: *Bridge) !?std.json.Parsed(wire.TuiResponse) {
         if (pending.action == .rexInspect and s.rex.?.inspection == null) return error.InvalidFrame;
         if (self.hub_id == null) self.hub_id = try self.a.dupe(u8, s.hubId);
         if (self.hub_chat_id == null) self.hub_chat_id = try self.a.dupe(u8, s.hubChatId);
-        if (self.chat_id == null or pending.action == .select) {
+        if (self.chat_id == null or pending.action == .select or pending.action == .subagent or pending.action == .parent) {
             const next = try self.a.dupe(u8, s.chatId);
             if (self.chat_id) |old| self.a.free(old);
             self.chat_id = next;
         }
+        const parent = if (s.inspectParentChatId) |id| try self.a.dupe(u8, id) else null;
+        if (self.inspect_parent_id) |old| self.a.free(old);
+        self.inspect_parent_id = parent;
     }
     self.input.clearRetainingCapacity();
     self.output.clearRetainingCapacity();
@@ -628,5 +653,27 @@ test "renderer subagent samples validate nested semantics and selected-chat scop
             try std.testing.expectEqual(case.valid, validReply(response, "1", "hub", "2"));
             try std.testing.expectEqual(case.valid, validReply(response, "1", "hub", null));
         }
+    }
+}
+
+test "subagent navigation replies retain parent authority and remain read-only" {
+    const a = std.testing.allocator;
+    const parsed = try std.json.parseFromSlice(std.json.Value, a,
+        \\{"version":1,"id":"1","ok":true,"snapshot":{"clientMode":"task","hubId":"hub","hubChatId":"1","chatId":"3","inspectParentChatId":"2","kind":"subagent","agentName":"WM001","title":"Review","model":"mock","tools":"offline","activityKnown":false,"busy":false,"queued":0,"entries":[],"hasOlder":false,"historical":false,"preview":"","notice":"","draft":null}}
+    , .{});
+    defer parsed.deinit();
+    try std.testing.expect(validReply(parsed.value, "1", "hub", null));
+    try std.testing.expect(validNavigation(parsed.value, .subagent, "2", null));
+    try std.testing.expect(validNavigation(parsed.value, .subagent, "4", "2"));
+    try std.testing.expect(validNavigation(parsed.value, .poll, "3", "2"));
+    try std.testing.expect(!validNavigation(parsed.value, .poll, "2", null));
+    try std.testing.expect(!validNavigation(parsed.value, .subagent, "4", null));
+    try std.testing.expect(!validNavigation(parsed.value, .parent, "3", "2"));
+    for ([_][]const u8{ "wm001", "WM001", "wM001" }) |name| {
+        const bytes = try std.fmt.allocPrint(a, "{{\"version\":1,\"id\":\"a\",\"action\":\"subagent\",\"text\":\"{s}\"}}", .{name});
+        defer a.free(bytes);
+        const request_value = try std.json.parseFromSlice(std.json.Value, a, bytes, .{});
+        defer request_value.deinit();
+        try std.testing.expect(validRequest(request_value.value));
     }
 }

@@ -54,6 +54,8 @@ const help =
     \\:task TITLE           hub only: create task and open Rex
     \\:task-at JSON         hub only: {machineId,cwd,title} target
     \\:select ID :hub       hub only: inspect task / return to hub
+    \\:subagent NAME        read a direct child chat (case-insensitive)
+    \\:parent               return from child inspection
     \\Task clients are Rex-bound and locked; use :rex open to participate.
     \\:rex                  selected task Rex status; i inspect, o open
     \\:rex open             explicit best-effort open; no automatic retry
@@ -398,11 +400,11 @@ fn subagentRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), sample: ?wire.Su
         try list.append(ctx.arena, .{ .text = if (children.hasMore) "Children omitted" else "None", .style = dim });
         return;
     }
-    const overflow = children.hasMore or children.items.len > budget;
-    const count = @min(children.items.len, budget - @intFromBool(overflow));
+    const overflow = children.hasMore or children.items.len > budget / 2;
+    const count = @min(children.items.len, (budget - @intFromBool(overflow)) / 2);
     for (children.items[0..count]) |child| {
         const status = if (child.status) |value| @tagName(value.state) else "unknown";
-        const label = try std.fmt.allocPrint(ctx.arena, "{s} {s}", .{ child.agentRune orelse "·", child.agentName orelse child.title });
+        const label = child.agentName orelse "unnamed";
         const status_width = @min(width, displayWidth(ctx, status));
         const shown = try animatedText(ctx, label, @intCast(width -| (status_width + 1)), null);
         var text: std.ArrayList(u8) = .empty;
@@ -410,6 +412,9 @@ fn subagentRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), sample: ?wire.Su
         try text.appendNTimes(ctx.arena, ' ', width - status_width - displayWidth(ctx, shown));
         try text.appendSlice(ctx.arena, status);
         try list.append(ctx.arena, .{ .text = text.items, .style = dim });
+        // One bounded task line per child, never a detached/truncated pair.
+        const task = child.title[0 .. std.mem.indexOfScalar(u8, child.title, '\n') orelse child.title.len];
+        try list.append(ctx.arena, .{ .text = try animatedText(ctx, task, width, null), .style = dim });
     }
     if (overflow) try list.append(ctx.arena, .{ .text = try std.fmt.allocPrint(ctx.arena, "{d}{s} more", .{ children.items.len - count, if (children.hasMore) "+" else "" }), .style = dim });
 }
@@ -527,7 +532,7 @@ fn sidebarRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), snapshot: ?wire.T
     if (height < 12) return;
     if (height >= 16) {
         try list.append(ctx.arena, .{ .text = if (fresh) "#SUBAGENTS" else "#SUBAGENTS · STALE", .style = Theme.sidebar_heading });
-        try subagentRows(ctx, list, if (snapshot) |s| s.subagents else null, width, @min(6, (height - 14) / 2));
+        try subagentRows(ctx, list, if (snapshot) |s| s.subagents else null, width, @min(12, (height - 14) / 2));
         try list.append(ctx.arena, .{ .style = dim });
     }
     try list.append(ctx.arena, .{ .text = if (online) "#TOOLS" else "#TOOLS · STALE", .style = Theme.sidebar_heading });
@@ -625,6 +630,7 @@ const Model = struct {
         return s.activityKnown and (s.busy or s.queued > 0);
     }
     fn animation(self: *Model, target: Theme.Target) ?Theme.Pulse {
+        if (self.state()) |s| if (s.kind == .subagent) return null;
         if (self.animations.mode == .busy and !self.freshBusy()) return null;
         return self.animations.pulse(target, self.frame);
     }
@@ -632,6 +638,7 @@ const Model = struct {
         return self.animation(.sidebar) != null or self.animation(.problem) != null;
     }
     fn rune(s: wire.TuiSnapshot) []const u8 {
+        if (s.kind == .subagent) return "";
         if (std.mem.eql(u8, s.chatId, s.hubChatId)) return "Δ";
         const value = s.agentRune orelse return "·";
         return if (std.mem.eql(u8, value, "Δ")) "·" else value;
@@ -787,18 +794,18 @@ const Model = struct {
     fn locked(self: *Model) bool {
         if (self.queued_send) return true;
         if (self.state()) |s| if (s.draft != null) return true;
-        if (self.bridge.pending) |p| if (p.action == .send or p.action == .retry or p.action == .discard or p.action == .agentsmd or p.action == .create or p.action == .select) return true;
+        if (self.bridge.pending) |p| if (p.action == .send or p.action == .retry or p.action == .discard or p.action == .agentsmd or p.action == .create or p.action == .select or p.action == .subagent or p.action == .parent) return true;
         return self.uncertain or self.snapshot == null or self.bridge.failed;
     }
     fn transportStatus(self: *Model, now: std.Io.Timestamp) TransportStatus {
         return TransportStatus.observe(if (self.bridge.pending) |p| p.action else null, self.pending_since.durationTo(now), self.command_mode or self.snapshot == null, self.bridge.failed);
     }
     fn readOnly(self: *Model) bool {
-        return if (self.state()) |s| s.clientMode == .hub and !std.mem.eql(u8, s.chatId, s.hubChatId) else false;
+        return if (self.state()) |s| (s.kind == .subagent or s.inspectParentChatId != null or (s.clientMode == .hub and !std.mem.eql(u8, s.chatId, s.hubChatId))) else false;
     }
     fn canWrite(self: *Model) bool {
         if (!self.readOnly()) return true;
-        self.note("Read-only task inspection. :rex open to participate in its Rex session.");
+        self.note(if (self.state().?.kind == .subagent) "Read-only subagent inspection. Use :parent to return." else "Read-only task inspection. :rex open to participate in its Rex session.");
         return false;
     }
     fn canList(self: *Model) bool {
@@ -874,7 +881,9 @@ const Model = struct {
         self.note("Selected model no longer in the hub catalog; choose :model.");
     }
     fn canNavigate(self: *Model) bool {
-        if (!self.canList()) return false;
+        return self.canList() and self.canInspect();
+    }
+    fn canInspect(self: *Model) bool {
         if (self.locked() or (self.settings_uncertain and !self.readOnly())) {
             self.note("Resolve saved requests/settings before switching or creating tasks.");
             return false;
@@ -888,6 +897,14 @@ const Model = struct {
     fn selectChat(self: *Model, id: []const u8) !void {
         if (!self.canNavigate()) return;
         if (try self.bridge.selectChat(id)) self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake) else self.note("Client request in flight; selection not queued.");
+    }
+    fn inspectChild(self: *Model, name: ?[]const u8) !void {
+        if (!self.canInspect()) return;
+        if (name == null and (self.state() == null or self.state().?.inspectParentChatId == null)) {
+            self.note("Not inspecting a subagent. Use :subagent NAME first.");
+            return;
+        }
+        if (try self.bridge.request(if (name != null) .subagent else .parent, name, null)) self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake) else self.note("Client request in flight; inspection not queued.");
     }
     fn taskPage(self: *Model, after: ?[]const u8) !void {
         if (!self.canList()) return;
@@ -1032,6 +1049,11 @@ const Model = struct {
             self.mouse_tracking = !self.mouse_tracking;
             if (self.terminal_status) |status| try status.vx.setMouseMode(status.writer, self.mouse_tracking);
             self.note(if (self.mouse_tracking) "Mouse wheel reporting enabled; use terminal selection override (usually Shift-drag) to copy." else "Terminal mouse selection enabled; drag and use your terminal's Copy action. Ctrl-U/D scrolls history.");
+        } else if (std.mem.eql(u8, cmd, "parent")) try self.inspectChild(null) else if (std.mem.eql(u8, cmd, "subagent")) {
+            self.note("Use :subagent NAME, for example :subagent DS001.");
+        } else if (std.mem.startsWith(u8, cmd, "subagent ")) {
+            const name = std.mem.trim(u8, cmd[9..], " ");
+            if (!wire.validAgentNameQuery(.{ .string = name })) self.note("Use :subagent NAME (case-insensitive).") else try self.inspectChild(name);
         } else if (std.mem.eql(u8, cmd, "tasks")) try self.taskPage(null) else if (std.mem.startsWith(u8, cmd, "task-at ")) try self.createAt(cmd[8..]) else if (std.mem.startsWith(u8, cmd, "task ")) try self.createTask(std.mem.trim(u8, cmd[5..], " "), null) else if (std.mem.startsWith(u8, cmd, "select ")) {
             const id = std.mem.trim(u8, cmd[7..], " ");
             const n = std.fmt.parseInt(u64, id, 10) catch 0;
@@ -1293,13 +1315,14 @@ const Model = struct {
                         response.deinit();
                     } else {
                         const s = response.value.case0.snapshot;
+                        const navigation = action == .select or action == .subagent or action == .parent;
                         const automatic_older = action == .older and self.auto_older;
                         if (automatic_older) try self.acceptOlder(s);
-                        if (action == .select or action == .latest or (action == .older and !automatic_older) or action == .send or action == .retry) self.resetHistory();
-                        if (self.snapshot == null or action == .select) self.animations.attach(self.frame, !std.mem.eql(u8, s.chatId, s.hubChatId));
-                        if (action == .poll or action == .latest or action == .select) self.activity_seen = self.frame;
+                        if (navigation or action == .latest or (action == .older and !automatic_older) or action == .send or action == .retry) self.resetHistory();
+                        if (self.snapshot == null or navigation) self.animations.attach(self.frame, !std.mem.eql(u8, s.chatId, s.hubChatId));
+                        if (action == .poll or action == .latest or navigation) self.activity_seen = self.frame;
                         if (self.terminal_status) |status| if (s.cwd) |cwd| try status.identity(rune(s), cwd);
-                        if (action == .select) {
+                        if (navigation) {
                             self.task_picker = false;
                             self.hosts_view = false;
                             self.brief_view = false;
@@ -1591,7 +1614,7 @@ const Model = struct {
         const shown = transient[0..@min(transient.len, (notice_y + 1) / 2)];
         const chat_h = notice_y - @as(u16, @intCast(shown.len));
         self.chat_height = chat_h;
-        const fallback = if (s == null) (if (self.bridge.failed) "Selected hub connection failed; no local fallback." else if (self.worker_transport) "Connecting to the selected hub via this worker…" else "Connecting to the selected hub…") else if (self.readOnly()) "Read-only inspection · :rex open to participate" else "Enter to send · Esc for Normal mode · :help";
+        const fallback = if (s == null) (if (self.bridge.failed) "Selected hub connection failed; no local fallback." else if (self.worker_transport) "Connecting to the selected hub via this worker…" else "Connecting to the selected hub…") else if (s.?.inspectParentChatId != null) "Read-only subagent · :parent to return" else if (self.readOnly()) "Read-only inspection · :rex open to participate" else "Enter to send · Esc for Normal mode · :help";
         const visible = try self.historyViewport(ctx, layout.body, chat_h, if (shown.len == 0) fallback else "");
         for (visible, 0..) |row, y| {
             if (row.user) for (0..layout.main) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = Theme.user });
@@ -1655,14 +1678,15 @@ const Model = struct {
         const is_hub = if (s) |snap| std.mem.eql(u8, snap.chatId, snap.hubChatId) else false;
         const saved_name = if (is_hub) "hub" else if (s) |snap| snap.agentName orelse "unnamed" else "connecting";
         const symbol = if (s) |snap| rune(snap) else "·";
-        const symbol_width: u16 = @intCast(displayWidth(ctx, symbol) + 1);
+        const symbol_sep: []const u8 = if (symbol.len == 0) "" else " ";
+        const symbol_width: u16 = @intCast(displayWidth(ctx, symbol) + symbol_sep.len);
         const role = if (is_hub) "" else if (s) |snap| (if (snap.kind == .subagent) "subagent" else "agent") else "";
         if (layout.sidebar > 0) {
             for (0..h - 3) |y| @memset(surface.buffer[y * w + layout.main + 1 .. (y + 1) * w], .{ .style = dim });
             for (0..h - 3) |y| surface.writeCell(layout.main, @intCast(y), .{ .char = .{ .grapheme = if (y == upper) "┤" else "│", .width = 1 }, .style = Theme.rule });
             surface.writeCell(layout.main, h - 3, .{ .char = .{ .grapheme = "┴", .width = 1 }, .style = Theme.rule });
             const available = layout.sidebar - 3;
-            const identity = try std.fmt.allocPrint(ctx.arena, "{s} {s}", .{ symbol, try animatedText(ctx, saved_name, available -| symbol_width, self.animation(.sidebar)) });
+            const identity = try std.fmt.allocPrint(ctx.arena, "{s}{s}{s}", .{ symbol, symbol_sep, try animatedText(ctx, saved_name, available -| symbol_width, self.animation(.sidebar)) });
             const identity_x: u16 = @intCast(layout.main + 2 + (available - @min(available, displayWidth(ctx, identity))) / 2);
             const role_x: u16 = @intCast(layout.main + 2 + (available - @min(available, displayWidth(ctx, role))) / 2);
             lineLimit(ctx, surface, identity_x, 2, identity, Theme.orange, null, 0, w - 1);
@@ -1681,7 +1705,7 @@ const Model = struct {
         const problem = if (is_hub) "hub" else if (s) |snap| (if (snap.brief) |brief| brief.problem orelse snap.title else snap.title) else "connecting";
         const problem_line = problem[0 .. std.mem.indexOfScalar(u8, problem, '\n') orelse problem.len];
         const problem_width = (location_x -| 2) -| symbol_width;
-        const task_label = try std.fmt.allocPrint(ctx.arena, "{s} {s}", .{ symbol, try animatedText(ctx, problem_line, problem_width, self.animation(.problem)) });
+        const task_label = try std.fmt.allocPrint(ctx.arena, "{s}{s}{s}", .{ symbol, symbol_sep, try animatedText(ctx, problem_line, problem_width, self.animation(.problem)) });
         lineLimit(ctx, surface, 1, h - 2, task_label, Theme.orange, null, 0, location_x -| 1);
         lineLimit(ctx, surface, location_x, h - 2, shown_location, dim, null, 0, footer_right);
         const status = try std.fmt.allocPrint(ctx.arena, "{s} [{s}]", .{ if (s) |snap| snap.model else "model —", if (self.settings()) |settings_value| @tagName(settings_value.selection.thinkingLevel) else "thinking —" });
@@ -2781,21 +2805,23 @@ test "subagent sidebar rows preserve statuses, unknowns, and explicit overflow w
     fw.DrawContext.init(.unicode);
     const ctx: fw.DrawContext = .{ .arena = a, .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
     const sample: wire.SubagentSnapshot = .{ .chatId = "1", .hasMore = false, .items = &.{
-        .{ .chatId = "6", .title = "Review", .agentName = "wintermute", .agentRune = "ᚠ", .status = .{ .state = .working } },
+        .{ .chatId = "6", .title = "Review", .agentName = "WM001", .agentRune = "ᚠ", .status = .{ .state = .working } },
         .{ .chatId = "5", .title = "Tests", .agentName = "glasscut", .status = .{ .state = .done, .taskId = "10" } },
         .{ .chatId = "4", .title = "Audit", .agentName = "staticdrift", .status = .{ .state = .@"error", .taskId = "11" } },
         .{ .chatId = "3", .title = "Stopped", .status = .{ .state = .idle } },
         .{ .chatId = "2", .title = "Unknown 界 👩🏽‍💻 helper" },
     } };
     var list: std.ArrayList(Row) = .empty;
-    try subagentRows(ctx, &list, sample, 26, 6);
-    try std.testing.expectEqual(5, list.items.len);
-    for (list.items, [_][]const u8{ "working", "done", "error", "idle", "unknown" }) |row, status| {
+    try subagentRows(ctx, &list, sample, 26, 10);
+    try std.testing.expectEqual(10, list.items.len);
+    for ([_][]const u8{ "working", "done", "error", "idle", "unknown" }, 0..) |status, i| {
+        const row = list.items[i * 2];
+        try std.testing.expectEqualStrings(try animatedText(ctx, sample.items[i].title, 26, null), list.items[i * 2 + 1].text);
         try std.testing.expect(std.mem.endsWith(u8, row.text, status));
         try std.testing.expectEqual(26, displayWidth(ctx, row.text));
         try std.testing.expectEqualDeep(dim, row.style);
     }
-    try std.testing.expect(std.mem.startsWith(u8, list.items[0].text, "ᚠ wintermute"));
+    try std.testing.expect(std.mem.startsWith(u8, list.items[0].text, "WM001"));
     try std.testing.expectEqualDeep(dim, list.items[1].style);
     try std.testing.expectEqualDeep(dim, list.items[2].style);
     list.clearRetainingCapacity();
@@ -2803,7 +2829,7 @@ test "subagent sidebar rows preserve statuses, unknowns, and explicit overflow w
     try std.testing.expectEqual(3, list.items.len);
     try std.testing.expect(std.mem.endsWith(u8, list.items[0].text, "working"));
     try std.testing.expectEqualDeep(dim, list.items[0].style);
-    try std.testing.expectEqualStrings("3 more", list.items[2].text);
+    try std.testing.expectEqualStrings("4 more", list.items[2].text);
     list.clearRetainingCapacity();
     var more = sample;
     more.hasMore = true;
@@ -2853,15 +2879,16 @@ test "subagent sidebar coexists with inventory, marks stale samples, and stays b
     try testSidebarPalette(fresh_surface, Theme.Layout.init(140, null));
     const fresh = try testSurfaceText(alloc, fresh_surface);
     try std.testing.expect(std.mem.indexOf(u8, fresh, ":tools") == null);
-    try std.testing.expectEqualStrings("#SUBAGENTS", try testSurfaceRowText(alloc, fresh_surface, 30, 90));
+    try std.testing.expectEqualStrings("#SUBAGENTS", try testSurfaceRowText(alloc, fresh_surface, 29, 90));
+    try std.testing.expectEqualStrings("Review", try testSurfaceRowText(alloc, fresh_surface, 31, 90));
     try std.testing.expectEqualStrings("#TOOLS", try testSurfaceRowText(alloc, fresh_surface, 33, 90));
     try std.testing.expectEqualStrings("Unknown, not an empty tool list.", try testSurfaceRowText(alloc, fresh_surface, 35, 90));
-    for (6..30) |y| try std.testing.expectEqualStrings("", try testSurfaceRowText(alloc, fresh_surface, y, 90));
+    for (6..29) |y| try std.testing.expectEqualStrings("", try testSurfaceRowText(alloc, fresh_surface, y, 90));
     try std.testing.expectEqualStrings("", try testSurfaceRowText(alloc, fresh_surface, 36, 90));
     // A taller terminal adds space above the list, not below it.
     ctx.max.height = 60;
     const taller = try Model.draw(&model, ctx);
-    try std.testing.expectEqualStrings("#SUBAGENTS", try testSurfaceRowText(alloc, taller, 50, 90));
+    try std.testing.expectEqualStrings("#SUBAGENTS", try testSurfaceRowText(alloc, taller, 49, 90));
     try std.testing.expectEqualStrings("Unknown, not an empty tool list.", try testSurfaceRowText(alloc, taller, 55, 90));
     ctx.max.height = 40;
     for ([_][]const u8{ "#SUBAGENTS", "wintermute", "working", "#TOOLS", "Inventory unavailable" }) |text| try std.testing.expect(std.mem.indexOf(u8, fresh, text) != null);

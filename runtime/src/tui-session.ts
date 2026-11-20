@@ -1,3 +1,5 @@
+import { validSubagentViewReply } from "./subagent-view-contracts.js";
+import { validAgentNameQuery } from "./generated/contracts.js";
 // Client-only adapter: shared HTTP validation and existing local drafts, no Pi
 // session, store, execution or replay loop. The renderer owns presentation.
 import { displayText, projectEntry, flattenParts, entryBytes } from "./tui-content.js";
@@ -28,16 +30,21 @@ export function validRequest(value: unknown): value is TuiRequest {
   if (value.action === "configure" ? value.configuration === undefined : value.configuration !== undefined) return false;
   if (value.taskForm !== undefined) return value.action === "create" && value.text === undefined && value.taskTarget === undefined && validForm(value.taskForm);
   if (value.taskTarget !== undefined) return value.action === "create" && value.text === undefined && validTaskTarget(value.taskTarget);
+  if (value.action === "subagent") return validAgentNameQuery(value.text);
   if (value.action === "send" || value.action === "create") return typeof value.text === "string" && value.text.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "").length > 0 && Buffer.byteLength(value.text) <= (value.action === "send" ? 16384 : 200);
   return value.text === undefined;
 }
-export function validReply(value: unknown, id: string, hubId?: string, chatId?: string, action?: TuiRequest["action"], target?: string, after?: string, mode?: TuiClientMode, hubChatId?: string): value is TuiResponse {
+export function validReply(value: unknown, id: string, hubId?: string, chatId?: string, action?: TuiRequest["action"], target?: string, after?: string, mode?: TuiClientMode, hubChatId?: string, inspectParentChatId?: string): value is TuiResponse {
   if (!validTuiResponse(value) || value.id !== id || Buffer.byteLength(JSON.stringify(value)) >= 1024 * 1024) return false;
   if (!value.ok) return true;
   const s = value.snapshot;
   if ((action === "models" || action === "configure") && !s.modelSettings) return false;
-  const expectedChat = action === "select" ? target : chatId;
-  if (action === "select" && !validSafePiId(target)) return false;
+  const expectedChat = action === "select" ? target : action === "parent" ? inspectParentChatId : action === "subagent" ? undefined : chatId;
+  if (action === "parent" && (!inspectParentChatId || s.inspectParentChatId !== undefined)) return false;
+  if (action === "subagent" && s.inspectParentChatId !== (inspectParentChatId ?? chatId)) return false;
+  if (action !== undefined && !["subagent", "parent", "select"].includes(action) && s.inspectParentChatId !== inspectParentChatId) return false;
+  if (s.inspectParentChatId !== undefined && (!validSafePiId(s.inspectParentChatId) || Number(s.inspectParentChatId) >= Number(s.chatId) || s.kind !== "subagent" || s.draft !== null || s.tasks !== undefined || s.hosts !== undefined || s.rex !== undefined || (s.clientMode === "task" && s.inspectParentChatId === s.hubChatId))) return false;
+  if (action === "select" && (!validSafePiId(target) || s.inspectParentChatId !== undefined)) return false;
   if (!validSafePiId(s.chatId) || (hubId !== undefined && hubId !== s.hubId) || (expectedChat !== undefined && expectedChat !== s.chatId)) return false;
   if (!validSafePiId(s.hubChatId) || (mode !== undefined && s.clientMode !== mode) || (hubChatId !== undefined && s.hubChatId !== hubChatId)) return false;
   if (s.clientMode === "task" && (s.chatId === s.hubChatId || s.tasks !== undefined || s.hosts !== undefined || action === "hosts" || action === "select" || action === "tasks" || action === "create")) return false;
@@ -84,7 +91,8 @@ export class TuiSession {
   private attachmentMachine?: string;
   private mode: TuiClientMode = "hub";
   private hubChatId?: string;
-  private participates() { return canParticipate(this.mode, this.chatId, this.hubChatId); }
+  private inspectParentChatId: string | undefined;
+  private participates() { return !this.inspectParentChatId && canParticipate(this.mode, this.chatId, this.hubChatId); }
   private binding?: { machineId: string; cwd: string };
   private settingsUncertain = false;
   private localWorkspace = false;
@@ -118,33 +126,58 @@ export class TuiSession {
     this.startupBlocked = false;
   }
   private async initialize() { if (!this.state) await this.selectChat(this.selected); }
-  private async selectChat(target?: string) {
-    if (this.state) requireNavigation(this.mode);
+  private async selectChat(target?: string, inspectParent?: string, returning = false, resolvedStatus?: any) {
+    if (returning && (target !== this.inspectParentChatId || (this.mode === "task" && target !== this.selected))) throw new Error("Invalid parent return scope");
+    if (this.state && !inspectParent && !returning) requireNavigation(this.mode);
     if (this.active || this.userImport || (this.participates() && this.settingsUncertain)) throw new Error("Resolve saved requests/settings before switching tasks");
-    const status = await this.command("status", target ? { chatId: target } : {}, this.hubId ?? this.expectedHub);
+    const status = resolvedStatus ?? await this.command("status", target ? { chatId: target } : {}, this.hubId ?? this.expectedHub);
     if (status.hubGuard !== 1 || (target && status.chatId !== target) || ((this.hubId ?? this.expectedHub) && status.hubId !== (this.hubId ?? this.expectedHub))) throw new Error("Hub/chat identity guard required; selection unchanged");
     if (this.hubChatId !== undefined && status.mainChatId !== this.hubChatId) throw new Error("Hub chat identity changed; selection unchanged");
-    if (this.attachmentMachine && (status.chatId === status.mainChatId || status.binding?.kind !== "task" || status.binding.machineId !== this.attachmentMachine)) throw new Error("Attached task worker/binding changed; no input enabled");
+    if (!inspectParent && this.attachmentMachine && (status.chatId === status.mainChatId || status.binding?.kind !== "task" || status.binding.machineId !== this.attachmentMachine)) throw new Error("Attached task worker/binding changed; no input enabled");
     const store = this.store ?? new DraftStore(status.hubId, this.draftRoot);
-    const saved = (await store.list()).filter((draft) => draft.chatId === status.chatId);
-    const writable = canParticipate(this.mode, status.chatId, status.mainChatId);
+    const saved = (inspectParent ? [] : await store.list()).filter((draft) => draft.chatId === status.chatId);
+    const writable = !inspectParent && canParticipate(this.mode, status.chatId, status.mainChatId);
     const active = writable && saved[0] ? (await store.load(saved[0].requestId)).request : undefined;
     // Commit the selection only after all fallible reads. No old page, sample,
     // cursor, binding or request can leak into the new chat on a failed switch.
+    this.inspectParentChatId = inspectParent;
     this.hubId = status.hubId; this.chatId = status.chatId; this.hubChatId = status.mainChatId; this.store = store;
     this.active = active; this.activeSaved = !!active; this.before = undefined; this.liveHead = undefined; this.userImport = undefined;
     this.pageLimits = { latest: 80, older: 80 };
     this.binding = status.binding && { machineId: status.binding.machineId, cwd: status.binding.cwd };
-    this.localWorkspace = status.binding?.cwd === process.cwd() && (this.mode === "task" || status.machineId === status.binding?.machineId);
+    this.localWorkspace = !inspectParent && status.binding?.cwd === process.cwd() && (this.mode === "task" || status.machineId === status.binding?.machineId);
     this.gitSampleAt = 0;
-    this.supportsRex = status.rexOpen === 1;
+    this.supportsRex = !inspectParent && status.rexOpen === 1;
     this.supportsBrief = status.taskBrief === 1; this.supportsHosts = status.hostInventory === 1;
     this.supportsStartup = status.rexStartup === 1;
-    this.supportsSettings = status.modelSettings === 1; this.settingsUncertain = this.supportsSettings;
-    const notice = !writable ? `${inspectOnly}${saved.length ? " Saved requests remain untouched; review them in the Rex client." : ""}` : active ? `Saved ${active.kind} ${active.requestId}: ${active.kind === "instructions" && !active.source ? "use --no-tui to retry workspace instructions, or :discard" : ":retry or :discard"}.${saved.length > 1 ? " Other drafts: --no-tui /drafts." : ""}` : "";
-    this.state = { ...(status.binding ? { cwd: displayText(status.binding.cwd, 4096), kind: status.binding.kind, ...(status.binding.agentRune === undefined ? {} : { agentRune: status.binding.agentRune }) } : {}), ...(status.binding?.agentName === undefined ? {} : { agentName: status.binding.agentName }), clientMode: this.mode, hubChatId: this.hubChatId!, hubId: this.hubId!, chatId: this.chatId!, title: this.chatId === this.hubChatId ? "Hub" : displayText(status.binding?.title || `Task ${this.chatId}`, 160), model: displayText(`${status.model?.provider ?? ""}/${status.model?.modelId ?? "unknown model"}`, 160), tools: status.tools, activityKnown: false, busy: false, queued: 0, entries: [], hasOlder: false, historical: false, preview: "", notice, draft: null, ...(status.binding?.brief ? { brief: { ...(status.binding.brief.problem === undefined ? {} : { problem: displayText(status.binding.brief.problem, 2048) }), ...(status.binding.brief.description === undefined ? {} : { description: displayText(status.binding.brief.description, 8192) }) } } : {}) };
+    this.supportsSettings = status.modelSettings === 1; this.settingsUncertain = !inspectParent && this.supportsSettings;
+    const notice = inspectParent ? "Read-only subagent inspection. :parent returns to the parent; :subagent NAME selects a sibling." : !writable ? `${inspectOnly}${saved.length ? " Saved requests remain untouched; review them in the Rex client." : ""}` : active ? `Saved ${active.kind} ${active.requestId}: ${active.kind === "instructions" && !active.source ? "use --no-tui to retry workspace instructions, or :discard" : ":retry or :discard"}.${saved.length > 1 ? " Other drafts: --no-tui /drafts." : ""}` : "";
+    this.state = { ...(inspectParent ? { inspectParentChatId: inspectParent } : {}), ...(status.binding ? { cwd: displayText(status.binding.cwd, 4096), kind: status.binding.kind, ...(status.binding.agentRune === undefined ? {} : { agentRune: status.binding.agentRune }) } : {}), ...(status.binding?.agentName === undefined ? {} : { agentName: status.binding.agentName }), clientMode: this.mode, hubChatId: this.hubChatId!, hubId: this.hubId!, chatId: this.chatId!, title: this.chatId === this.hubChatId ? "Hub" : displayText(status.binding?.title || `Task ${this.chatId}`, 160), model: displayText(`${status.model?.provider ?? ""}/${status.model?.modelId ?? "unknown model"}`, 160), tools: status.tools, activityKnown: false, busy: false, queued: 0, entries: [], hasOlder: false, historical: false, preview: "", notice, draft: null, ...(status.binding?.brief ? { brief: { ...(status.binding.brief.problem === undefined ? {} : { problem: displayText(status.binding.brief.problem, 2048) }), ...(status.binding.brief.description === undefined ? {} : { description: displayText(status.binding.brief.description, 8192) }) } } : {}) };
     this.inventorySampleAt = Date.now();
     this.inventory(status);
+  }
+  private async selectSubagent(name: string) {
+    if (this.active || this.userImport || (this.participates() && this.settingsUncertain)) throw new Error("Resolve saved requests/settings before inspecting subagents");
+    const parent = this.inspectParentChatId ?? this.chatId!;
+    const args = { chatId: parent, name, operation: "status" };
+    const reply = await this.command("subagent_view", args, this.hubId);
+    if (!validSubagentViewReply({ command: "subagent_view", args, hubId: this.hubId }, reply)) throw new Error("Invalid subagent scope; selection unchanged");
+    await this.selectChat(reply.childId, parent, false, reply.result);
+  }
+  private async firstInspectionPage() {
+    if (this.supportsSettings) await this.refreshSettings();
+    const page = await this.history(), rendered = this.renderHistory(page);
+    this.state!.entries = rendered.entries; this.before = rendered.next;
+    this.state!.hasOlder = !!rendered.next;
+    this.sample(page);
+  }
+  private async readView(operation: string, args: Record<string, unknown>): Promise<any> {
+    if (!this.inspectParentChatId) return this.command(operation, args, this.hubId);
+    const { chatId: _child, ...options } = args;
+    const scoped = { chatId: this.inspectParentChatId, childId: this.chatId, operation, options };
+    const reply = await this.command("subagent_view", scoped, this.hubId);
+    if (!validSubagentViewReply({ command: "subagent_view", args: scoped, hubId: this.hubId }, reply)) throw new Error("Invalid subagent read; observation unchanged");
+    return reply.result;
   }
   private inventory(status: any) {
     delete this.state!.toolInventory;
@@ -163,14 +196,14 @@ export class TuiSession {
     delete this.state!.toolInventory;
     this.state!.toolInventoryStatus = "unavailable";
     try {
-      const status = await this.command("status", { chatId: this.chatId }, this.hubId);
+      const status = await this.readView("status", { chatId: this.chatId });
       if (status.hubGuard !== 1 || status.hubId !== this.hubId || status.chatId !== this.chatId || status.mainChatId !== this.hubChatId) return;
       this.inventory(status);
     } catch { /* Observation unavailable; no automatic effect or health probe. */ }
   }
   private async refreshSettings() {
     if (!this.supportsSettings) throw new Error("Hub does not advertise model settings; upgrade it only when idle");
-    const settings = await this.command("model_settings", { chatId: this.chatId }, this.hubId);
+    const settings = await this.readView("model_settings", { chatId: this.chatId });
     if (!validModelSettingsSnapshot(settings) || settings.hubId !== this.hubId || settings.chatId !== this.chatId) throw new Error("Invalid model settings; selection unconfirmed");
     this.state!.modelSettings = settings;
     this.state!.model = displayText(`${settings.selection.provider}/${settings.selection.modelId}`, 160);
@@ -181,7 +214,7 @@ export class TuiSession {
     let limit = this.pageLimits[direction];
     for (;;) {
       try {
-        const page = await this.command("history", { chatId: this.chatId, limit, ...(before ? { before } : {}), includeActivity: true, includeAgentStatus: true, includeSubagents: true, includeProgress: true }, this.hubId);
+        const page = await this.readView("history", { chatId: this.chatId, limit, ...(before ? { before } : {}), includeActivity: true, includeAgentStatus: true, includeSubagents: true, includeProgress: true });
         this.pageLimits[direction] = limit;
         return page;
       }
@@ -291,13 +324,29 @@ export class TuiSession {
   }
   async handle(request: TuiRequest): Promise<TuiSnapshot> {
     if (!validRequest(request)) throw new Error("Invalid renderer request");
+    if (request.action !== "subagent" && request.action !== "parent") return this.handleRequest(request);
+    // These transitions perform reads only. Commit their local selection only
+    // when the entire first view succeeds, not merely the status lookup. A lost
+    // history/settings read must not make the next poll jump behind the renderer.
+    const previous = { ...this, state: this.state ? structuredClone(this.state) : undefined };
+    try { return await this.handleRequest(request); }
+    catch (error) { Object.assign(this, previous); throw error; }
+  }
+  private async handleRequest(request: TuiRequest): Promise<TuiSnapshot> {
+    if (!validRequest(request)) throw new Error("Invalid renderer request");
     if (this.startupBlocked) throw new Error("Rex startup unconfirmed; no input enabled");
     await this.initialize();
     let state = this.state!;
+    if (this.inspectParentChatId && !["poll", "older", "latest", "models", "subagent", "parent", ...(this.mode === "hub" ? ["select"] : [])].includes(request.action)) throw new Error("Read-only subagent inspection; :parent to return");
     if (request.action === "select" || request.action === "tasks" || request.action === "hosts") requireNavigation(this.mode);
     if (request.action === "create") requireCreation(this.mode, this.chatId, this.hubChatId);
     if (["send", "retry", "discard", "stop", "configure", "agentsmd"].includes(request.action)) requireParticipation(this.mode, this.chatId, this.hubChatId);
     switch (request.action) {
+      case "subagent":
+        await this.selectSubagent(request.text!); await this.firstInspectionPage(); state = this.state!; break;
+      case "parent":
+        if (!this.inspectParentChatId) throw new Error("Not inspecting a subagent");
+        await this.selectChat(this.inspectParentChatId, undefined, true); await this.firstInspectionPage(); state = this.state!; break;
       case "select":
         await this.selectChat(request.chatId); state = this.state!; break;
       case "hosts":
@@ -393,8 +442,8 @@ export class TuiSession {
           state.entries = rendered.entries; this.before = rendered.next; state.hasOlder = !!rendered.next; state.historical = false; this.sample(page);
         } else {
           // Keep a scrolled/history window stable; samples never replace it.
-          const activity = await this.command("activity", { chatId: this.chatId, includeAgentStatus: true, includeSubagents: true }, this.hubId);
-          const progress = await this.command("progress", { chatId: this.chatId }, this.hubId);
+          const activity = await this.readView("activity", { chatId: this.chatId, includeAgentStatus: true, includeSubagents: true });
+          const progress = await this.readView("progress", { chatId: this.chatId });
           this.sample({ activity, progress });
         }
         break;

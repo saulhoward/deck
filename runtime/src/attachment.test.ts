@@ -121,7 +121,33 @@ test("current-terminal TUI over real launcher framing retains post-commit lost A
     const admissions = requests.filter(r => r.command === "admit"); assert.equal(admissions.length, 2); assert.deepEqual(admissions[0].args, admissions[1].args);
     assert.equal((await f.runtime.history(f.chatId)).items.filter(e => e.kind === "deck.input").length, 1);
     assert.equal((await f.runtime.terminalStatus(f.chatId)).status, "unallocated");
+    const { namedChildren } = await import("./subagent-view.test.support.js");
+    const child = (await namedChildren(f.runtime, f.chatId))[0]!;
+    const viewed = await session.handle({ version: 1, id: "child", action: "subagent", text: child.name.toLowerCase() });
+    assert.equal(viewed.inspectParentChatId, f.chatId); assert.equal(viewed.clientMode, "task");
+    await action("poll");
+    const returned = await session.handle({ version: 1, id: "parent", action: "parent" });
+    assert.equal(returned.chatId, f.chatId); assert.equal(returned.inspectParentChatId, undefined);
+    assert.ok(requests.every(r => r.args.chatId === f.chatId));
     await assert.rejects(session.handle({ version: 1, id: "nav", action: "select", chatId: String(f.runtime.main.id) }), /locked/);
     assert.equal(requests.some(r => ["rex_startup", "rex_open", "create_task"].includes(r.command)), false);
   } finally { for (const peer of peers) peer.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); await f.close(); }
+});
+
+test("attached task permits only parent-scoped child reads and correlates the nested reply", async () => {
+  const f = await fixture();
+  const { namedChildren } = await import("./subagent-view.test.support.js");
+  try {
+    const child = (await namedChildren(f.runtime, f.chatId))[0]!;
+    const request = f.request("subagent_view", { chatId: f.chatId, name: child.name.toLowerCase(), operation: "status" });
+    assert.ok(validLaunchRequest(request));
+    const response = await f.send(request); assert.ok(validLaunchResponse(response, request, f.runtime.hubId, machine)); assert.ok(response.ok); assert.ok(validLauncherTaskReply(response.result));
+    const inner = JSON.parse(response.result.body); assert.equal(inner.result.childId, child.chatId); assert.equal(inner.result.parentChatId, f.chatId);
+    inner.result.childId = f.chatId;
+    assert.equal(validLaunchResponse({ ...response, result: { ...response.result, body: JSON.stringify(inner) } }, request, f.runtime.hubId, machine), false);
+    assert.equal(validLaunchRequest(f.request("history", { chatId: child.chatId })), false);
+    assert.equal(validLaunchRequest(f.request("subagent_view", { chatId: f.chatId, childId: child.chatId, operation: "stop" })), false);
+    await f.chat.commit(async tx => { (await tx.doc(AgentDoc, f.chat.id)).cwd = "/changed"; }, context);
+    assert.equal((await f.send(request)).ok, false);
+  } finally { await f.close(); }
 });

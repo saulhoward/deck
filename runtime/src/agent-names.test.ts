@@ -3,12 +3,13 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { fauxProvider } from "@earendil-works/pi-ai/providers/faux";
-import { defineDoc, type ConversationId } from "@earendil-works/pi-durable";
+import { fauxProvider, fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { defineDoc, defineDocFamily, type ConversationId } from "@earendil-works/pi-durable";
 import { ChatDoc, DeckRuntime } from "./deck.js";
-import { agentNameAlgorithms, agentRunes, assignAgentName, shuffledNameOrder } from "./agent-names.js";
+import { agentNameAlgorithms, agentRunes, assignAgentName, assignSubagentName, lookupAgentName, shuffledNameOrder, subagentNameAlgorithm, subagentNamePrefix } from "./agent-names.js";
 import { validAgentName, validStatusBinding, validChatListItem, validTuiSnapshot } from "./generated/contracts.js";
 import { dispatch } from "./ipc.js";
 import { TuiSession } from "./tui-session.js";
@@ -44,10 +45,10 @@ test("allocation shuffles the existing bank, with no fixed first name or exclude
   }
 });
 
-async function fixture() {
+async function fixture(native = false) {
   const directory = await mkdtemp(join(tmpdir(), "deck-agent-names-"));
   const faux = fauxProvider(); const models = createModels(); models.setProvider(faux.provider);
-  const options = { implementation: "a".repeat(64), models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: "host", cwd: directory }, environment: () => undefined };
+  const options = { implementation: "a".repeat(64), models, model: { provider: "faux", modelId: "faux-1" }, binding: { machineId: "host", cwd: directory }, environment: () => undefined, ...(native ? { hostFiles: { call: async () => { throw new Error("No native effects expected"); } } } : {}) };
   const path = join(directory, "pi.sqlite"); let runtime = await DeckRuntime.open(path, options);
   return { directory, options, faux, get runtime() { return runtime; },
     restart: async () => { await runtime.close(); runtime = await DeckRuntime.open(path, options); },
@@ -212,5 +213,185 @@ test("TUI receives saved names through status and task pages while assistant rol
     assert.equal(page.tasks!.items.find(item => item.chatId === String(task.id))!.agentName, metadata.agentName);
     const hub = await ui.handle({ version: 1, id: "3", action: "select", chatId: String(f.runtime.main.id) });
     assert.equal(hub.agentRune, "Δ"); assert.equal(hub.agentName, "hub"); assert.notEqual(hub.agentName, snapshot.agentName);
+  } finally { await f.close(); }
+});
+
+test("child prefixes use both frozen compound components, with deterministic hub/legacy fallbacks", () => {
+  for (const [name, expected] of [
+    ["dustspill", "DS"], ["DUSTSPILL", "DS"], ["wintermute", "WM"], ["WinterMute-12", "WM"],
+    ["winterwatch", "WW"], ["winterwire", "WW"], ["hub", "HU"], ["HUB", "HU"],
+    ["legacy-name", "LE"], ["q", "QX"], ["123", "XX"], ["", "XX"],
+  ]) assert.equal(subagentNamePrefix(name), expected);
+  assert.equal(subagentNamePrefix(), "XX");
+  assert.ok(Array.from({ length: 200 }, (_, i) => subagentNamePrefix(v1.candidate(i))).every(prefix => /^[A-Z]{2}$/.test(prefix)));
+});
+
+async function namedParent(f: Awaited<ReturnType<typeof fixture>>, name: string) {
+  return f.runtime.harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: f.options.model, cwd: f.options.binding.cwd }, init: async (tx, id) => {
+    const metadata = await tx.doc(ChatDoc, id);
+    Object.assign(metadata, { kind: "task", title: "Parent", ...f.options.binding });
+    await assignAgentName(tx, id, metadata, { id: v1.id, candidate: () => name });
+  } }, context);
+}
+let delegationRequest = 0;
+async function namedDelegation(f: Awaited<ReturnType<typeof fixture>>, parentId = f.runtime.main.id, title?: string, task = "Full task\n  with exact details") {
+  const requestId = `names-delegation-${++delegationRequest}`;
+  f.faux.setResponses([
+    fauxAssistantMessage(fauxToolCall("subagent", { task, ...(title === undefined ? {} : { title }) }), { stopReason: "toolUse" }),
+    fauxAssistantMessage("Child answer"), fauxAssistantMessage("Parent answer"),
+  ]);
+  const settled = await (await f.runtime.admit(String(parentId), { requestId, text: "Delegate", mode: "followUp" })).wait(context);
+  assert.equal(settled.status, "done");
+  const record = await f.runtime.harness.commit(async tx => (await tx.scanConversations({ ownerConversationId: parentId, order: "descending" }, 1)).items[0], context);
+  assert.ok(record, "delegation must create a canonical Pi-owned child");
+  const metadata = (await f.runtime.harness.snapshot(ChatDoc, record.id, context))!;
+  assert.equal(metadata.kind, "subagent"); assert.equal(metadata.agentRune, undefined);
+  return { record, metadata, requestId };
+}
+
+const ChildCursor = defineDocFamily<{ next: number }, null>({ kind: "deck.subagent-name-cursor", version: 1, scope: "session", family: true, initial: () => ({ next: 1 }), checkpointWhen: () => true });
+const OrdinaryCursor = defineDoc<{ next: number; order?: number[] }>({ kind: "deck.agent-name-cursor", version: 1, scope: "session", initial: () => ({ next: 0 }), checkpointWhen: () => true });
+const TestRuneCursor = defineDoc<{ next: number }>({ kind: "deck.agent-rune-cursor", version: 1, scope: "session", initial: () => ({ next: 0 }), checkpointWhen: () => true });
+
+test("real children get task briefs and initials, share prefix sequences, and consume no ordinary names or runes", async () => {
+  const f = await fixture(true);
+  try {
+    const dust = await namedParent(f, "dustspill"); const winter = await namedParent(f, "wintermute");
+    const watch = await namedParent(f, "winterwatch"); const wire = await namedParent(f, "winterwire");
+    const ordinaryCursor = await f.runtime.harness.snapshot(OrdinaryCursor, context);
+    const runeCursor = await f.runtime.harness.snapshot(TestRuneCursor, context);
+    const hubChild = await namedDelegation(f);
+    const dustChild = await namedDelegation(f, dust.id, "Actual task title");
+    const winterChild = await namedDelegation(f, winter.id);
+    const watchChild = await namedDelegation(f, watch.id); const wireChild = await namedDelegation(f, wire.id);
+    assert.equal(hubChild.metadata.agentName, "HU001"); assert.equal(dustChild.metadata.agentName, "DS001");
+    assert.equal(winterChild.metadata.agentName, "WM001");
+    assert.equal(watchChild.metadata.agentName, "WW001"); assert.equal(wireChild.metadata.agentName, "WW002");
+    assert.equal(dustChild.metadata.agentNameAlgorithm, subagentNameAlgorithm);
+    assert.deepEqual(dustChild.metadata.brief, { problem: "Actual task title", description: "Full task\n  with exact details" });
+    assert.deepEqual(hubChild.metadata.brief, { problem: "Full task", description: "Full task\n  with exact details" });
+    assert.deepEqual(await f.runtime.harness.snapshot(OrdinaryCursor, context), ordinaryCursor);
+    assert.deepEqual(await f.runtime.harness.snapshot(TestRuneCursor, context), runeCursor);
+    // Admission retry reuses the same parent submission/tool task, not a new child.
+    assert.equal((await (await f.runtime.admit(String(dust.id), { requestId: dustChild.requestId, text: "Delegate", mode: "followUp" })).wait(context)).status, "done");
+    assert.equal((await f.runtime.harness.commit(tx => tx.scanConversations({ ownerConversationId: dust.id }, 10), context)).items.length, 1);
+    await f.restart();
+    for (const child of [hubChild, dustChild, winterChild, watchChild, wireChild]) {
+      assert.deepEqual(await f.runtime.harness.snapshot(ChatDoc, child.record.id, context), child.metadata);
+      assert.equal(await lookupAgentName(f.runtime.harness, child.metadata.agentName!.toLowerCase(), context), child.record.id);
+    }
+    assert.equal((await namedDelegation(f, watch.id)).metadata.agentName, "WW003");
+    assert.deepEqual(await f.runtime.harness.snapshot(TestRuneCursor, context), runeCursor);
+  } finally { await f.close(); }
+});
+
+test("child claims are global and case-insensitive, grow beyond 999, and roll back with metadata/cursor", async () => {
+  const f = await fixture(true);
+  try {
+    const dust = await namedParent(f, "dustspill");
+    const reserved = await namedParent(f, "ds001"); // Legacy/future algorithms share the same claim bank.
+    const first = await namedDelegation(f, dust.id);
+    assert.equal(first.metadata.agentName, "DS002");
+    assert.equal(await lookupAgentName(f.runtime.harness, "DS001", context), reserved.id);
+    const cursor = await f.runtime.harness.snapshot(ChildCursor, "DS", context);
+    const runeCursor = await f.runtime.harness.snapshot(TestRuneCursor, context);
+    let rolledBackName: string | undefined;
+    await assert.rejects(f.runtime.harness.commit(async tx => {
+      const metadata = await tx.doc(ChatDoc, first.record.id);
+      delete metadata.agentName; delete metadata.agentNameAlgorithm;
+      await assignSubagentName(tx, first.record.id, metadata, { agentName: "dustspill" });
+      rolledBackName = metadata.agentName;
+      throw new Error("Roll back child identity");
+    }, context), /Roll back child identity/);
+    assert.equal(rolledBackName, "DS003");
+    assert.equal(await lookupAgentName(f.runtime.harness, rolledBackName!, context), undefined);
+    assert.deepEqual(await f.runtime.harness.snapshot(ChildCursor, "DS", context), cursor);
+    assert.deepEqual(await f.runtime.harness.snapshot(ChatDoc, first.record.id, context), first.metadata);
+    assert.equal((await namedDelegation(f, dust.id)).metadata.agentName, rolledBackName);
+    await f.runtime.main.commit(async tx => { (await tx.doc(ChildCursor, "DS", null)).next = 999; }, context);
+    assert.equal((await namedDelegation(f, dust.id)).metadata.agentName, "DS999");
+    const thousand = await namedDelegation(f, dust.id);
+    assert.equal(thousand.metadata.agentName, "DS1000");
+    assert.deepEqual(await f.runtime.harness.snapshot(TestRuneCursor, context), runeCursor);
+    await f.restart();
+    assert.deepEqual(await f.runtime.harness.snapshot(ChatDoc, thousand.record.id, context), thousand.metadata);
+    assert.equal((await namedDelegation(f, dust.id)).metadata.agentName, "DS1001");
+  } finally { await f.close(); }
+});
+
+function nameStorage(path: string) {
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    return db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(row => {
+      const name = String(row.name); assert.match(name, /^[a-z_]+$/);
+      return { name, rows: db.prepare(`SELECT * FROM ${name} ORDER BY rowid`).all() };
+    });
+  } finally { db.close(); }
+}
+
+test("global name lookup is strictly read-only on hits, misses and invalid input", async () => {
+  const f = await fixture(true);
+  try {
+    const parent = await namedParent(f, "dustspill"); const child = await namedDelegation(f, parent.id);
+    const before = nameStorage(join(f.directory, "pi.sqlite"));
+    for (const name of ["hub", "HUB", "Hub"]) assert.equal(await lookupAgentName(f.runtime.harness, name, context), f.runtime.main.id);
+    for (const name of ["dustspill", "DUSTSPILL", "DustSpill"]) assert.equal(await lookupAgentName(f.runtime.harness, name, context), parent.id);
+    for (const name of ["DS001", "ds001", "Ds001"]) assert.equal(await lookupAgentName(f.runtime.harness, name, context), child.record.id);
+    for (const name of ["missing", "ZZ999999", "", " DS001", "DS001\n", "x".repeat(65), "\x1b[31mhub"]) assert.equal(await lookupAgentName(f.runtime.harness, name, context), undefined);
+    assert.deepEqual(nameStorage(join(f.directory, "pi.sqlite")), before);
+  } finally { await f.close(); }
+});
+
+test("startup migrates only coherent Pi-owned children, keeps old claims and ordinary identities, and never uses runes", async () => {
+  const f = await fixture(true);
+  try {
+    const parent = await namedParent(f, "dustspill");
+    const named = await namedDelegation(f, parent.id); const unnamed = await namedDelegation(f, parent.id);
+    const wrongParent = await namedDelegation(f, parent.id); const wrongTask = await namedDelegation(f, parent.id);
+    const unmanaged = await f.runtime.harness.createConversation({ ownership: { kind: "ownerless" } }, context);
+    const forged = await f.runtime.harness.createConversation({ ownership: { kind: "ownerless" }, init: async (tx, id) => {
+      Object.assign(await tx.doc(ChatDoc, id), { kind: "subagent", title: "Forged", ...f.options.binding, parentChatId: String(parent.id), ownerTaskId: String(named.record.owner!.taskId), agentName: "forged-legacy", agentNameAlgorithm: v1.id, agentRune: agentRunes[0] });
+    } }, context);
+    await f.runtime.main.commit(async tx => {
+      const legacy = await tx.doc(ChatDoc, named.record.id);
+      Object.assign(legacy, { agentName: "legacy-child", agentNameAlgorithm: v1.id, agentRune: agentRunes[0] });
+      const missing = await tx.doc(ChatDoc, unnamed.record.id);
+      delete missing.agentName; delete missing.agentNameAlgorithm; missing.agentRune = agentRunes[1]!;
+      const wrong1 = await tx.doc(ChatDoc, wrongParent.record.id);
+      Object.assign(wrong1, { parentChatId: String(f.runtime.main.id), agentName: "wrong-parent", agentNameAlgorithm: v1.id, agentRune: agentRunes[2] });
+      const wrong2 = await tx.doc(ChatDoc, wrongTask.record.id);
+      Object.assign(wrong2, { ownerTaskId: "999999999", agentName: "wrong-task", agentNameAlgorithm: v1.id, agentRune: agentRunes[3] });
+    }, context);
+    const untouched = [f.runtime.main.id, parent.id, wrongParent.record.id, wrongTask.record.id, forged.id];
+    const before = await Promise.all(untouched.map(id => f.runtime.harness.snapshot(ChatDoc, id, context)));
+    const legacyBefore = (await f.runtime.harness.snapshot(ChatDoc, named.record.id, context))!;
+    const history = await f.runtime.history(String(named.record.id));
+    const ordinaryCursor = await f.runtime.harness.snapshot(OrdinaryCursor, context);
+    const runeCursor = await f.runtime.harness.snapshot(TestRuneCursor, context);
+    await f.restart();
+    const migrated = (await f.runtime.harness.snapshot(ChatDoc, named.record.id, context))!;
+    const { agentRune: _rune, ...withoutRune } = legacyBefore;
+    assert.deepEqual(migrated, { ...withoutRune, agentName: "DS005", agentNameAlgorithm: subagentNameAlgorithm });
+    assert.equal((await f.runtime.harness.snapshot(ChatDoc, unnamed.record.id, context))!.agentName, "DS006");
+    assert.equal((await f.runtime.harness.snapshot(ChatDoc, unnamed.record.id, context))!.agentRune, undefined);
+    assert.equal(await lookupAgentName(f.runtime.harness, "LEGACY-CHILD", context), named.record.id);
+    assert.equal(await lookupAgentName(f.runtime.harness, "ds001", context), named.record.id); // Earlier claims are never retired either.
+    assert.equal(await lookupAgentName(f.runtime.harness, "wrong-parent", context), undefined);
+    assert.equal(await lookupAgentName(f.runtime.harness, "forged-legacy", context), undefined);
+    assert.equal(await f.runtime.harness.snapshot(ChatDoc, unmanaged.id, context), undefined);
+    assert.deepEqual(await Promise.all(untouched.map(id => f.runtime.harness.snapshot(ChatDoc, id, context))), before);
+    assert.deepEqual(await f.runtime.history(String(named.record.id)), history);
+    assert.deepEqual(await f.runtime.harness.snapshot(OrdinaryCursor, context), ordinaryCursor);
+    assert.deepEqual(await f.runtime.harness.snapshot(TestRuneCursor, context), runeCursor);
+    // Permanent legacy aliases also block allocation by later ordinary algorithms.
+    let attempts = 0;
+    await f.runtime.harness.createConversation({ ownership: { kind: "ownerless" }, init: async (tx, id) => {
+      const metadata = await tx.doc(ChatDoc, id); Object.assign(metadata, { kind: "task", ...f.options.binding });
+      await assignAgentName(tx, id, metadata, { id: "test-v2", candidate: () => ++attempts === 1 ? "legacy-child" : "new-ordinary" });
+    } }, context);
+    assert.equal(attempts, 2);
+    await f.restart();
+    assert.deepEqual(await f.runtime.harness.snapshot(ChatDoc, named.record.id, context), migrated);
+    assert.equal((await namedDelegation(f, parent.id)).metadata.agentName, "DS007");
   } finally { await f.close(); }
 });

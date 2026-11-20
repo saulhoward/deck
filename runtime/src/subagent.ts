@@ -1,7 +1,7 @@
 import { Type } from "@earendil-works/pi-ai";
 import { configure, defineExtension, defineTool, type EntryRecord, type Extension } from "@earendil-works/pi-durable";
 import { inheritedGrants } from "./mcp-tools.js";
-import { assignAgentName } from "./agent-names.js";
+import { assignSubagentName } from "./agent-names.js";
 import { ChatDoc } from "./chat-doc.js";
 import { instructionHash, InstructionSourceDoc } from "./instruction-import.js";
 
@@ -45,11 +45,12 @@ export function foregroundSubagent(control: Extension): Extension {
           extensions: parent.extensions.filter((selected) => selected.name !== extension.name && selected.name !== control.name),
         });
         const metadata = await tx.doc(ChatDoc, created.id);
+        const title = args.title ?? args.task.trim().split(/\r?\n/, 1)[0]!.slice(0, 120).toWellFormed();
         Object.assign(metadata, {
-          kind: "subagent", title: args.title ?? "Subagent", machineId: binding.machineId, cwd: binding.cwd,
+          kind: "subagent", title, brief: { problem: title, description: args.task }, machineId: binding.machineId, cwd: binding.cwd,
           parentChatId: String(api.conversationId), ownerTaskId: String(api.taskId),
         });
-        await assignAgentName(tx, created.id, metadata);
+        await assignSubagentName(tx, created.id, metadata, binding);
         await inheritedGrants(tx,api.conversationId,created.id);
         if (source && source.sha256 === instructionHash(parent.instructions)) (await tx.doc(InstructionSourceDoc, created.id)).source = source;
         return created.id;

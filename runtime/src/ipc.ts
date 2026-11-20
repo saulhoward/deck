@@ -1,3 +1,5 @@
+import { subagentView } from "./subagent-view.js";
+import { validSubagentViewArgs } from "./subagent-view-contracts.js";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { Readable, Writable } from "node:stream";
 import { ChatDoc } from "./chat-doc.js";
@@ -46,6 +48,10 @@ export async function dispatch(runtime: DeckRuntime, request: Record<string, unk
     case "login_reply": {
       if (!login) throw new DeckError("invalid", "Login unsupported in this mode");
       return login.answer(text(args.loginId, "loginId"), text(args.promptId, "promptId"), text(args.answer, "answer"));
+    }
+    case "subagent_view": {
+      if (request.hubId !== runtime.hubId || !validSubagentViewArgs(args)) throw new DeckError("invalid", "Subagent reads require parent scope, a selector and explicit hub identity");
+      return subagentView(runtime, args, (command, childArgs) => dispatch(runtime, { ...request, command, args: childArgs }, undefined, true));
     }
     case "status": {
       const chat = args.chatId === undefined ? runtime.main : await runtime.chat(text(args.chatId, "chatId"));

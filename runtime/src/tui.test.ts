@@ -51,6 +51,22 @@ async function fixture(withSettings = false, withProgramStatus = false, withStyl
       mcp: [{ profileId: "hub_search", machineId: "a".repeat(32), location: "hub", workspace: "fixed", revision: "c".repeat(64), state: "enabled", tools: [{ name: "search", alias: "mcp_hub_search_alias" }] },
         { profileId: "worker_browser", machineId: "b".repeat(32), location: "worker", workspace: "task", revision: "d".repeat(64), state: "not_granted", tools: [{ name: "browse", alias: "mcp_worker_browser_alias" }] }],
     } } : {}), ...(withStyle ? { machineId: "local", binding: { machineId: "local", cwd: process.cwd(), kind: "main", title: "Hub", agentName: "wintermute", agentNameAlgorithm: "wintermute-v1", agentRune: "Δ" } } : {}), ...(withSettings ? { modelSettings: 1 } : {}), hubId: "tui-test", hubGuard: 1, mainChatId: "1", chatId: "1", provider: "mock", model: { provider: "mock", modelId: "echo" }, tools: "offline" };
+    else if (command === "subagent_view") {
+      assert.equal(args.chatId, "1");
+      const childId = args.childId ?? (args.name.toUpperCase() === "WM001" ? "2" : args.name.toUpperCase() === "WM002" ? "3" : undefined);
+      if (!childId) { response.end(JSON.stringify({ version: 1, id, ok: false, error: { code: "not_found", message: "Subagent not found" } })); return; }
+      const childActivity = { ...activity, chatId: childId, subagents: { chatId: childId, items: [], hasMore: false } };
+      let childResult: unknown;
+      if (args.operation === "status") childResult = { hubId: "tui-test", hubGuard: 1, mainChatId: "1", chatId: childId, provider: "mock", model: { provider: "mock", modelId: "echo" }, tools: "offline", binding: { machineId: "local", cwd: process.cwd(), kind: "subagent", title: "Review implementation", agentName: childId === "2" ? "WM001" : "WM002", agentNameAlgorithm: "subagent-v1", parentChatId: "1", ownerTaskId: "1" } };
+      else if (args.operation === "history") {
+        const newest = args.options?.before ? Number(args.options.before) - 1 : 200;
+        const items = Array.from({ length: Math.min(20, newest) }, (_, i) => ({ id: newest - i, kind: "deck.input", data: { text: `CHILD ${childId} HISTORY ${newest - i}` } }));
+        childResult = { items, ...(items.at(-1)!.id > 1 ? { next: String(items.at(-1)!.id) } : {}), ...(args.options?.includeActivity ? { activity: childActivity } : {}), ...(args.options?.includeProgress ? { progress: { ...progress, chatId: childId } } : {}) };
+      } else if (args.operation === "activity") childResult = childActivity;
+      else if (args.operation === "progress") childResult = { ...progress, chatId: childId };
+      else assert.fail(`Unexpected child operation ${args.operation}`);
+      result = { hubId: "tui-test", parentChatId: "1", childId, operation: args.operation, ...(args.name === undefined ? {} : { name: args.name }), result: childResult };
+    }
     else if (command === "model_settings") result = settingsInvalid ? { ...settings, chatId: "2" } : settings;
     else if (command === "set_model_settings") {
       if (JSON.stringify(args.expected) !== JSON.stringify(settings.selection)) { response.end(JSON.stringify({ version: 1, id, ok: false, error: { code: "conflict", message: "Refresh settings" } })); return; }
@@ -764,21 +780,21 @@ test("real PTY: hub/local MCP inventory, full details and shell caveat remain re
 
 test("real PTY: subagent sidebar updates working/done/error and unknown, reports overflow and stale reads", { skip: !testBinary, timeout: 30_000 }, async () => {
   const f = await fixture(); const screens: Record<string, string> = {};
-  const children: NonNullable<ActivitySnapshot["subagents"]> = { chatId: "1", items: [{ chatId: "2", title: "Review", agentName: "wintermute", agentRune: "ᚠ", status: { state: "working" } }], hasMore: false };
+  const children: NonNullable<ActivitySnapshot["subagents"]> = { chatId: "1", items: [{ chatId: "2", title: "Review", agentName: "WM001", status: { state: "working" } }], hasMore: false };
   // pyte predates joined-emoji widths; keep this sidebar/layout capture ASCII.
   f.plainHistory(); f.subagents({ chatId: "1", items: [], hasMore: false });
   try {
     await pty(f.port, f.local.env, [
       { wait: "mock/echo" }, { resize: [40, 140] }, { wait_row: { row: 30, text: "#SUBAGENTS" } }, { wait_row: { row: 31, text: "None" } },
-      { checkpoint: "working" }, { wait_row: { row: 31, text: "wintermute" } }, { wait_row: { row: 31, text: "working" } }, { capture: "working" },
+      { checkpoint: "working" }, { wait_row: { row: 30, text: "WM001" } }, { wait_row: { row: 30, text: "working" } }, { capture: "working" },
       { keys: "\x1b" }, { keys: ":older\r" }, { wait: "Older history" },
-      { checkpoint: "done" }, { wait_row: { row: 31, text: "done" } }, { capture: "done" },
-      { checkpoint: "error" }, { wait_row: { row: 31, text: "error" } },
-      { checkpoint: "unknown" }, { wait_row: { row: 31, text: "unknown" } },
+      { checkpoint: "done" }, { wait_row: { row: 30, text: "done" } }, { capture: "done" },
+      { checkpoint: "error" }, { wait_row: { row: 30, text: "error" } },
+      { checkpoint: "unknown" }, { wait_row: { row: 30, text: "unknown" } },
       { checkpoint: "overflow" }, { wait: "11+ more" }, { capture: "overflow" },
-      { resize: [24, 112] }, { wait: "12+ more" }, { capture: "small" },
+      { resize: [24, 112] }, { wait: "14+ more" }, { capture: "small" },
       { resize: [40, 140] }, { checkpoint: "unavailable" }, { wait_row: { row: 31, text: "Unavailable" } },
-      { checkpoint: "working" }, { wait_row: { row: 31, text: "wintermute" } },
+      { checkpoint: "working" }, { wait_row: { row: 30, text: "WM001" } },
       { checkpoint: "failRead" }, { wait: "SUBAGENTS · STALE" }, { capture: "stale" },
       { keys: ":q!\r" },
     ], screens, {
@@ -795,9 +811,10 @@ test("real PTY: subagent sidebar updates working/done/error and unknown, reports
     }
     assert.match(screens.done!, /Older history/);
     const sidebar = screens.working!.split("\n").map(row => row.slice(90).trim());
-    assert.equal(sidebar[30], "#SUBAGENTS"); assert.equal(sidebar[33], "#TOOLS");
+    assert.equal(sidebar[29], "#SUBAGENTS"); assert.equal(sidebar[33], "#TOOLS");
+    assert.equal(sidebar[31], "Review");
     assert.equal(sidebar[35], "Unknown, not an empty tool list.");
-    assert.ok(sidebar.slice(6, 30).every(row => row === ""));
+    assert.ok(sidebar.slice(6, 29).every(row => row === ""));
     const small = screens.small!.split("\n").map(row => row.slice(90).trim());
     assert.equal(small[19], "empty tool list.");
     assert.equal(small[20], ""); assert.equal(sidebar[36], "");
@@ -1025,5 +1042,28 @@ test("real PTY: automatic scrollback skips at most four hidden pages per gesture
     for (const screen of Object.values(screens)) assert.deepEqual(promptRegion(screen).prompt, promptRegion(screens.before!).prompt);
     assert.deepEqual(cursors(), ["8", "7", "6", "5", "4", "3", "2", "8"]);
     assert.ok(f.requests.filter(r => r.command === "history").every(r => r.args.limit === 80), "Renderer caching must not enlarge bridge page limits");
+  } finally { await f.close(); }
+});
+
+
+test("real PTY: subagent names open read-only history, paginate, switch siblings and return to parent", { skip: !testBinary, timeout: 30_000 }, async () => {
+  const f = await fixture(); const screens: Record<string, string> = {};
+  f.plainHistory();
+  try {
+    await pty(f.port, f.local.env, [
+      { wait: "line 120" }, { resize: [40, 140] },
+      { keys: "unsent" }, { keys: "\x1b" }, { keys: ":subagent wm001\r" }, { wait: "Unsent prompt preserved" },
+      { keys: "ddi" }, { keys: "\x1b" }, { keys: ":subagent wM001\r" }, { wait: "CHILD 2 HISTORY 200" }, { capture: "child" },
+      { keys: ":send\r" }, { wait: "Read-only" },
+      { keys: ":older\r" }, { wait: "CHILD 2 HISTORY 180" },
+      { keys: ":subagent missing\r" }, { wait: "Subagent not found" },
+      { keys: ":subagent wm002\r" }, { wait: "CHILD 3 HISTORY 200" }, { capture: "sibling" },
+      { keys: ":parent\r" }, { wait: "line 120" }, { capture: "parent" }, { keys: ":q!\r" },
+    ], screens);
+    assert.match(screens.child!, /WM001/); assert.match(screens.child!, /Read-only/);
+    assert.match(screens.sibling!, /WM002/); assert.doesNotMatch(screens.parent!, /CHILD [23] HISTORY/);
+    assert.ok(f.requests.some(r => r.command === "subagent_view" && r.args.name === "wM001"));
+    assert.ok(f.requests.filter(r => r.command === "subagent_view").every(r => r.args.chatId === "1"));
+    assert.ok(f.requests.every(r => ["status", "history", "activity", "progress", "subagent_view"].includes(r.command)));
   } finally { await f.close(); }
 });

@@ -41,11 +41,13 @@ const bootstrap = bootstrapId ? await bootstrapRecord(clientState!, bootstrapId)
 if (bootstrapId && (!bootstrap || bootstrap.hubId !== hubId || bootstrap.claim?.chatId !== chatId || bootstrap.claim?.allocationId !== allocationId || bootstrap.workerSocket !== workerSocket || bootstrap.port !== port)) process.exit(2);
 const here = hereStartup ? await hereRecord(clientState!, hereStartup).catch(() => undefined) : undefined;
 if (hereStartup && (!here || here.hubId !== hubId || here.machineId !== attachMachine || here.workerSocket !== workerSocket || here.port !== port)) process.exit(2);
+// Transport authority never follows the renderer selection into a child.
+const attachedChatId = chatId;
 const session = attachMachine && workerSocket
-  ? new TuiSession((name, args, expected) => attachedCommand({ hubId: hubId!, machineId: attachMachine!, socket: workerSocket! }, chatId!, name, args, expected, abort.signal), chatId, hubId, clientState, port)
+  ? new TuiSession((name, args, expected) => attachedCommand({ hubId: hubId!, machineId: attachMachine!, socket: workerSocket! }, attachedChatId!, name, args, expected, abort.signal), chatId, hubId, clientState, port)
   : scope ? new TuiSession((name, args, expected) => taskCommand(workerSocket!, scope, name, args, expected, abort.signal), chatId, hubId, clientState, port) : localSession(port, chatId, hubId, abort.signal, clientState);
 const mode = allocationId || attachMachine ? "task" : "hub";
-let hubChatId: string | undefined;
+let hubChatId: string | undefined, inspectParentChatId: string | undefined;
 try {
   // Before any renderer snapshot or input: exact allocation-bound historical
   // registration. Failure closes this helper; there is no startup retry loop.
@@ -76,8 +78,8 @@ try {
     catch (error) { response = { version: 1, id: request.id, ok: false, error: displayText(error instanceof Error ? error.message : "Client request failed; outcome unconfirmed", 1024) || "Client request failed" }; }
     if (abort.signal.aborted) break;
     const frame = encodeFrame(response);
-    if (!validReply(JSON.parse(frame.subarray(4).toString("utf8")), request.id, hubId, chatId, request.action, request.chatId, request.after, mode, hubChatId)) break;
-    if (response.ok) { hubId = response.snapshot!.hubId; chatId = response.snapshot!.chatId; hubChatId = response.snapshot!.hubChatId; }
+    if (!validReply(JSON.parse(frame.subarray(4).toString("utf8")), request.id, hubId, chatId, request.action, request.chatId, request.after, mode, hubChatId, inspectParentChatId)) break;
+    if (response.ok) { hubId = response.snapshot!.hubId; chatId = response.snapshot!.chatId; hubChatId = response.snapshot!.hubChatId; inspectParentChatId = response.snapshot!.inspectParentChatId; }
     if (!process.stdout.write(frame)) await once(process.stdout, "drain", { signal: abort.signal });
   }
 } catch { /* No payload diagnostics or mutation replay on renderer loss. */ }

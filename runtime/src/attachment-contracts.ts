@@ -2,7 +2,7 @@
 import { validClientRequest } from "./command-contracts.js";
 import { validSafePiId } from "./mutation-contracts.js";
 import type { RequestEnvelope } from "./generated/contracts.js";
-const allowed = new Set(["status", "history", "activity", "progress", "instruction_status", "model_settings", "set_model_settings", "rex_status", "rex_inspect", "admit", "stop", "import_instructions"]);
+const allowed = new Set(["subagent_view", "status", "history", "activity", "progress", "instruction_status", "model_settings", "set_model_settings", "rex_status", "rex_inspect", "admit", "stop", "import_instructions"]);
 export function attachedRequest(body: string, chatId: string, hubId?: string): RequestEnvelope | undefined {
   try {
     if (!validSafePiId(chatId) || Buffer.byteLength(body) > 128 * 1024) return;

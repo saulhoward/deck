@@ -162,3 +162,41 @@ test("private socket TUI keeps exact draft on lost admission ACK; reconnect is r
     await assert.rejects(taskCommand(f.client.socket, f.scope, "status", { chatId: String(f.runtime.main.id) }, f.runtime.hubId), /not sent/);
   } finally { for (const peer of peers) peer.destroy(); await new Promise<void>(r => server.close(() => r())); await f.close(); }
 });
+
+test("worker task TUI inspects named children through parent-pinned relay, never broadens ordinary chat scope", async () => {
+  const f = await fixture(), peers = new Set<Socket>(), requests: any[] = [];
+  const { namedChildren } = await import("./subagent-view.test.support.js");
+  const children = await namedChildren(f.runtime, f.chatId, 18), child = children[0]!;
+  const other = await f.runtime.createTask("Other parent", { machineId: machine, cwd: "/remote workspace" });
+  const outsider = (await namedChildren(f.runtime, String(other.id)))[0]!;
+  const server = createServer(socket => {
+    peers.add(socket); socket.on("close", () => peers.delete(socket)); socket.on("error", () => {});
+    socket.pipe(new FrameDecoder()).on("data", (frame: any) => {
+      requests.push(JSON.parse(frame.body));
+      void taskClientResponse(f.runtime, machine, f.client, { ...frame, connectionId: "a".repeat(64), id: "b".repeat(64) })
+        .then(body => socket.end(encodeFrame(JSON.parse(body)))).catch(() => socket.destroy());
+    }).on("error", () => socket.destroy());
+  });
+  await new Promise<void>(resolve => server.listen(f.client.socket, resolve)); await chmod(f.client.socket, 0o600);
+  const session = new TuiSession((name, args, hub) => taskCommand(f.client.socket, f.scope, name, args, hub), f.chatId, f.runtime.hubId, join(f.root, "drafts"));
+  const act = (action: import("./generated/contracts.js").TuiRequest["action"], fields = {}) => session.handle({ version: 1, id: randomUUID(), action, ...fields });
+  try {
+    await session.registerStartup(f.scope.allocationId, f.scope.blockId); await act("poll");
+    const view = await act("subagent", { text: child.name.toLowerCase() });
+    assert.equal(view.chatId, child.chatId); assert.equal(view.inspectParentChatId, f.chatId); assert.equal(view.clientMode, "task");
+    await act("poll"); await act("poll", { hold: true }); await act("models");
+    for (const action of ["send", "stop", "rexOpen", "discard", "retry", "agentsmd"] as const) await assert.rejects(act(action, action === "send" ? { text: "forbidden" } : {}), /Read-only/);
+    assert.ok(requests.every(r => r.args.chatId === f.chatId));
+    for (const command of ["status", "history", "activity", "progress", "model_settings", "stop"]) assert.equal((await f.direct(command, { chatId: child.chatId })).ok, false, command);
+    for (const selector of [{ name: outsider.name }, { childId: outsider.chatId }, { childId: String(other.id) }]) assert.equal((await f.direct("subagent_view", { chatId: f.chatId, ...selector, operation: "status" })).ok, false);
+    await assert.rejects(act("subagent", { text: outsider.name }));
+    assert.equal((await act("poll")).chatId, child.chatId);
+    assert.equal((await act("subagent", { text: children[1]!.name })).inspectParentChatId, f.chatId);
+    assert.equal((await act("parent")).chatId, f.chatId);
+    await act("poll");
+    await act("subagent", { text: child.name });
+    await f.open(); // Replacement revokes the parent allocation, including derived reads.
+    await assert.rejects(act("poll")); await assert.rejects(act("parent"));
+    assert.equal(requests.some(r => ["admit", "stop", "set_model_settings", "create_task", "rex_open"].includes(r.command)), false);
+  } finally { for (const peer of peers) peer.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); await f.close(); }
+});

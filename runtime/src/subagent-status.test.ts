@@ -54,7 +54,7 @@ for (const outcome of ["done", "error", "cancel"] as const) {
         assert.equal(validSubagentSnapshot(working), true);
         assert.equal(working.chatId, String(runtime.main.id)); assert.equal(working.hasMore, false); assert.equal(working.items.length, 1);
         const item = working.items[0]!;
-        assert.equal(item.title, "Foreground helper"); assert.match(item.agentName!, /^[a-z]+$/); assert.ok(item.agentRune);
+        assert.equal(item.title, "Foreground helper"); assert.match(item.agentName!, /^HU[0-9]{3,}$/); assert.equal(item.agentRune, undefined);
         assert.deepEqual(item.status, { state: "working" });
         assert.equal((await runtime.activity(String(runtime.main.id))).subagents, undefined);
         assert.equal((await runtime.activity(String(runtime.main.id), true)).subagents, undefined);

@@ -6,9 +6,9 @@ export function failurePolicy(command: string, code = "", source: FailureSource 
   let outcome: FailurePolicy["outcome"] = "unconfirmed";
   let action: FailurePolicy["action"] = "inspect_outcome";
   if (source === "local") { outcome = "not_sent"; action = "fix_request"; }
-  else if (["mcp_catalog", "tool_profiles", "model_settings", "status", "list_chats", "list_hosts", "history", "activity", "progress", "instruction_status", "rex_status", "rex_inspect", "login_status"].includes(command)) {
+  else if (["subagent_view", "mcp_catalog", "tool_profiles", "model_settings", "status", "list_chats", "list_hosts", "history", "activity", "progress", "instruction_status", "rex_status", "rex_inspect", "login_status"].includes(command)) {
     outcome = "read_only";
-    action = command === "history" && source === "remote" && code === "too_large" ? "reduce_page" : "retry_read";
+    action = ["history", "subagent_view"].includes(command) && source === "remote" && code === "too_large" ? "reduce_page" : "retry_read";
   } else if (["admit", "create_task", "create_task_brief", "import_instructions"].includes(command)) {
     action = source === "remote" && ["conflict", "invalid", "settings_changed"].includes(code) ? "review_saved" : "retry_saved";
   } else if (command === "rex_open") action = "inspect_terminal";

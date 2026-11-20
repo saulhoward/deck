@@ -99,6 +99,7 @@ pub fn validCommandArgs(command: []const u8, raw: std.json.Value) bool {
     if (!contracts.validHubCommand(.{ .string = command })) return false;
     const args: std.json.Value = if (raw == .null) .{ .object = .empty } else raw;
     if (!@import("mcp_api.zig").validArgs(command, args) or !model_settings.validArgs(command, args) or !status_login.validArgs(command, args) or !rex_open.validArgs(command, args) or !views.validArgs(command, args)) return false;
+    if (std.mem.eql(u8, command, "subagent_view")) return validSubagentViewArgs(args);
     if (std.mem.eql(u8, command, "list_hosts")) return args == .object and args.object.count() == 0;
     if (std.mem.eql(u8, command, "list_chats")) {
         if (!contracts.validListChatsArgs(args)) return false;
@@ -130,9 +131,94 @@ pub fn validCommandArgs(command: []const u8, raw: std.json.Value) bool {
 pub fn validClientRequest(request: std.json.Value) bool {
     if (!contracts.validRequestEnvelope(request)) return false;
     const command = request.object.get("command").?.string;
-    if ((std.mem.eql(u8, command, "rex_adopt") or std.mem.eql(u8, command, "mcp_catalog") or std.mem.eql(u8, command, "tool_profiles") or std.mem.eql(u8, command, "set_tool_profiles") or std.mem.eql(u8, command, "model_settings") or std.mem.eql(u8, command, "set_model_settings")) and !request.object.contains("hubId")) return false;
+    if ((std.mem.eql(u8, command, "subagent_view") or std.mem.eql(u8, command, "rex_adopt") or std.mem.eql(u8, command, "mcp_catalog") or std.mem.eql(u8, command, "tool_profiles") or std.mem.eql(u8, command, "set_tool_profiles") or std.mem.eql(u8, command, "model_settings") or std.mem.eql(u8, command, "set_model_settings")) and !request.object.contains("hubId")) return false;
     if (request.object.get("hubId")) |hub_id| if (!contracts.validTransportId(hub_id) or !units(hub_id, 200)) return false;
     return validCommandArgs(request.object.get("command").?.string, request.object.get("args") orelse .null);
+}
+// The selector is only a parent-scoped read adapter, never a general command
+// tunnel. Build nested arguments in bounded scratch memory after checking the
+// closed per-operation options; do not mutate the caller's JSON object.
+fn subagentReadArgs(allocator: std.mem.Allocator, args: std.json.Value, child: std.json.Value) !std.json.Value {
+    var nested: std.json.Value = .{ .object = .empty };
+    try nested.object.ensureTotalCapacity(allocator, 9); // chatId + eight history options
+    if (args.object.get("options")) |options| {
+        var it = options.object.iterator();
+        while (it.next()) |entry| nested.object.putAssumeCapacity(entry.key_ptr.*, entry.value_ptr.*);
+    }
+    nested.object.putAssumeCapacity("chatId", child);
+    return nested;
+}
+fn subagentChild(parent: std.json.Value, child: std.json.Value) bool {
+    if (!safePiId(parent) or !safePiId(child)) return false;
+    return (std.fmt.parseInt(u64, child.string, 10) catch return false) > (std.fmt.parseInt(u64, parent.string, 10) catch return false);
+}
+fn validSubagentViewArgs(args: std.json.Value) bool {
+    if (!contracts.validSubagentViewArgs(args) or !safePiId(args.object.get("chatId").?)) return false;
+    const name = args.object.get("name");
+    const child = args.object.get("childId");
+    if ((name == null) == (child == null)) return false;
+    if (child) |id| if (!subagentChild(args.object.get("chatId").?, id)) return false;
+    const operation = args.object.get("operation").?.string;
+    const keys: []const []const u8 = if (std.mem.eql(u8, operation, "history"))
+        &.{ "limit", "before", "after", "includeActivity", "includeAgentStatus", "includeSubagents", "includeProgress", "includeInstructions" }
+    else if (std.mem.eql(u8, operation, "activity"))
+        &.{ "includeAgentStatus", "includeSubagents" }
+    else
+        &.{};
+    if (args.object.get("options")) |options| {
+        if (options != .object) return false;
+        for (options.object.keys()) |key| {
+            var allowed = false;
+            for (keys) |candidate| if (std.mem.eql(u8, key, candidate)) {
+                allowed = true;
+                break;
+            };
+            if (!allowed) return false;
+        }
+    }
+    var buffer: [2048]u8 = undefined;
+    var scratch = std.heap.FixedBufferAllocator.init(&buffer);
+    const nested = subagentReadArgs(scratch.allocator(), args, child orelse .{ .string = "1" }) catch return false;
+    // The generated operation enum excludes subagent_view itself and all effects.
+    return validCommandArgs(operation, nested);
+}
+fn validSubagentViewReply(args: std.json.Value, expected_hub: ?std.json.Value, value: std.json.Value) bool {
+    if (!validSubagentViewArgs(args) or !contracts.validSubagentViewReply(value)) return false;
+    const hub = expected_hub orelse return false;
+    if (!contracts.validTransportId(hub) or !std.mem.eql(u8, hub.string, value.object.get("hubId").?.string) or
+        !std.mem.eql(u8, args.object.get("chatId").?.string, value.object.get("parentChatId").?.string) or
+        !std.mem.eql(u8, args.object.get("operation").?.string, value.object.get("operation").?.string)) return false;
+    const child = value.object.get("childId").?;
+    if (!subagentChild(args.object.get("chatId").?, child)) return false;
+    if (args.object.get("childId")) |id| if (!std.mem.eql(u8, child.string, id.string)) return false;
+    const query = args.object.get("name");
+    const echoed = value.object.get("name");
+    if ((query == null) != (echoed == null)) return false;
+    if (query) |name| if (!std.mem.eql(u8, name.string, echoed.?.string)) return false;
+    // Match the TS adapter's compact-result cap even for in-process callers.
+    var size = std.Io.Writer.Discarding.init(&.{});
+    std.json.Stringify.value(value, .{}, &size.writer) catch return false;
+    if (size.fullCount() >= max_frame) return false;
+    var buffer: [2048]u8 = undefined;
+    var scratch = std.heap.FixedBufferAllocator.init(&buffer);
+    const nested = subagentReadArgs(scratch.allocator(), args, child) catch return false;
+    const operation = args.object.get("operation").?.string;
+    const result = value.object.get("result").?;
+    if (std.mem.eql(u8, operation, "status")) {
+        if (!contracts.validStatusSnapshot(result) or result.object.contains("activity")) return false;
+        const binding = result.object.get("binding") orelse return false;
+        const kind = binding.object.get("kind") orelse return false;
+        if (!std.mem.eql(u8, kind.string, "subagent")) return false;
+        const parent = binding.object.get("parentChatId") orelse return false;
+        if (!std.mem.eql(u8, parent.string, args.object.get("chatId").?.string) or !safePiId(binding.object.get("ownerTaskId") orelse return false)) return false;
+    }
+    return (!std.mem.eql(u8, operation, "history") or validHistoryReply(nested, result)) and
+        status_login.validReply(operation, nested, hub, result) and
+        views.validReply(operation, nested, result) and
+        model_settings.validReply(operation, nested, hub, result);
+}
+test {
+    _ = @import("subagent_view_test.zig");
 }
 pub fn validCreationAck(args: std.json.Value, result: std.json.Value, with_brief: bool) bool {
     if (!validCommandArgs(if (with_brief) "create_task_brief" else "create_task", args) or !contracts.validCreateTaskAck(result) or !safePiId(result.object.get("chatId").?)) return false;
@@ -278,6 +364,7 @@ pub fn validReply(request: std.json.Value, reply: std.json.Value) bool {
     const args = request.object.get("args") orelse .null;
     if (!validClientRequest(request)) return false;
     const result = reply.object.get("result").?;
+    if (std.mem.eql(u8, command, "subagent_view")) return validSubagentViewReply(args, request.object.get("hubId"), result);
     if (!@import("mcp_api.zig").validReply(command, args, result)) return false;
     if (!model_settings.validReply(command, args, request.object.get("hubId"), result)) return false;
     if (!status_login.validReply(command, args, request.object.get("hubId"), result)) return false;
@@ -355,6 +442,15 @@ fn handle(io: std.Io, allocator: std.mem.Allocator, connection: std.Io.net.Strea
         try request.respond("Invalid command envelope", .{ .status = .bad_request, .keep_alive = false });
         return;
     }
+    // Derived reads require their explicit hub/parent scope and closed read-only
+    // operation before reaching the private runtime. Preserve correlated command
+    // errors (rather than turning invalid args into fatal transport failures).
+    if (std.mem.eql(u8, parsed.value.object.get("command").?.string, "subagent_view") and !validClientRequest(parsed.value)) {
+        const invalid = try std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = parsed.value.object.get("id").?.string, .ok = false, .@"error" = .{ .code = "invalid", .message = "Invalid subagent view request" } }, .{});
+        defer allocator.free(invalid);
+        try request.respond(invalid, .{ .keep_alive = false, .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }} });
+        return;
+    }
     const response = exchange(io, allocator, child, body, pipe_io.now(io) + exchange_budget_ms) catch |err| switch (err) {
         error.RuntimeTimeout => return error.RuntimeTimeout,
         else => return error.RuntimeFailed, // Never reuse a partially exchanged stream.
@@ -391,4 +487,89 @@ pub fn serve(io: std.Io, allocator: std.mem.Allocator, child: *std.process.Child
             else => {}, // A malformed/disconnected client must not stop the writer.
         };
     }
+}
+
+test "HTTP subagent reads validate scope before forwarding and fence corrupt nested replies" {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    const fixtures = try std.json.parseFromSlice(std.json.Value, a, @embedFile("subagent_view.test.json"), .{});
+    defer fixtures.deinit();
+    const names = [_][]const u8{
+        "status reply",                          "history reply",                           "activity reply",                     "progress reply",                                "model_settings reply",
+        "status query preserves exact spelling", "status name must echo exact query",       "status binding ownerTaskId",         "status binding requires kind",                  "nested history duplicate entry",
+        "activity nested agentStatus",           "progress generation requires run",        "nested models duplicate model keys", "wrong child history activity",                  "explicit hub required",
+        "not a read operation stop",             "not a read operation set_model_settings", "not a read operation subagent_view", "status forbidden options {\"chatId\": \"11\"}",
+    };
+    var checked: usize = 0;
+    for (fixtures.value.array.items) |fixture| {
+        const name = fixture.object.get("name").?.string;
+        var selected = false;
+        for (names) |candidate| if (std.mem.eql(u8, name, candidate)) {
+            selected = true;
+            break;
+        };
+        if (!selected) continue;
+        checked += 1;
+        const value = fixture.object.get("request").?;
+        const payload = try std.json.Stringify.valueAlloc(a, value, .{});
+        defer a.free(payload);
+        // This deliberately untrusted writer responds even to malformed requests
+        // if forwarded. A correlated invalid error therefore proves the
+        // native guard refused the request before sending any private frame.
+        const reply = try std.json.Stringify.valueAlloc(a, fixture.object.get("reply") orelse .null, .{});
+        defer a.free(reply);
+        var bytes: [4]u8 = undefined;
+        std.mem.writeInt(u32, &bytes, @intCast(reply.len), .big);
+        const header = try std.fmt.allocPrint(a, "\\0{o:0>3}\\0{o:0>3}\\0{o:0>3}\\0{o:0>3}", .{ bytes[0], bytes[1], bytes[2], bytes[3] });
+        defer a.free(header);
+        var child = try std.process.spawn(io, .{ .argv = &.{ "sh", "-c", "dd bs=1 count=4 of=/dev/null 2>/dev/null; printf 'read\\n' >&2; printf '%b' \"$1\"; printf '%s' \"$2\"; kill -STOP $$", "fixture", header, reply }, .stdin = .pipe, .stdout = .pipe, .stderr = .pipe });
+        defer {
+            if (child.id) |pid| {
+                std.posix.kill(pid, .KILL) catch {};
+                _ = child.wait(io) catch {};
+            }
+            Native.closeStreams(io, &child);
+        }
+        try pipe_io.nonblock(child.stdin.?.handle, true);
+        try pipe_io.nonblock(child.stdout.?.handle, true);
+        try pipe_io.nonblock(child.stderr.?.handle, true);
+        var listener = try (try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0)).listen(io, .{});
+        defer listener.deinit(io);
+        const port = listener.socket.address.getPort();
+        const client = try listener.socket.address.connect(io, .{ .mode = .stream });
+        defer client.close(io);
+        const accepted = try listener.accept(io);
+        var write_buffer: [4096]u8 = undefined;
+        var writer = client.writer(io, &write_buffer);
+        try writer.interface.print("POST /v1/command HTTP/1.1\r\nHost: 127.0.0.1:{d}\r\nContent-Length: {d}\r\nConnection: close\r\n\r\n{s}", .{ port, payload.len, payload });
+        try writer.interface.flush();
+        const args_valid = validClientRequest(value);
+        if (args_valid and !fixture.object.get("valid").?.bool) {
+            try std.testing.expectError(error.InvalidFrame, handle(io, a, accepted, &child, port));
+        } else try handle(io, a, accepted, &child, port);
+        var read_buffer: [4096]u8 = undefined;
+        var reader = client.reader(io, &read_buffer);
+        const response = try reader.interface.allocRemaining(a, .limited(8192));
+        defer a.free(response);
+        if (args_valid and !fixture.object.get("valid").?.bool) {
+            try std.testing.expectEqual(@as(usize, 0), response.len);
+        } else {
+            try std.testing.expect(std.mem.startsWith(u8, response, "HTTP/1.1 200"));
+            const start = (std.mem.indexOf(u8, response, "\r\n\r\n") orelse return error.NoHttpBody) + 4;
+            const parsed = try std.json.parseFromSlice(std.json.Value, a, response[start..], .{});
+            defer parsed.deinit();
+            try std.testing.expect(validReply(value, parsed.value));
+            try std.testing.expectEqual(args_valid, parsed.value.object.get("ok").?.bool);
+        }
+        var log: [64]u8 = undefined;
+        const count = std.c.read(child.stderr.?.handle, &log, log.len);
+        if (args_valid) {
+            try std.testing.expectEqual(@as(isize, 5), count);
+            try std.testing.expectEqualStrings("read\n", log[0..5]);
+        } else {
+            try std.testing.expectEqual(@as(isize, -1), count);
+            try std.testing.expectEqual(std.posix.E.AGAIN, std.c.errno(count));
+        }
+    }
+    try std.testing.expectEqual(names.len, checked);
 }

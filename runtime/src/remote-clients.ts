@@ -16,7 +16,7 @@ import { validSafePiId } from "./mutation-contracts.js";
 import { validRexAllocationPlan, type TaskRelayFrame, type WorkerRexClient, type ResponseEnvelope } from "./generated/contracts.js";
 import { FrameDecoder, encodeFrame } from "./protocol.js";
 import { responseFrame } from "./responses.js";
-const allowed = new Set(["status", "history", "activity", "progress", "instruction_status", "model_settings", "set_model_settings", "rex_status", "rex_inspect", "rex_startup", "admit", "stop", "import_instructions"]);
+const allowed = new Set(["subagent_view", "status", "history", "activity", "progress", "instruction_status", "model_settings", "set_model_settings", "rex_status", "rex_inspect", "rex_startup", "admit", "stop", "import_instructions"]);
 // rex_open is deliberately hub-controlled: replacement revokes the old client's
 // allocation. A terminal cannot manufacture another terminal's authority.
 export async function taskClientResponse(runtime: DeckRuntime, machineId: string, client: WorkerRexClient, frame: TaskRelayFrame, previousClients: readonly WorkerRexClient[] = []): Promise<string> {

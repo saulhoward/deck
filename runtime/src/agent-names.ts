@@ -1,5 +1,6 @@
 import { randomInt } from "node:crypto";
-import { defineDoc, defineDocFamily, type ConversationId, type Tx } from "@earendil-works/pi-durable";
+import type { Context } from "@earendil-works/chord/context";
+import { defineDoc, defineDocFamily, type ConversationId, type DocumentReader, type Tx } from "@earendil-works/pi-durable";
 import { validAgentName, validAgentRune, type AgentRune } from "./generated/contracts.js";
 
 export type AgentNameMetadata = { agentName?: string; agentNameAlgorithm?: string; agentRune?: AgentRune };
@@ -73,7 +74,7 @@ export async function assignAgentName(tx: Tx, chatId: ConversationId, metadata: 
   await assignRune(tx, metadata, hub);
   if (metadata.agentName !== undefined || metadata.agentNameAlgorithm !== undefined) {
     if (!validAgentName(metadata.agentName) || !validAgentName(metadata.agentNameAlgorithm)) throw new Error("Invalid saved agent name/version");
-    if ((await tx.doc(NameClaim, metadata.agentName, chatId)).chatId !== chatId) throw new Error("Agent name already belongs to another conversation");
+    if ((await tx.doc(NameClaim, metadata.agentName.toLowerCase(), chatId)).chatId !== chatId) throw new Error("Agent name already belongs to another conversation");
     if (!hub) return;
   }
   if (hub) {
@@ -96,11 +97,74 @@ export async function assignAgentName(tx: Tx, chatId: ConversationId, metadata: 
     cursor.next++;
     const name = algorithm.candidate(ordinal);
     if (!validAgentName(name)) throw new Error("Invalid generated agent name");
-    const claim = await tx.doc(NameClaim, name, chatId);
+    const claim = await tx.doc(NameClaim, name.toLowerCase(), chatId);
     if (claim.chatId !== chatId) continue;
     metadata.agentName = name;
     metadata.agentNameAlgorithm = algorithm.id;
     return;
   }
   throw new Error("Agent-name collision budget exhausted");
+}
+
+// Frozen child-v1 prefix rule. Recognize the two wintermute-v1 components,
+// including cycle suffixes. Hub is HU. Unknown/legacy names use their first two
+// ASCII letters (one letter is padded with X; missing/no letters becomes XX).
+// This fallback is deterministic, not a claim of knowing legacy word boundaries.
+export function subagentNamePrefix(parentName?: string): string {
+  const name = (parentName ?? "").toLowerCase();
+  if (name === "hub") return "HU";
+  const base = name.replace(/-[0-9]+$/, "");
+  for (const first of firstV1) for (const second of secondV1) {
+    if (base === first + second) return (first[0]! + second[0]!).toUpperCase();
+  }
+  return name.replace(/[^a-z]/g, "").slice(0, 2).toUpperCase().padEnd(2, "X");
+}
+
+export const subagentNameAlgorithm = "parent-initials-v1";
+const SubagentNameCursor = defineDocFamily<{ next: number }, null>({
+  kind: "deck.subagent-name-cursor", version: 1, scope: "session", family: true,
+  initial: () => ({ next: 1 }), checkpointWhen: () => true,
+});
+
+// Prefix-wide, NOT per-parent: winterwatch and winterwire share WW001, WW002,
+// etc. All algorithms share the permanent, case-folded NameClaim namespace.
+// The separate cursor never consumes compound names or runes. Minimum width is
+// three digits, not a modulus: XX999 is followed by XX1000. Creation/migration
+// and all reservations must be committed atomically with the child metadata.
+// Callers must establish canonical Pi ownership, never trust Deck display hints.
+export async function assignSubagentName(tx: Tx, chatId: ConversationId, metadata: AgentNameMetadata, parent: AgentNameMetadata): Promise<void> {
+  if (metadata.agentName !== undefined || metadata.agentNameAlgorithm !== undefined) {
+    const childIdentity = metadata.agentNameAlgorithm === subagentNameAlgorithm;
+    if (typeof metadata.agentName !== "string" || !validAgentName(metadata.agentNameAlgorithm)
+      || (childIdentity ? !/^[A-Z]{2}(?:00[1-9]|0[1-9][0-9]|[1-9][0-9]{2,})$/.test(metadata.agentName) : !validAgentName(metadata.agentName))) throw new Error("Invalid saved agent name/version");
+    if ((await tx.doc(NameClaim, metadata.agentName.toLowerCase(), chatId)).chatId !== chatId) throw new Error("Agent name already belongs to another conversation");
+    if (childIdentity) {
+      delete metadata.agentRune;
+      return; // Never recompute a saved name, even if its parent was renamed.
+    }
+  }
+  const prefix = subagentNamePrefix(parent.agentName);
+  const cursor = await tx.doc(SubagentNameCursor, prefix, null);
+  for (let attempt = 0; attempt < 1024; attempt++) {
+    if (!Number.isSafeInteger(cursor.next) || cursor.next < 1 || cursor.next >= Number.MAX_SAFE_INTEGER) throw new Error("Subagent-name sequence exhausted");
+    const name = prefix + String(cursor.next++).padStart(3, "0");
+    const claim = await tx.doc(NameClaim, name.toLowerCase(), chatId);
+    if (claim.chatId !== chatId) continue;
+    metadata.agentName = name;
+    metadata.agentNameAlgorithm = subagentNameAlgorithm;
+    delete metadata.agentRune;
+    return;
+  }
+  throw new Error("Subagent-name collision budget exhausted");
+}
+
+// Read-only global lookup, including permanent historical aliases. Call outside
+// a commit (snapshot must not nest commits). No cursor/claim/doc is initialized
+// on a miss, and no conversation is created. The caller can inspect the returned
+// conversation's current metadata/ownership before exposing or acting on it.
+export async function lookupAgentName(read: Pick<DocumentReader, "snapshot">, name: string, context: Context): Promise<ConversationId | undefined> {
+  const key = name.toLowerCase();
+  if (!validAgentName(key)) return undefined;
+  const claim = await read.snapshot(NameClaim, key, context);
+  return claim?.chatId as ConversationId | undefined;
 }
