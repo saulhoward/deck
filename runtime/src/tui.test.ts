@@ -96,7 +96,7 @@ async function fixture(withSettings = false, withProgramStatus = false, withStyl
   const session = new TuiSession((name, args, expected) => hubCommand(address.port, name, args, expected), undefined, undefined, local.env.DECK_CLIENT_STATE_DIRECTORY);
   let sequence = 0;
   const action = (action: TuiRequest["action"], text?: string, hold?: boolean, configuration?: ModelSettingsChange) => session.handle({ version: 1, id: String(++sequence), action, ...(text !== undefined ? { text } : {}), ...(hold !== undefined ? { hold } : {}), ...(configuration ? { configuration } : {}) });
-  return { local, requests, port: address.port, action, holdNext, plainHistory: () => { plainHistory = true; }, subagents: (value: ActivitySnapshot["subagents"]) => { if (value === undefined) delete activity.subagents; else activity.subagents = value; }, settingsLoss: (value: boolean) => { settingsLoss = value; }, settingsInvalid: (value: boolean) => { settingsInvalid = value; }, loss: (value: boolean) => { loss = value; }, malformed: (value: boolean) => { malformed = value; }, oversized: () => { oversized = true; }, hang: () => { hang = true; }, close: async () => { for (const reply of pendingGates) reply.resolve("fail"); server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); await local.close(); } };
+  return { local, requests, port: address.port, action, holdNext, newest: (id: number) => { history.newest = id; }, runningTools: (names: string[]) => { activity.tools = names.map((name, i) => ({ callId: String(i + 1), name, status: "running", nested: false })); }, plainHistory: () => { plainHistory = true; }, subagents: (value: ActivitySnapshot["subagents"]) => { if (value === undefined) delete activity.subagents; else activity.subagents = value; }, settingsLoss: (value: boolean) => { settingsLoss = value; }, settingsInvalid: (value: boolean) => { settingsInvalid = value; }, loss: (value: boolean) => { loss = value; }, malformed: (value: boolean) => { malformed = value; }, oversized: () => { oversized = true; }, hang: () => { hang = true; }, close: async () => { for (const reply of pendingGates) reply.resolve("fail"); server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); await local.close(); } };
 }
 
 test("TUI adapter holds bounded canonical pages, samples independently, reduces only validated too-large reads", async () => {
@@ -679,13 +679,13 @@ test("real PTY: SGR wheel scrolls in Insert and chat focus, keeps the prompt, an
       { keys: up.repeat(4) }, { wait: scrolled }, { capture: "chatUp" },
       { keys: down.repeat(4) }, { capture: "chatDown" },
       { keys: ":older" }, { wait: "client idle" }, { keys: "\r" }, { wait: historical }, { wait: "line 100" }, { capture: "older" },
-      { keys: up }, { keys: down.repeat(30) }, { capture: "olderBottom" },
+      { keys: up }, { keys: down.repeat(30) }, { wait: "line 120" }, { capture: "olderBottom" },
       { keys: ":latest" }, { wait: "client idle" }, { keys: "\r" }, { wait: "line 120" }, { capture: "returned" },
       { keys: "\x13" }, { wait: "Input admitted" }, { keys: ":q\r" },
     ], screens);
     for (const name of ["insertUp", "overPrompt", "chatUp"]) assertScrollNotice(screens[name]!, scrolled);
-    for (const name of ["older", "olderBottom"]) assertScrollNotice(screens[name]!, historical);
-    for (const name of ["latest", "insertDown", "chatDown", "returned"]) assert.doesNotMatch(screens[name]!, /Scrolled up|Older history/);
+    assertScrollNotice(screens.older!, historical);
+    for (const name of ["latest", "insertDown", "chatDown", "olderBottom", "returned"]) assert.doesNotMatch(screens[name]!, /Scrolled up|Older history|Returning to latest/);
     // pyte does not fully emulate ZWJ emoji repainting. Compare the retained
     // message IDs and their row positions, not its rendering of those clusters.
     const chat = (name: string) => {
@@ -833,10 +833,10 @@ function scrollbackChat(screen: string) {
 const scrollbackUp = "\x1b[<64;4;6M", scrollbackDown = "\x1b[<65;4;6M";
 const olderNotice = "Older history · :latest to return", loadingOlder = "Loading older history…";
 
-test("real PTY: automatic scrollback deduplicates slow wheel bursts, anchors cached pages and resets on :latest", { skip: !testBinary, timeout: 20_000 }, async () => {
+test("real PTY: automatic scrollback deduplicates slow wheel bursts, anchors cached pages and returns live at the bottom", { skip: !testBinary, timeout: 20_000 }, async () => {
   const f = await fixture(), screens: Record<string, string> = {}; f.plainHistory();
   const olderReads = () => f.requests.filter(r => r.command === "history" && r.args.before);
-  let held = f.holdNext("older");
+  let held = f.holdNext("older"), live: ReturnType<typeof f.holdNext>;
   try {
     await pty(f.port, f.local.env, [
       { wait: "line 120" }, { keys: "keep exact scrollback prompt" }, { capture: "latest" },
@@ -844,29 +844,31 @@ test("real PTY: automatic scrollback deduplicates slow wheel bursts, anchors cac
       { checkpoint: "entered" }, { wait: loadingOlder }, { capture: "loading" },
       { keys: scrollbackUp.repeat(60) }, { capture: "burst" }, { checkpoint: "release" },
       { wait: olderNotice }, { capture: "loaded" },
-      // Crossing back into the retained newest page must not require a read.
-      { keys: scrollbackDown.repeat(60) }, { wait: "line 120" }, { capture: "cachedBottom" },
-      { keys: "\x1b" }, { keys: ":latest" }, { wait: "client idle" }, { keys: "\r" },
-      // The bottom already shows line 120; use request-slot readiness, not
-      // unchanged screen text, to acknowledge that :latest actually finished.
+      // Keep the cached bottom visible while one fresh latest read restores live mode.
+      { checkpoint: "hold live" }, { keys: scrollbackDown.repeat(60) }, { wait: "Returning to latest…" }, { capture: "cachedBottom" },
+      { checkpoint: "return live" }, { keys: "\x1b" },
+      // Slot readiness acknowledges the read; unchanged cached text cannot.
       { keys: ":" }, { wait: "client idle" }, { keys: "\x1b" }, { wait: "line 120" }, { capture: "reset" }, { checkpoint: "hold again" },
       { keys: scrollbackUp.repeat(60) }, { wait: "line 101" }, { wait: loadingOlder }, { capture: "resetTop" },
       { checkpoint: "release again" }, { wait: olderNotice }, { keys: ":q!\r" },
     ], screens, {
       entered: async () => { assert.equal((await held.entered).args.before, "101"); },
       release: () => { assert.equal(olderReads().length, 1); held.release(); },
+      "hold live": () => { live = f.holdNext("history"); },
+      "return live": async () => { assert.equal((await live.entered).args.before, undefined); live.release(); },
       "hold again": () => { assert.equal(olderReads().length, 1); held = f.holdNext("older"); },
       "release again": async () => { assert.equal((await held.entered).args.before, "101"); held.release(); },
     });
     assert.doesNotMatch(screens.early!, /Loading older history/);
     for (const name of ["loading", "burst", "loaded", "resetTop"]) assert.deepEqual(scrollbackChat(screens[name]!), scrollbackChat(screens.early!), name);
     assertScrollNotice(screens.loading!, loadingOlder); assertScrollNotice(screens.loaded!, olderNotice);
+    assertScrollNotice(screens.cachedBottom!, "Returning to latest…");
     // Live mode has one extra chat row; the cached bottom retains the exact
     // bottom 32 rows, shifted upward only by the dedicated history notice.
     const latest = promptRegion(screens.latest!);
     assert.deepEqual(scrollbackChat(screens.cachedBottom!), latest.rows.slice(1, latest.upper - 1));
     assert.deepEqual(scrollbackChat(screens.reset!), scrollbackChat(screens.latest!));
-    assert.doesNotMatch(screens.reset!, /Older history|Scrolled up|Loading older/);
+    assert.doesNotMatch(screens.reset!, /Older history|Scrolled up|Loading older|Returning to latest/);
     for (const screen of Object.values(screens)) assert.deepEqual(promptRegion(screen).prompt, latest.prompt);
     assert.deepEqual(olderReads().map(r => r.args.before), ["101", "101"]);
     assert.ok(f.requests.every(r => ["status", "history", "activity", "progress"].includes(r.command)));
@@ -1056,14 +1058,138 @@ test("real PTY: subagent names open read-only history, paginate, switch siblings
       { keys: "ddi" }, { keys: "\x1b" }, { keys: ":subagent wM001\r" }, { wait: "CHILD 2 HISTORY 200" }, { capture: "child" },
       { keys: ":send\r" }, { wait: "Read-only" },
       { keys: ":older\r" }, { wait: "CHILD 2 HISTORY 180" },
+      { keys: "\x1b[6~" }, { wait: "CHILD 2 HISTORY 200" }, { capture: "childLive" },
       { keys: ":subagent missing\r" }, { wait: "Subagent not found" },
       { keys: ":subagent wm002\r" }, { wait: "CHILD 3 HISTORY 200" }, { capture: "sibling" },
       { keys: ":parent\r" }, { wait: "line 120" }, { capture: "parent" }, { keys: ":q!\r" },
     ], screens);
     assert.match(screens.child!, /WM001/); assert.match(screens.child!, /Read-only/);
+    assert.match(screens.childLive!, /WM001/); assert.match(screens.childLive!, /Read-only/);
+    assert.doesNotMatch(screens.childLive!, /Older history|Returning to latest/);
+    const olderIndex = f.requests.findIndex(r => r.command === "subagent_view" && r.args.operation === "history" && r.args.options?.before);
+    assert.ok(olderIndex >= 0);
+    assert.ok(f.requests.slice(olderIndex + 1).some(r => r.command === "subagent_view" && r.args.childId === "2" && r.args.operation === "history" && !r.args.options?.before));
     assert.match(screens.sibling!, /WM002/); assert.doesNotMatch(screens.parent!, /CHILD [23] HISTORY/);
     assert.ok(f.requests.some(r => r.command === "subagent_view" && r.args.name === "wM001"));
     assert.ok(f.requests.filter(r => r.command === "subagent_view").every(r => r.args.chatId === "1"));
     assert.ok(f.requests.every(r => ["status", "history", "activity", "progress", "subagent_view"].includes(r.command)));
+  } finally { await f.close(); }
+});
+
+
+test("real PTY: working subagent names and active tools flicker grey-green without changing text or sending input", { skip: !testBinary, timeout: 20_000 }, async () => {
+  const f = await fixture(false, false, false, true); const screens: Record<string, string> = {};
+  f.plainHistory();
+  f.subagents({ chatId: "1", items: [
+    { chatId: "3", agentName: "DS001", title: "Review implementation", status: { state: "working" } },
+    { chatId: "2", agentName: "DS002", title: "Completed review", status: { state: "done", taskId: "10" } },
+  ], hasMore: false });
+  f.runningTools(["bash", "mcp_hub_search_alias", "mcp_worker_browser_alias"]);
+  try {
+    const output = await pty(f.port, f.local.env, [
+      { wait: "mock/echo" }, { resize: [40, 140] }, { wait: "DS001" }, { wait: "hub_search/search" },
+      { keys: "keep exact prompt" }, { sleep: 2.6 }, { capture: "active" },
+      { keys: "\x1b" }, { keys: ":q!\r" },
+    ], screens);
+    for (const label of ["DS001", "worker · bash", "hub_search/search"]) {
+      assert.deepEqual(textColors(output, label), new Set(["153,255,228", "160,160,160"]), label);
+    }
+    for (const label of ["DS002", "Review implementation", "Completed review", "working"]) {
+      assert.deepEqual(textColors(output, label), new Set(["160,160,160"]), label);
+    }
+    // More updates than startup/resize/poll can produce: the idle parent has no
+    // rune animation, so active sidebar color changes must drive their own redraws.
+    assert.ok((output.match(/DS001/g) ?? []).length >= 8);
+    assert.match(screens.active!, /DS001/); assert.match(screens.active!, /Review implementation/);
+    assert.match(screens.active!, /keep exact prompt/); assert.doesNotMatch(screens.active!, /worker_browser\/browse/);
+    assert.ok(f.requests.every(r => ["status", "history", "activity", "progress"].includes(r.command)));
+  } finally { await f.close(); }
+});
+
+
+test("input admission notice clears on the next successful live or held refresh, not on failed reads or unrelated notices", async () => {
+  const f = await fixture(false, true);
+  try {
+    await f.action("poll");
+    const admitted = "Input admitted; completion not yet confirmed";
+    for (const action of ["poll", "latest"] as const) {
+      assert.equal((await f.action("send", "new input")).notice, admitted);
+      const refreshed = await f.action(action);
+      assert.equal(refreshed.notice, ""); assert.equal(refreshed.busy, true); // Dismissal is not a completion claim.
+    }
+    assert.equal((await f.action("send", "held input")).notice, admitted);
+    assert.equal((await f.action("poll", undefined, true)).notice, "");
+    assert.equal((await f.action("send", "before failed read")).notice, admitted);
+    const held = f.holdNext("history"), failed = f.action("poll");
+    const rejected = assert.rejects(failed, /Delayed fixture read failed/);
+    await held.entered; held.release("fail"); await rejected;
+    // A non-live older page cannot infer completion or dismiss the acknowledgement.
+    assert.equal((await f.action("older")).notice, admitted);
+    assert.equal((await f.action("latest")).notice, "");
+    const stopped = (await f.action("stop")).notice;
+    assert.match(stopped, /Stop requested/);
+    assert.equal((await f.action("poll")).notice, stopped);
+    assert.equal(f.requests.filter(r => r.command === "admit").length, 4);
+  } finally { await f.close(); }
+});
+
+test("real PTY: admission acknowledgement disappears after a successful refresh without claiming completion", { skip: !testBinary, timeout: 20_000 }, async () => {
+  const f = await fixture(); const screens: Record<string, string> = {};
+  try {
+    await pty(f.port, f.local.env, [
+      { wait: "line 120" }, { keys: "once only" }, { keys: "\r" }, { wait: "Input admitted" }, { capture: "admitted" },
+      { checkpoint: "refreshed" }, { keys: "\x1b" }, { keys: ":" }, { wait: "client idle" }, { keys: "\x1b" }, { capture: "live" },
+      { keys: ":q\r" },
+    ], screens, { refreshed: async () => { const read = f.holdNext("history"); await read.entered; read.release(); } });
+    assert.match(screens.admitted!, /Input admitted; completion not yet confirmed/);
+    assert.doesNotMatch(screens.live!, /Input admitted|completion not yet confirmed/);
+    assert.equal(f.requests.filter(r => r.command === "admit").length, 1);
+  } finally { await f.close(); }
+});
+
+
+for (const manual of [false, true]) test(`real PTY: bottom intent waits for an in-flight ${manual ? "manual" : "automatic"} older read, then follows newly arriving messages`, { skip: !testBinary, timeout: 20_000 }, async () => {
+  const f = await fixture(); const screens: Record<string, string> = {}; f.plainHistory();
+  const older = f.holdNext("older"); let latest: ReturnType<typeof f.holdNext>;
+  try {
+    await pty(f.port, f.local.env, [
+      { wait: "line 120" }, { keys: "keep bottom prompt" },
+      ...(manual ? [{ keys: "\x1b" }, { keys: ":older\r" }] : [{ keys: scrollbackUp.repeat(60) }]), { checkpoint: "older entered" },
+      { keys: scrollbackDown.repeat(60) }, { wait: "Returning to latest…" }, { checkpoint: "finish older" },
+      { checkpoint: "finish latest" }, { wait: "line 121" }, { capture: "live" },
+      { checkpoint: "new message" }, { wait: "line 122" }, { capture: "following" }, { keys: "\x1b" }, { keys: ":q!\r" },
+    ], screens, {
+      "older entered": async () => { await older.entered; f.newest(121); latest = f.holdNext("history"); },
+      "finish older": () => { assert.equal(f.requests.filter(r => r.command === "history").length, 2); older.release(); },
+      "finish latest": async () => { assert.equal((await latest.entered).args.before, undefined); latest.release(); },
+      "new message": () => { f.newest(122); },
+    });
+    for (const screen of Object.values(screens)) {
+      assert.doesNotMatch(screen, /Older history|Scrolled up|Returning to latest|Loading older/);
+      assert.match(screen, /keep bottom prompt/);
+    }
+    assert.equal(f.requests.filter(r => r.command === "history" && r.args.before).length, 1);
+    assert.ok(f.requests.every(r => ["status", "history", "activity", "progress"].includes(r.command)));
+  } finally { await f.close(); }
+});
+
+test("real PTY: Page Down at a manual older page returns live; a failed latest read requires fresh downward intent", { skip: !testBinary, timeout: 20_000 }, async () => {
+  const f = await fixture(); const screens: Record<string, string> = {}; f.plainHistory();
+  let latest: ReturnType<typeof f.holdNext>; let attempts = 0;
+  try {
+    await pty(f.port, f.local.env, [
+      { wait: "line 120" }, { keys: "keep manual prompt" }, { keys: "\x1b" }, { keys: ":older\r" }, { wait: "line 100" },
+      { checkpoint: "hold latest" }, { keys: "\x1b[6~" }, { wait: "Returning to latest…" }, { checkpoint: "fail latest" },
+      { wait: "Delayed fixture read failed" }, { capture: "failed" }, { checkpoint: "no retry" },
+      { keys: "\x1b[6~" }, { wait: "line 121" }, { capture: "live" }, { keys: ":q!\r" },
+    ], screens, {
+      "hold latest": () => { latest = f.holdNext("history"); },
+      "fail latest": async () => { assert.equal((await latest.entered).args.before, undefined); attempts = f.requests.filter(r => r.command === "history").length; latest.release("fail"); },
+      "no retry": async () => { const poll = f.holdNext("activity"); await poll.entered; assert.equal(f.requests.filter(r => r.command === "history").length, attempts); f.newest(121); poll.release(); },
+    });
+    assert.match(screens.failed!, /line 100/); assert.match(screens.failed!, /keep manual prompt/);
+    assert.doesNotMatch(screens.live!, /Older history|Scrolled up|Returning to latest|Delayed fixture read failed/);
+    assert.match(screens.live!, /keep manual prompt/);
+    assert.ok(f.requests.every(r => ["status", "history", "activity", "progress"].includes(r.command)));
   } finally { await f.close(); }
 });

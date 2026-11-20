@@ -5,11 +5,23 @@ pub const base: vaxis.Style = .{ .fg = .{ .rgb = .{ 255, 255, 255 } }, .bg = .{ 
 // Muted dark-blue message panel, keeping Vesper's near-black contrast.
 pub const user: vaxis.Style = .{ .fg = base.fg, .bg = .{ .rgb = .{ 24, 32, 48 } } };
 pub const dim: vaxis.Style = .{ .fg = .{ .rgb = .{ 160, 160, 160 } }, .bg = base.bg };
-// Sidebar headings stay neutral; orange identifies the agent and green marks active tools.
+// Sidebar headings stay neutral; orange identifies the agent and green marks active work.
 pub const sidebar_heading: vaxis.Style = .{ .fg = .{ .rgb = .{ 176, 176, 176 } }, .bg = base.bg };
 pub const rule: vaxis.Style = .{ .fg = .{ .rgb = .{ 80, 80, 80 } }, .bg = base.bg };
 pub const green: vaxis.Style = .{ .fg = .{ .rgb = .{ 153, 255, 228 } }, .bg = base.bg };
 pub const orange: vaxis.Style = .{ .fg = .{ .rgb = .{ 255, 199, 153 } }, .bg = base.bg };
+// Quake/Carmack lightstyle: one sample every 100ms, looping on the existing
+// monotonic 50ms clock. This changes color only, never text or work state.
+const activity_pattern = "mmamammmmammamamaaamammma";
+fn activityLevel(frame: u64) u8 {
+    return activity_pattern[(frame / 2) % activity_pattern.len];
+}
+pub fn activityStyle(frame: u64) vaxis.Style {
+    return if (activityLevel(frame) == 'm') green else dim;
+}
+pub fn activityChanged(previous: u64, current: u64) bool {
+    return activityLevel(previous) != activityLevel(current);
+}
 pub const Layout = struct {
     main: u16,
     sidebar: u16,
@@ -168,4 +180,20 @@ test "reveal order is a seeded permutation, not a left-to-right pass" {
     try std.testing.expectEqualSlices(usize, &ranks, &again);
     revealRanks(&again, 43);
     try std.testing.expect(!std.mem.eql(usize, &ranks, &again));
+}
+
+test "Carmack activity lightstyle samples exact grey-green pattern at 10 FPS" {
+    const expected = "mmamammmmammamamaaamammma";
+    for (0..3) |cycle| for (expected, 0..) |level, index| {
+        const frame = (cycle * expected.len + index) * 2;
+        const style = if (level == 'a') dim else green;
+        try std.testing.expectEqualDeep(style, activityStyle(frame));
+        try std.testing.expectEqualDeep(style, activityStyle(frame + 1));
+        try std.testing.expect(!activityChanged(frame, frame + 1));
+        const next = expected[(index + 1) % expected.len];
+        try std.testing.expectEqual(next != level, activityChanged(frame + 1, frame + 2));
+    };
+    // Delayed frames jump to the time-derived phase; they do not slow/restart it.
+    try std.testing.expect(activityChanged(0, 4));
+    try std.testing.expectEqualDeep(green, activityStyle(48_000_000));
 }

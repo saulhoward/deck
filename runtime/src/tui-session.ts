@@ -71,6 +71,7 @@ export function validReply(value: unknown, id: string, hubId?: string, chatId?: 
     (i === 0 || item.id > s.entries[i - 1]!.id));
 }
 type Command = (name: string, args: Record<string, unknown>, hubId?: string) => Promise<any>;
+const inputAdmittedNotice = "Input admitted; completion not yet confirmed";
 const isMessage = (entry: TuiEntry) => entry.parts?.some(part => part.kind === "text" && part.text.length > 0);
 export class TuiSession {
   private hubId?: string;
@@ -288,7 +289,7 @@ export class TuiSession {
       await this.observeUserImport();
     } else if (kind === "input") {
       this.state!.historical = false; // The next unheld poll follows the new conversation turn.
-      this.state!.notice = "Input admitted; completion not yet confirmed";
+      this.state!.notice = inputAdmittedNotice;
     }
     else {
       // Creation is acknowledged and the exact draft is cleared before this
@@ -446,6 +447,10 @@ export class TuiSession {
           const progress = await this.readView("progress", { chatId: this.chatId });
           this.sample({ activity, progress });
         }
+        // Admission is a transient acknowledgement, not a durable completion
+        // status. A successful fresh view takes over (even if work is ongoing
+        // or activity is unavailable); failed reads and other notices stay put.
+        if (state.notice === inputAdmittedNotice) state.notice = "";
         break;
       }
     }

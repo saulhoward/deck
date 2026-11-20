@@ -30,6 +30,7 @@ const help =
     \\Shift-drag           terminal selection; use terminal Copy/Paste
     \\:mouse-toggle        opt out of wheel reporting for native selection
     \\Scroll to chat top    fetch older history without moving your view
+    \\Scroll to chat bottom return to live messages automatically
     \\:older, :latest       previous page / return to live messages
     \\
     \\Prompt i a I A o O    enter Insert mode; Esc returns to Normal
@@ -81,7 +82,7 @@ const dim = Theme.dim;
 const accent = Theme.green;
 const bar = Theme.dim;
 const hub_bar = bar;
-pub const Row = struct { text: []const u8 = "", style: vaxis.Style = base, offset: usize = 0, cells: ?Markdown.Line = null, speaker: ?[]const u8 = null, speaker_style: vaxis.Style = dim, user: bool = false };
+pub const Row = struct { text: []const u8 = "", style: vaxis.Style = base, offset: usize = 0, cells: ?Markdown.Line = null, speaker: ?[]const u8 = null, speaker_style: vaxis.Style = dim, user: bool = false, active_prefix: usize = 0 };
 
 const TransportStatus = enum {
     quiet,
@@ -411,7 +412,7 @@ fn subagentRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), sample: ?wire.Su
         try text.appendSlice(ctx.arena, shown);
         try text.appendNTimes(ctx.arena, ' ', width - status_width - displayWidth(ctx, shown));
         try text.appendSlice(ctx.arena, status);
-        try list.append(ctx.arena, .{ .text = text.items, .style = dim });
+        try list.append(ctx.arena, .{ .text = text.items, .style = dim, .active_prefix = if (child.status != null and child.status.?.state == .working) shown.len else 0 });
         // One bounded task line per child, never a detached/truncated pair.
         const task = child.title[0 .. std.mem.indexOfScalar(u8, child.title, '\n') orelse child.title.len];
         try list.append(ctx.arena, .{ .text = try animatedText(ctx, task, width, null), .style = dim });
@@ -429,7 +430,9 @@ fn contextRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), inv: wire.ToolInv
             for (inv.builtins) |tool| if (std.mem.eql(u8, tool.name, name)) break :blk try std.fmt.allocPrint(ctx.arena, "{s} · {s}", .{ @tagName(tool.location), name });
             continue;
         };
+        const first = list.items.len;
         try rows(ctx, list, try std.fmt.allocPrint(ctx.arena, "● {s}", .{label}), width, Theme.green);
+        for (list.items[first..]) |*row| row.active_prefix = row.text.len;
     }
     if (inv.agentsMdLoaded == true) try rows(ctx, list, "AGENTS.md loaded", width, dim);
     if (inv.loadedSkills) |skills| {
@@ -545,6 +548,10 @@ fn sidebarRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), snapshot: ?wire.T
     const count = @min(inventory.items.len, budget - @intFromBool(overflow));
     try list.appendSlice(ctx.arena, inventory.items[0..count]);
     if (overflow) try list.append(ctx.arena, .{ .text = try std.fmt.allocPrint(ctx.arena, "{d} more rows", .{inventory.items.len - count}), .style = dim });
+    for (list.items) |*row| if (row.active_prefix > 0) {
+        row.style = dim; // Sidebar-only color overlay; full :tools stays static.
+        if (!fresh) row.active_prefix = 0;
+    };
 }
 
 const Model = struct {
@@ -597,6 +604,7 @@ const Model = struct {
     pad_newest: bool = false,
     pin_top: bool = false,
     older_wanted: bool = false,
+    latest_wanted: bool = false, // Downward intent at the bottom; one read, never an input.
     auto_older: bool = false,
     older_failed: bool = false,
     older_budget: u8 = 0, // At most four invisible pages per upward gesture.
@@ -609,6 +617,7 @@ const Model = struct {
     activity_seen: u64 = 0,
     sidebar_override: ?bool = null,
     sidebar_visible: bool = false,
+    sidebar_flickering: bool = false, // Only active text actually drawn in the sidebar.
     pending_since: std.Io.Timestamp = .zero,
     shown_transport: TransportStatus = .quiet,
     worker_transport: bool = false,
@@ -623,6 +632,9 @@ const Model = struct {
     }
     fn freshActivity(self: *Model) bool {
         return self.online and !self.bridge.failed and self.frame -| self.activity_seen < 100;
+    }
+    fn sidebarFlickerChanged(self: *Model, previous_frame: u64) bool {
+        return self.sidebar_flickering and self.freshActivity() and Theme.activityChanged(previous_frame, self.frame);
     }
     fn freshBusy(self: *Model) bool {
         if (!self.freshActivity()) return false;
@@ -662,6 +674,7 @@ const Model = struct {
     fn resetHistory(self: *Model) void {
         self.scrollback.clear(self.a);
         self.history_browsing = false;
+        self.latest_wanted = false;
         self.pad_newest = false;
         self.pin_top = false;
         self.older_wanted = false;
@@ -676,8 +689,17 @@ const Model = struct {
             self.older_budget = 0;
             self.pin_top = false;
             self.older_check_rows = null;
+            if (amount > 0 and self.scroll == 0) {
+                const pending = if (self.bridge.pending) |request| request.action else null;
+                if (pending != .latest) {
+                    if (self.auto_older or pending == .older or (if (self.state()) |s| s.historical else false)) {
+                        self.latest_wanted = true;
+                    } else if (self.history_browsing) self.resetHistory();
+                }
+            }
             return;
         }
+        self.latest_wanted = false; // Reversing direction cancels an undispatched return.
         self.scroll = @min(self.scroll_max, self.scroll +| amount);
         if (self.scroll < self.scroll_max) return;
         const s = self.state() orelse return;
@@ -689,7 +711,25 @@ const Model = struct {
         self.older_wanted = true;
         self.older_budget = 4;
     }
+    fn returningLatest(self: *Model) bool {
+        return !self.bridge.failed and (self.latest_wanted or (if (self.bridge.pending) |p| p.action == .latest else false));
+    }
+    fn flushLatest(self: *Model) !void {
+        if (!self.latest_wanted) return;
+        if (self.bridge.failed or self.scroll != 0) {
+            self.latest_wanted = false;
+            return;
+        }
+        if (self.bridge.pending != null or self.auto_older or self.queued_send or !self.chatVisible() or self.command_mode or self.leader or self.paste_mode) return;
+        // Reuse the explicit latest read: the bridge owns the historical cursor.
+        // Keep the cached viewport until success; failure needs fresh down intent.
+        if (try self.bridge.request(.latest, null, null)) {
+            self.latest_wanted = false;
+            self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake);
+        }
+    }
     fn flushOlder(self: *Model) !void {
+        if (self.latest_wanted) return;
         if (!self.older_wanted or self.auto_older or self.pin_top or self.older_check_rows != null) return;
         if (self.bridge.failed or self.older_budget == 0) {
             self.older_wanted = false;
@@ -1002,6 +1042,7 @@ const Model = struct {
             return;
         }
         if (action == .latest or action == .older or action == .send) {
+            self.latest_wanted = false;
             self.older_wanted = false;
             self.older_budget = 0;
         }
@@ -1022,6 +1063,7 @@ const Model = struct {
     }
     fn quit(self: *Model, ctx: *fw.EventContext, force: bool) void {
         self.queued_send = false; // A detach attempt must not send later while protecting unsaved text.
+        self.latest_wanted = false;
         const saved = if (self.state()) |s| (if (s.draft) |draft| draft.saved and (draft.kind == .input or (self.task_form and draft.kind == .task)) else false) else false;
         if (!force and self.editor.text.items.len > 0 and !saved) {
             self.note("Prompt has no confirmed saved draft. :send / :retry, or :q! to detach without it.");
@@ -1271,9 +1313,10 @@ const Model = struct {
                 const was_animated = self.animating();
                 const was_fresh = self.freshActivity();
                 const was_loading = self.loadingOlder();
+                const previous_frame = self.frame;
                 self.frame = @intCast(@divFloor(@max(0, self.animation_epoch.durationTo(std.Io.Timestamp.now(ctx.io, .awake)).nanoseconds), 50 * std.time.ns_per_ms));
                 self.animations.advance(self.frame, self.freshBusy());
-                if (was_animated or self.animating() or was_fresh != self.freshActivity() or was_loading != self.loadingOlder()) ctx.redraw = true;
+                if (was_animated or self.animating() or self.sidebarFlickerChanged(previous_frame) or was_fresh != self.freshActivity() or was_loading != self.loadingOlder()) ctx.redraw = true;
                 if (stopping.load(.monotonic)) {
                     ctx.quit = true;
                     return;
@@ -1286,6 +1329,7 @@ const Model = struct {
                     self.queued_send = false;
                     self.older_wanted = false;
                     self.auto_older = false;
+                    self.latest_wanted = false;
                     self.older_check_rows = null;
                     ctx.redraw = true;
                     try ctx.tick(50, self.widget());
@@ -1297,6 +1341,7 @@ const Model = struct {
                     self.ticks = 0;
                     ctx.redraw = true;
                     if (response.value == .case1) {
+                        self.latest_wanted = false;
                         if (self.auto_older and action == .older) self.older_failed = true;
                         self.auto_older = false;
                         self.older_wanted = false;
@@ -1318,7 +1363,13 @@ const Model = struct {
                         const navigation = action == .select or action == .subagent or action == .parent;
                         const automatic_older = action == .older and self.auto_older;
                         if (automatic_older) try self.acceptOlder(s);
-                        if (navigation or action == .latest or (action == .older and !automatic_older) or action == .send or action == .retry) self.resetHistory();
+                        if (navigation or action == .latest or (action == .older and !automatic_older) or action == .send or action == .retry) {
+                            // A down gesture during manual :older still means
+                            // return live after that page replacement finishes.
+                            const return_at_bottom = action == .older and self.latest_wanted;
+                            self.resetHistory();
+                            self.latest_wanted = return_at_bottom;
+                        }
                         if (self.snapshot == null or navigation) self.animations.attach(self.frame, !std.mem.eql(u8, s.chatId, s.hubChatId));
                         if (action == .poll or action == .latest or navigation) self.activity_seen = self.frame;
                         if (self.terminal_status) |status| if (s.cwd) |cwd| try status.identity(rune(s), cwd);
@@ -1388,6 +1439,7 @@ const Model = struct {
                         try self.flushQueuedSend(); // Explicit sends take priority over background polling.
                     }
                 }
+                try self.flushLatest(); // Return at the bottom, behind any explicit queued send.
                 try self.flushOlder(); // Only explicit upward intent; never a polling crawl.
                 self.ticks += 1;
                 if (self.ticks % 10 == 0 and self.bridge.pending == null and !self.command_mode and !self.leader and !self.paste_mode and !self.model_picker and !self.task_picker and !self.hosts_view and !self.brief_view and !self.rex_view) {
@@ -1451,6 +1503,7 @@ const Model = struct {
     }
     fn draw(ptr: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface {
         const self: *Model = @ptrCast(@alignCast(ptr));
+        self.sidebar_flickering = false;
         self.shown_transport = self.transportStatus(std.Io.Timestamp.now(self.bridge.io, .awake));
         const w = @min(512, ctx.max.width orelse 80);
         // vxfw Surface multiplies u16 dimensions; stay below 65,536 cells.
@@ -1606,7 +1659,7 @@ const Model = struct {
         const prompt_y = h - 3 - prompt_h;
         const upper = prompt_y - 1;
         const historical = if (s) |snap| snap.historical else false;
-        const away = self.scroll > 0 or historical or self.history_browsing;
+        const away = self.scroll > 0 or historical or self.history_browsing or self.latest_wanted;
         // Give the scroll indicator its own last chat line; do not cover an
         // error/admission notice or a retained message with it.
         const notice_y = upper - 1 - @as(u16, if (away) 1 else 0);
@@ -1634,7 +1687,7 @@ const Model = struct {
         }
         for (shown, 0..) |row, i| lineLimit(ctx, surface, layout.x, @intCast(visible.len + i), row.text, dim, null, 0, layout.x + layout.body);
         if (away) {
-            const history_notice = if (self.loadingOlder()) "Loading older history…" else if (self.older_failed) "Older history unavailable · scroll up to retry" else if (self.history_browsing and self.scroll == self.scroll_max and !(if (s) |snap| snap.hasOlder else true)) "Start of history · :latest to return" else if (self.scrollback.newer_omitted) "Older history · newer pages trimmed · :latest to return" else if (historical or self.history_browsing) "Older history · :latest to return" else "Scrolled up · :latest to follow new messages";
+            const history_notice = if (self.returningLatest()) "Returning to latest…" else if (self.loadingOlder()) "Loading older history…" else if (self.older_failed) "Older history unavailable · scroll up to retry" else if (self.history_browsing and self.scroll == self.scroll_max and !(if (s) |snap| snap.hasOlder else true)) "Start of history · :latest to return" else if (self.scrollback.newer_omitted) "Older history · newer pages trimmed · :latest to return" else if (historical or self.history_browsing) "Older history · :latest to return" else "Scrolled up · :latest to follow new messages";
             lineLimit(ctx, surface, 1, upper - 1, history_notice, accent, null, 0, right);
         }
         const sending = if (self.bridge.pending) |pending| pending.action == .send else false;
@@ -1694,7 +1747,14 @@ const Model = struct {
             var sidebar: std.ArrayList(Row) = .empty;
             try sidebarRows(ctx, &sidebar, s, available, h, self.online, self.freshActivity());
             const sidebar_y = h - 4 - sidebar.items.len;
-            for (sidebar.items, 0..) |row, index| lineLimit(ctx, surface, layout.main + 2, @intCast(sidebar_y + index), row.text, row.style, null, 0, w - 1);
+            for (sidebar.items, 0..) |row, index| {
+                const y: u16 = @intCast(sidebar_y + index);
+                lineLimit(ctx, surface, layout.main + 2, y, row.text, row.style, null, 0, w - 1);
+                if (row.active_prefix > 0) {
+                    self.sidebar_flickering = true;
+                    lineLimit(ctx, surface, layout.main + 2, y, row.text[0..row.active_prefix], Theme.activityStyle(self.frame), null, 0, w - 1);
+                }
+            }
         }
         const footer_right = w - 1;
         const directory = if (s) |snap| snap.cwd orelse "directory unavailable" else "connecting";
@@ -2356,7 +2416,7 @@ fn testSurfaceText(a: std.mem.Allocator, surface: fw.Surface) ![]const u8 {
     return text.items;
 }
 
-fn testSidebarPalette(surface: fw.Surface, layout: Theme.Layout) !void {
+fn testSidebarPalette(surface: fw.Surface, layout: Theme.Layout, active: bool) !void {
     if (layout.sidebar == 0) return;
     const width = surface.size.width;
     for (0..surface.size.height - 3) |y| for (surface.buffer[y * width + layout.main .. (y + 1) * width]) |cell| {
@@ -2364,7 +2424,7 @@ fn testSidebarPalette(surface: fw.Surface, layout: Theme.Layout) !void {
         const rgb = cell.style.fg.rgb;
         if (y == 2 and !std.mem.eql(u8, cell.char.grapheme, "│") and (!std.mem.eql(u8, cell.char.grapheme, " ") or std.meta.eql(cell.style.fg, Theme.orange.fg))) {
             try std.testing.expectEqualDeep(Theme.orange.fg, cell.style.fg);
-        } else try std.testing.expect(rgb[0] == rgb[1] and rgb[1] == rgb[2] and rgb[0] < 255);
+        } else if (!(active and y >= 6 and std.meta.eql(cell.style.fg, Theme.green.fg))) try std.testing.expect(rgb[0] == rgb[1] and rgb[1] == rgb[2] and rgb[0] < 255);
         try std.testing.expectEqualDeep(base.bg, cell.style.bg);
     };
 }
@@ -2426,7 +2486,7 @@ test "tool inventory separates locations and grants, preserves unknown, and offe
         .{ .profileId = "old_revision", .machineId = worker_machine, .location = .worker, .revision = revision, .state = .unavailable, .tools = &.{} },
     } };
     const inventory_surface = try Model.draw(&model, ctx);
-    try testSidebarPalette(inventory_surface, Theme.Layout.init(ctx.max.width.?, null));
+    try testSidebarPalette(inventory_surface, Theme.Layout.init(ctx.max.width.?, null), false);
     const text = try testSurfaceText(alloc, inventory_surface);
     try std.testing.expect(std.mem.indexOf(u8, text, ":tools") == null);
     for ([_][]const u8{ "MCP · HUB", "MCP · WORKER LOCAL", "search · enabled (1)", "workspace · enabled (1)", "browser · not granted (1)", "old_revision · unavailable", "BUILT-IN · WORKER LOCAL", "read · write · edit · bash", "BUILT-IN · HUB", "task_list · subagent", "ENVIRONMENT TOOLS", "custom_environment_tool" }) |expected| try std.testing.expect(std.mem.indexOf(u8, text, expected) != null);
@@ -2448,7 +2508,7 @@ test "tool inventory separates locations and grants, preserves unknown, and offe
     model.online = false;
     const stale_surface = try Model.draw(&model, ctx);
     try std.testing.expect(std.mem.indexOf(u8, try testSurfaceText(alloc, stale_surface), "TOOLS · STALE") != null);
-    try testSidebarPalette(stale_surface, Theme.Layout.init(ctx.max.width.?, null));
+    try testSidebarPalette(stale_surface, Theme.Layout.init(ctx.max.width.?, null), false);
     model.online = true;
     var event: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
     defer event.cmds.deinit(a);
@@ -2820,6 +2880,8 @@ test "subagent sidebar rows preserve statuses, unknowns, and explicit overflow w
         try std.testing.expect(std.mem.endsWith(u8, row.text, status));
         try std.testing.expectEqual(26, displayWidth(ctx, row.text));
         try std.testing.expectEqualDeep(dim, row.style);
+        try std.testing.expectEqual(@as(usize, if (i == 0) 5 else 0), row.active_prefix);
+        try std.testing.expectEqual(0, list.items[i * 2 + 1].active_prefix);
     }
     try std.testing.expect(std.mem.startsWith(u8, list.items[0].text, "WM001"));
     try std.testing.expectEqualDeep(dim, list.items[1].style);
@@ -2876,7 +2938,7 @@ test "subagent sidebar coexists with inventory, marks stale samples, and stays b
     fw.DrawContext.init(.unicode);
     var ctx: fw.DrawContext = .{ .arena = alloc, .min = .{}, .max = .{ .width = 140, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
     const fresh_surface = try Model.draw(&model, ctx);
-    try testSidebarPalette(fresh_surface, Theme.Layout.init(140, null));
+    try testSidebarPalette(fresh_surface, Theme.Layout.init(140, null), true);
     const fresh = try testSurfaceText(alloc, fresh_surface);
     try std.testing.expect(std.mem.indexOf(u8, fresh, ":tools") == null);
     try std.testing.expectEqualStrings("#SUBAGENTS", try testSurfaceRowText(alloc, fresh_surface, 29, 90));
@@ -2913,7 +2975,7 @@ test "subagent sidebar coexists with inventory, marks stale samples, and stays b
         ctx.max = .{ .width = width, .height = height };
         model.sidebar_override = true;
         const visible = try Model.draw(&model, ctx);
-        try testSidebarPalette(visible, Theme.Layout.init(width, true));
+        try testSidebarPalette(visible, Theme.Layout.init(width, true), true);
         try std.testing.expectEqualStrings("", try testSurfaceRowText(alloc, visible, height - 4, Theme.Layout.init(width, true).main + 2));
         if (height >= 12) try std.testing.expect((try testSurfaceRowText(alloc, visible, height - 5, Theme.Layout.init(width, true).main + 2)).len > 0);
         model.sidebar_override = false;
@@ -3054,4 +3116,186 @@ test "automatic older intent waits for the slot, yields to sends, cancels on dow
         try model.flushOlder();
     }
     try std.testing.expectEqual(1, bridge.sequence);
+}
+
+test "sidebar flickers only visible fresh active names and tool text, without changing layout or data" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    var model = try testChatModel(a, &bridge);
+    defer model.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    fw.DrawContext.init(.unicode);
+    var ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 60 }, .cell_size = .{ .width = 8, .height = 16 } };
+    const snap = &model.snapshot.?.value.case0.snapshot;
+    var children = [_]wire.SubagentItem{
+        .{ .chatId = "3", .title = "Review task", .agentName = "DS001", .status = .{ .state = .working } },
+        .{ .chatId = "2", .title = "Finished task", .agentName = "DS002", .status = .{ .state = .done, .taskId = "10" } },
+    };
+    snap.subagents = .{ .chatId = "1", .items = &children, .hasMore = false };
+    snap.activityKnown = true;
+    snap.activeTools = &.{ "bash", "mcp_lookup_alias", "mcp_blocked_alias", "absent" };
+    snap.toolInventory = .{ .chatId = "1", .builtins = &.{.{ .name = "bash", .location = .worker }}, .mcp = &.{
+        .{ .profileId = "workspace", .machineId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .location = .worker, .state = .enabled, .revision = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", .tools = &.{.{ .name = "lookup", .alias = "mcp_lookup_alias" }} },
+        .{ .profileId = "blocked", .machineId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", .location = .worker, .state = .not_granted, .revision = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", .tools = &.{.{ .name = "blocked", .alias = "mcp_blocked_alias" }} },
+    } };
+    const bright = try Model.draw(&model, ctx);
+    try std.testing.expect(model.sidebar_flickering and !model.freshBusy()); // Parent need not be busy.
+    const left = Theme.Layout.init(140, null).main + 2;
+    var active_rows: usize = 0;
+    for (0..bright.size.height - 3) |y| {
+        const text = try testSurfaceRowText(ctx.arena, bright, y, left);
+        if (std.mem.startsWith(u8, text, "DS001")) {
+            active_rows += 1;
+            for (0..5) |x| try std.testing.expectEqualDeep(Theme.green.fg, bright.buffer[y * 140 + left + x].style.fg);
+            for (left + 5..139) |x| try std.testing.expectEqualDeep(dim.fg, bright.buffer[y * 140 + x].style.fg);
+        } else if (std.mem.startsWith(u8, text, "● worker · bash") or std.mem.startsWith(u8, text, "● worker · workspace/lookup")) {
+            active_rows += 1;
+            try std.testing.expectEqualDeep(Theme.green.fg, bright.buffer[y * 140 + left].style.fg);
+        } else if (std.mem.startsWith(u8, text, "DS002") or std.mem.eql(u8, text, "Review task") or std.mem.eql(u8, text, "Finished task")) {
+            for (left..139) |x| try std.testing.expectEqualDeep(dim.fg, bright.buffer[y * 140 + x].style.fg);
+        }
+    }
+    try std.testing.expectEqual(3, active_rows);
+    for ([_]u64{ 1, 4, 5, 6, 18, 24, 46, 48 }) |frame| {
+        model.frame = frame;
+        try std.testing.expectEqual(Theme.activityChanged(0, frame), model.sidebarFlickerChanged(0));
+        const drawn = try Model.draw(&model, ctx);
+        for (bright.buffer, drawn.buffer) |original, cell| {
+            try std.testing.expectEqualStrings(original.char.grapheme, cell.char.grapheme);
+            try std.testing.expectEqualDeep(original.style.bg, cell.style.bg);
+            try std.testing.expectEqualDeep(if (std.meta.eql(original.style.fg, Theme.green.fg)) Theme.activityStyle(frame).fg else original.style.fg, cell.style.fg);
+        }
+    }
+    // Stale/offline/fenced observations never light up yesterday's work.
+    for (0..3) |reason| {
+        model.frame = if (reason == 0) 100 else 0;
+        model.online = reason != 1;
+        bridge.failed = reason == 2;
+        const stale = try Model.draw(&model, ctx);
+        try std.testing.expect(!model.sidebar_flickering and !model.sidebarFlickerChanged(4));
+        try testSidebarPalette(stale, Theme.Layout.init(140, null), false);
+    }
+    model.frame = 0;
+    model.online = true;
+    bridge.failed = false;
+    snap.activeTools = &.{};
+    for ([_]?wire.AgentStatus{ .{ .state = .done, .taskId = "10" }, .{ .state = .@"error", .taskId = "10" }, .{ .state = .idle }, null }) |status| {
+        children[0].status = status;
+        const idle = try Model.draw(&model, ctx);
+        try std.testing.expect(!model.sidebar_flickering);
+        try testSidebarPalette(idle, Theme.Layout.init(140, null), false);
+    }
+    // No animation wakeups for clipped/hidden work or other views. Full :tools
+    // retains its static green palette, including during an 'a' phase.
+    children[0].status = .{ .state = .working };
+    snap.activeTools = &.{"bash"};
+    model.frame = 4;
+    model.tools_view = true;
+    const tools = try Model.draw(&model, ctx);
+    try std.testing.expect(!model.sidebar_flickering);
+    var static_green = false;
+    for (tools.buffer) |cell| if (std.meta.eql(cell.style.fg, Theme.green.fg)) {
+        static_green = true;
+    };
+    try std.testing.expect(static_green);
+    model.tools_view = false;
+    model.sidebar_override = false;
+    _ = try Model.draw(&model, ctx);
+    try std.testing.expect(!model.sidebar_flickering);
+    model.sidebar_override = true;
+    ctx.max.height = 9;
+    _ = try Model.draw(&model, ctx);
+    try std.testing.expect(!model.sidebar_flickering);
+    try std.testing.expect(bridge.pending == null and bridge.output.items.len == 0);
+}
+
+test "reaching the bottom returns historical views once, defers behind reads and sends, and cancels on upward intent" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    defer bridge.output.deinit(a);
+    var model = try testChatModel(a, &bridge);
+    defer model.deinit();
+    try model.editor.set("Keep exact unsent text\n界");
+    const snap = &model.snapshot.?.value.case0.snapshot;
+    snap.hasOlder = true;
+    model.scroll_max = 20;
+    // Top reached but no older read was sent: just resume ordinary live polling.
+    model.scrollChat(true, 20);
+    model.scrollChat(false, 20);
+    try model.flushLatest();
+    try std.testing.expect(!model.history_browsing and !model.latest_wanted and !model.older_wanted);
+    try std.testing.expect(bridge.pending == null);
+    // Manual older and a cache whose newest pages were evicted both need a fresh latest read.
+    snap.historical = true;
+    model.scrollback.newer_omitted = true;
+    model.scroll = 10;
+    model.scrollChat(false, 9);
+    try std.testing.expect(!model.latest_wanted);
+    bridge.pending = .{ .version = 1, .id = "poll", .action = .poll };
+    model.scrollChat(false, 1);
+    try model.flushLatest();
+    try std.testing.expect(model.latest_wanted and model.returningLatest() and bridge.sequence == 0);
+    model.scrollChat(true, 1);
+    bridge.pending = null;
+    try model.flushLatest();
+    try std.testing.expect(!model.latest_wanted and bridge.sequence == 0);
+    model.scrollChat(false, 1);
+    model.queued_send = true;
+    try model.flushLatest();
+    try std.testing.expect(model.latest_wanted and bridge.sequence == 0);
+    model.queued_send = false;
+    for ([_]*bool{ &model.help_visible, &model.tools_view, &model.model_picker, &model.task_picker, &model.hosts_view, &model.rex_view, &model.brief_view, &model.task_form, &model.command_mode, &model.leader, &model.paste_mode }) |flag| {
+        flag.* = true;
+        try model.flushLatest();
+        try std.testing.expect(bridge.sequence == 0);
+        flag.* = false;
+    }
+    try model.flushLatest();
+    try std.testing.expectEqual(Action.latest, bridge.pending.?.action);
+    try std.testing.expect(!model.latest_wanted);
+    for (0..5) |_| {
+        model.scrollChat(false, 3);
+        try model.flushLatest();
+    }
+    try std.testing.expectEqual(1, bridge.sequence);
+    // A successful latest read resets local history; a later down gesture is a no-op.
+    bridge.pending = null;
+    snap.historical = false;
+    model.resetHistory();
+    model.scrollChat(false, 3);
+    try model.flushLatest();
+    try std.testing.expect(!model.returningLatest() and !model.scrollback.newer_omitted and bridge.sequence == 1);
+    // A short exhausted page can be both the top and bottom; down resumes
+    // without inventing a read or requiring :latest after the start notice.
+    snap.hasOlder = false;
+    model.scroll_max = 0;
+    model.scrollChat(true, 0);
+    try std.testing.expect(model.history_browsing);
+    model.scrollChat(false, 1);
+    try model.flushLatest();
+    try std.testing.expect(!model.history_browsing and bridge.sequence == 1);
+    // Reaching bottom while older is in flight retains one return intent.
+    bridge.pending = .{ .version = 1, .id = "older", .action = .older };
+    model.auto_older = true;
+    model.history_browsing = true;
+    model.scroll = 3;
+    model.scrollChat(false, 3);
+    try model.flushLatest();
+    try std.testing.expect(model.latest_wanted and bridge.sequence == 1);
+    var older = snap.*;
+    older.historical = true;
+    try model.acceptOlder(older);
+    snap.* = older;
+    bridge.pending = null;
+    try model.flushLatest();
+    try std.testing.expectEqual(Action.latest, bridge.pending.?.action);
+    try std.testing.expectEqual(2, bridge.sequence);
+    try std.testing.expectEqualStrings("Keep exact unsent text\n界", model.editor.text.items);
+    // A fenced bridge must not keep automatic work armed.
+    bridge.pending = null;
+    model.latest_wanted = true;
+    bridge.failed = true;
+    try model.flushLatest();
+    try std.testing.expect(!model.latest_wanted and !model.returningLatest());
 }
