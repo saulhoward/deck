@@ -252,6 +252,7 @@ Rex task clients cannot list/create/select other tasks or return to the hub. Hub
 | Inspect tasks / return to hub (hub client only) | `:tasks`, `:select ID`, `:hub` |
 | Create a task and request Rex (hub chat only) | `:task TITLE` |
 | Compose a task brief / choose a registered host | `:new`, `:hosts` |
+| Create a managed child of a task (or hub) | `:new-child CHAT_ID` / `:new-child` |
 | Inspect the saved creation brief | `:brief` |
 | Clear an unsubmitted creation form | `:cancel` |
 | Create on an explicit saved host/cwd (hub only) | `:task-at {"machineId":"32 hex ID","cwd":"/absolute/path","title":"Task"}` |
@@ -297,7 +298,7 @@ deck hub --no-tui --task CHAT_ID
 | `/select CHAT_ID`, `/hub` | Hub only: inspect a task / return to hub |
 | `/task TITLE` | Hub chat only: create a task and request its Rex terminal |
 | `/task-at JSON` | Hub chat only: explicit `machineId`, absolute `cwd`, and `title`; save first, then request Rex |
-| `/new JSON` | Hub chat only: bounded `{title,problem?,description?,machineId?,cwd?}`; explicit hosts must be registered |
+| `/new JSON` | Hub chat only: bounded `{title,problem?,description?,machineId?,cwd?}` or `{title,managedParentChatId,problem?,description?}`; explicit hosts must be registered |
 | `/hosts`, `/brief` | Read registered hosts (hub client only) / the selected chat's saved brief |
 | `/status`, `/activity` | Inspect settings, bindings, or activity |
 | `/older` | Read an older history page |
@@ -325,9 +326,28 @@ Models can inspect chats with `task_list`, `task_history`, and `task_activity`. 
 
 `subagent` creates a Pi-owned foreground child and waits for its answer. It inherits the parent's settings and binding, but not its transcript. Stopping the parent cancels its ordinary owned work. You can inspect or stop child chats, but you cannot send them direct input or change their model independently.
 
+### Managed children
+
+Managed children are **persistent, human-controlled agents**, separate from the captured foreground `subagent` tool above. From the hub chat, use `:tasks` to find the parent's chat ID, then **`:new-child CHAT_ID`** (`:new-child` defaults to the hub). Edit the JSON title/problem/description; the cursor starts inside the title. To replace the whole template, use Esc then `cc` and paste JSON. Enter, Ctrl-S or `:send` creates the child, **without submitting input or starting model generation**. `:cancel` clears an unsubmitted form; uncertain creation retains its exact saved request for explicit `:retry`, with no automatic resend.
+
+Plain mode accepts, for example:
+
+```text
+/new {"title":"Review parser","managedParentChatId":"2","problem":"Review edge cases","description":"Report findings to the parent"}
+```
+
+- The child inherits its parent's saved **host/cwd, model/reasoning, enabled tools, model-tool selection and MCP grants as a creation-time snapshot**. Host/cwd overrides are not allowed. No new tool-policy system is introduced. It has its own immutable brief, no copied transcript or personal instructions, and independently editable model settings.
+- `:tasks` labels **managed child of ID** separately from captured children. `task_list` and `deck agent --list` expose the relationship too. Pages are bounded; follow the next cursor, even after an empty page.
+- Creation attempts the existing Rex open flow when available. Otherwise use `deck agent --list` then `deck agent --resume NAME --here` **on the child's assigned host**. Use its attached chat to send human input, inspect its brief, or change `:model`. Hub `:select ID` stays read-only; `:rex open` is an explicit participation route. Neither navigation nor parent metadata grants write authority.
+- The parent sends work with `task_message`; a managed child reports with **`parent_message`**, which infers its saved parent. Managed children can exchange agent messages **only with their parent**, enforced on all messaging routes, including `task_message` and `hub_message`. These tools return admission, not an answer; they share durable replay identities, sender/reply provenance and the eight-hop causal budget. No transcript mirroring or automatic reporting is added.
+- Stopping a parent does **not** cancel persistent managed children or already-admitted independent work. Captured `subagent` cancellation/drain and read-only inspection remain unchanged.
+- Initially the parent must be the hub or an ordinary independent task. Managed children are leaves in the managed hierarchy; they can still use inherited foreground `subagent` delegation. Managed creation is a hub user-control action, not a new model creation tool.
+
+These restrictions govern Deck coordination APIs, **not a hostile-code sandbox**. Native tools retain the user's OS capabilities, and broad read-only chat discovery/history remains available. See [managed-child implementation notes](docs/managed-children.md).
+
 ### Native stdio MCP
 
-Deck exposes explicitly approved MCP tools through the existing hub-owned Pi runtime. Zig supervises one isolated stdio server process per invocation/probe, on the assigned worker or hub. **No tools are granted by default.** Independent tasks start without grants; owned children inherit the parent's selection. Configuration/grant controls are currently an advanced **trusted-local hub API workflow**, not a TUI picker or model tool. Task-scoped clients cannot use them.
+Deck exposes explicitly approved MCP tools through the existing hub-owned Pi runtime. Zig supervises one isolated stdio server process per invocation/probe, on the assigned worker or hub. **No tools are granted by default.** Ordinary independent tasks start without grants; captured and managed children inherit the parent's selection. Configuration/grant controls are currently an advanced **trusted-local hub API workflow**, not a TUI picker or model tool. Task-scoped clients cannot use them.
 
 The supported protocol is **MCP 2025-06-18**, with a strict bounded JSON Schema subset and text/structured tool results. No Pi coding-agent plugins, automatic `.pi` discovery, package installation, HTTP transport or OAuth are provided. Server programs and any Node/Python dependencies are separately installed. The worker package remains native-only. Source/installed checks and [fresh Phase 3 real-machine acceptance](docs/HISTORY.md#mcp-two-machine-acceptance) passed with fake models and disposable servers on one Darwin arm64 pair. This does not imply live-service/provider, HTTP/OAuth or Linux runtime acceptance.
 

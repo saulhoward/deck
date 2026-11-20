@@ -36,6 +36,7 @@ import { validHosts } from "./host-inventory.js";
 import { briefFields, briefInstructions, validBriefBinding } from "./task-brief.js";
 import { validChain, type MessageChain } from "./message-causality.js";
 import { validMachineIdentity, type TaskBrief, type HostInventory } from "./generated/contracts.js";
+import { ManagedChildRequest, managedAgentSnapshot, independentDeckChat, assertManagedMessageRelation } from "./managed-child.js";
 import { assignAgentName, agentNameFields } from "./agent-names.js";
 // A reservation is not an ACK. A crash between this commit and submit is repaired by retrying
 // the same Pi request ID. Pi 1.4.0 has no public submit(tx, draft) API.
@@ -285,7 +286,7 @@ export class DeckRuntime {
         try { const activity = await this.activity(String(record.id)); observation.activity = activity.busy || activity.queued > 0 ? "busy" : "idle"; } catch { /* Unknown is not idle. */ }
         try { observation.rexState = (await this.terminalStatus(String(record.id))).status; } catch { /* Saved allocation observation only, not terminal health. */ }
       }
-      if (metadata) items.push({ ...observation, ...agentNameFields(metadata), chatId: String(record.id), kind: metadata.kind, title: metadata.title, machineId: metadata.machineId, cwd: metadata.cwd, ...(metadata.parentChatId ? { parentChatId: metadata.parentChatId } : {}), ...(metadata.ownerTaskId ? { ownerTaskId: metadata.ownerTaskId } : {}), ...(metadata.brief ? { brief: metadata.brief } : {}) });
+      if (metadata) items.push({ ...observation, ...agentNameFields(metadata), chatId: String(record.id), kind: metadata.kind, title: metadata.title, machineId: metadata.machineId, cwd: metadata.cwd, ...(metadata.managedParentChatId ? { managedParentChatId: metadata.managedParentChatId } : {}), ...(metadata.parentChatId ? { parentChatId: metadata.parentChatId } : {}), ...(metadata.ownerTaskId ? { ownerTaskId: metadata.ownerTaskId } : {}), ...(metadata.brief ? { brief: metadata.brief } : {}) });
     }
     return { items, ...(page.next ? { next: String(page.items.at(-1)!.id) } : {}) };
   }
@@ -399,6 +400,55 @@ export class DeckRuntime {
     });
   }
 
+  createManagedChild(parentId: string, title: string, requestId: string, suppliedBrief: TaskBrief = {}, signal?: AbortSignal): Promise<Conversation> {
+    return this.serial(async () => {
+      signal?.throwIfAborted();
+      const parent = await this.chat(parentId);
+      if (typeof requestId !== "string" || !requestId || requestId.length > 200 || !requestId.isWellFormed()) throw new DeckError("invalid", "Invalid managed child request ID");
+      const binding = await this.harness.snapshot(ChatDoc, parent.id, context);
+      const record = await this.harness.commit(tx => tx.conversation(parent.id), context);
+      if (!independentDeckChat(record, binding, this.main.id) || !binding || binding.managedParentChatId !== undefined) throw new DeckError("invalid", "Managed children require canonical main or an independent task parent, not another child");
+      this.requireWorkerAdmission(binding.machineId);
+      if (typeof title !== "string" || !binding.machineId || !validBriefBinding(title, binding.cwd)) throw new DeckError("invalid", "Managed child needs a bounded title and coherent parent binding");
+      const brief = briefFields(suppliedBrief);
+      const hash = createHash("sha256").update(JSON.stringify(["deck.managed-child-create.v1", parentId, title, brief])).digest("hex");
+      const prior = await this.harness.snapshot(ManagedChildRequest, requestId, context);
+      if (prior) {
+        if (prior.hash !== hash) throw new DeckError("conflict", "Managed child request ID already used with different arguments");
+        if (prior.chatId) return this.chat(String(prior.chatId));
+      }
+      // Resolve outside the commit; verify the stored choices again inside it.
+      // Tool discovery/import may update Pi's agent outside Deck's serial line.
+      const saved = await this.harness.snapshot(AgentDoc, parent.id, context);
+      const agent = await parent.agent(context);
+      if (agent.cwd !== binding.cwd) throw new DeckError("invalid", "Parent agent cwd differs from its saved binding");
+      const snapshot = managedAgentSnapshot(agent, saved ?? {}, title, brief, binding.cwd);
+      signal?.throwIfAborted();
+      const createdId = await this.harness.commit(async tx => {
+        // All table reads precede createConversation (Pi rejects read-after-write).
+        const currentRecord = await tx.conversation(parent.id);
+        const currentBinding = await tx.doc(ChatDoc, parent.id);
+        const currentAgent = await tx.doc(AgentDoc, parent.id);
+        const grants = await tx.doc(McpGrantsDoc, parent.id);
+        const receipt = await tx.doc(ManagedChildRequest, requestId, hash);
+        if (receipt.hash !== hash) throw new DeckError("conflict", "Managed child request ID already used with different arguments");
+        if (receipt.chatId) return receipt.chatId;
+        if (!independentDeckChat(currentRecord, currentBinding, this.main.id) || currentBinding.managedParentChatId !== undefined) throw new DeckError("invalid", "Managed child parent is not independent");
+        if (JSON.stringify(currentAgent) !== JSON.stringify(saved ?? {}) || currentBinding.machineId !== binding.machineId || currentBinding.cwd !== binding.cwd) throw new DeckError("settings_changed", "Parent settings changed during managed child creation; retry the same request");
+        signal?.throwIfAborted();
+        const created = await tx.createConversation({ ownership: { kind: "ownerless" } });
+        Object.assign(await tx.doc(AgentDoc, created.id), snapshot);
+        const metadata = await tx.doc(ChatDoc, created.id);
+        Object.assign(metadata, { kind: "task", title, brief, managedParentChatId: parentId, machineId: binding.machineId, cwd: binding.cwd });
+        await assignAgentName(tx, created.id, metadata);
+        Object.assign(await tx.doc(McpGrantsDoc, created.id), { revision: grants.revision, profiles: grants.profiles.map(grant => ({ ...grant })) });
+        receipt.chatId = created.id;
+        return created.id;
+      }, context);
+      return this.chat(String(createdId));
+    });
+  }
+
   admit(id: string, input: Input, signal?: AbortSignal) {
     return this.serial(async () => {
       signal?.throwIfAborted();
@@ -412,8 +462,16 @@ export class DeckRuntime {
         if (origin.chain !== undefined && (!validChain(origin.chain) || origin.chain.hop < 1)) throw new DeckError("invalid", "Invalid message provenance");
       }
       const chat = await this.mutableChat(id);
-      if ((await this.harness.snapshot(ChatDoc, chat.id, context))?.kind === "subagent") throw new DeckError("invalid", "Subagent chats accept input only through their owning tool; inspect or stop them instead");
+      const target = await this.harness.snapshot(ChatDoc, chat.id, context);
+      const source = origin ? await this.harness.snapshot(ChatDoc, chatId(origin.chatId), context) : undefined;
       const existing = await chat.commit(async (tx) => {
+        const record = await tx.conversation(chat.id);
+        if (!record || record.owner || target?.kind === "subagent") throw new DeckError("invalid", "Owned chats accept input only through their owning tool; inspect or stop them instead");
+        if (origin) {
+          const sender = await tx.conversation(chatId(origin.chatId));
+          if (!source || !target || !independentDeckChat(sender, source, this.main.id) || !independentDeckChat(record, target, this.main.id)) throw new DeckError("invalid", "Agent messages require independent Deck source and target chats");
+          assertManagedMessageRelation(origin.chatId, source, id, target);
+        }
         const existing = await tx.submissionByRequest(chat.id, input.requestId);
         // Check before resolving the agent: the import applies outside this serial
         // admission line, so a later-only check could capture pre-apply instructions.

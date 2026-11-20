@@ -185,6 +185,7 @@ pub fn validReply(value: std.json.Value, expected: []const u8, hub_id: ?[]const 
     const s = value.object.get("snapshot").?;
     if (hub_id) |id| if (!std.mem.eql(u8, id, s.object.get("hubId").?.string)) return false;
     const chat = s.object.get("chatId").?.string;
+    if (!@import("managed_child.zig").validLink(s.object.get("chatId").?, s)) return false;
     if ((std.fmt.parseInt(u64, chat, 10) catch return false) > 9007199254740991) return false;
     if (chat_id) |id| if (!std.mem.eql(u8, id, chat)) return false;
     if (!@import("tool_inventory.zig").validInventoryFields(s)) return false;
@@ -209,7 +210,7 @@ pub fn validReply(value: std.json.Value, expected: []const u8, hub_id: ?[]const 
         const first_cursor = previous;
         for (page.object.get("items").?.array.items) |row| {
             const id = row.object.get("chatId").?;
-            if (!safeId(id)) return false;
+            if (!safeId(id) or !@import("managed_child.zig").validLink(id, row)) return false;
             const n = std.fmt.parseInt(u64, id.string, 10) catch return false;
             if (n <= previous) return false;
             if (row.object.get("parentChatId")) |parent| {

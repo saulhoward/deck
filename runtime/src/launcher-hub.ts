@@ -59,7 +59,7 @@ export async function launcherResponse(runtime: DeckRuntime, machineId: string, 
           for(const record of page.items) {
             if(record.owner || record.id===runtime.main.id)continue;
             const binding=await runtime.harness.snapshot(ChatDoc,record.id,context),agent=await runtime.harness.snapshot(AgentDoc,record.id,context);
-            if(binding?.kind==="task" && binding.machineId===machineId && agent?.cwd===binding.cwd)items.push({...agentNameFields(binding),chatId:String(record.id),title:prefixUnits(binding.title,200)||"Untitled task",cwd:binding.cwd});
+            if(binding?.kind==="task" && binding.machineId===machineId && agent?.cwd===binding.cwd)items.push({...agentNameFields(binding),chatId:String(record.id),title:prefixUnits(binding.title,200)||"Untitled task",cwd:binding.cwd,...(binding.managedParentChatId ? {managedParentChatId:binding.managedParentChatId}: {})});
           }
           return {...identity,items,...(page.next?{next:String(page.items.at(-1)!.id)}:{})};
         }

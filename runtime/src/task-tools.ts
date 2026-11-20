@@ -80,9 +80,10 @@ export function taskTools(runtime: () => DeckRuntime) {
         const page = await runtime().listChats({ includeObservations: true, limit: args.limit ?? 10, ...(args.after === undefined ? {} : { after: args.after }) });
         const items = groupedTasks(page.items).filter((item) => args.query === undefined || item.title.toLowerCase().includes(args.query.toLowerCase())).map((item) => ({
           chatId: item.chatId, kind: item.kind, agentName: item.agentName, agentNameAlgorithm: item.agentNameAlgorithm, agentRune: item.agentRune, activity: item.activity, rexState: item.rexState, title: clipped(item.title, 160), ...(item.brief ? { brief: { problem: clipped(item.brief.problem ?? "", 512), description: clipped(item.brief.description ?? "", 1024) } } : {}), machineId: clipped(item.machineId, 80), cwd: clipped(item.cwd, 256),
+          ...(validId(item.managedParentChatId) ? { managedParentChatId: item.managedParentChatId } : {}),
           ...(validId(item.parentChatId) ? { parentChatId: item.parentChatId } : {}),
           ...(validId(item.ownerTaskId) ? { ownerTaskId: item.ownerTaskId } : {}),
-          ...((item.parentChatId && !validId(item.parentChatId)) || (item.ownerTaskId && !validId(item.ownerTaskId)) ? { linksOmitted: true } : {}),
+          ...((item.managedParentChatId && !validId(item.managedParentChatId)) || (item.parentChatId && !validId(item.parentChatId)) || (item.ownerTaskId && !validId(item.ownerTaskId)) ? { linksOmitted: true } : {}),
         }));
         context.abortSignal?.throwIfAborted();
         return result({ items, ...(page.next ? { next: page.next } : {}), queryScope: "this scan page only", grouping: "parent/child within page; parent IDs may reference other pages; samples are not lifecycle" });

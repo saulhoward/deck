@@ -61,7 +61,7 @@ function renderHistory(items: unknown[], descending = true) {
 
 import { taskCommand, taskScope } from "./task-client.js";
 import { parseTaskTarget } from "./task-target.js";
-import { parseTaskForm, taskCreationCommand } from "./task-brief.js";
+import { parseTaskForm, taskCreationCommand, taskCreationArgs } from "./task-brief.js";
 import { groupedTasks } from "./task-groups.js";
 
 async function main() {
@@ -124,8 +124,12 @@ async function main() {
   const mode = rexAllocationId ? "task" : "hub";
   const hubChatId = String(status.mainChatId);
   const participate = () => requireParticipation(mode, selected, hubChatId);
-  const create = () => {
+  const create = (managed = false) => {
     requireCreation(mode, selected, hubChatId);
+    if (managed) {
+      if (status.managedChildren !== 1 || status.hubGuard !== 1) throw new Error("Hub lacks managed children; no request sent");
+      return;
+    }
     if (status.hubGuard !== 1 || status.rexOpen !== 1) throw new Error("Rex support is required to create a task; no request sent");
   };
   const runRex = async (action: string, chatId = selected) => {
@@ -157,11 +161,11 @@ async function main() {
   const deliver = async (draft: Draft) => {
     participate();
     if (draft.chatId !== selected) throw new Error("Draft belongs to another chat");
-    if (draft.kind === "task") create();
+    if (draft.kind === "task") create(draft.managedParentChatId !== undefined);
     await drafts.save(draft); // Never send until the complete private record is published.
     const method = draft.kind === "task" ? taskCreationCommand(draft) : draft.kind === "input" ? "admit" : "import_instructions";
     const { kind, chatId, ...args } = draft;
-    const ack = await command(method, kind === "task" ? args : { chatId, ...args });
+    const ack = await command(method, draft.kind === "task" ? taskCreationArgs(draft) : { chatId, ...args });
     // command() checked the generated command-specific ACK and its semantic
     // identity/range guards; transport success alone never permits removal.
     await drafts.remove(draft.requestId);
@@ -254,13 +258,15 @@ async function main() {
     if (active) throw new Error("Retry or discard your unacknowledged request first");
   };
   const createTask = async () => {
-    create();
+    const managed = active?.kind === "task" && active.managedParentChatId !== undefined;
+    create(managed);
     if (active?.kind === "task" && (active.problem !== undefined || active.description !== undefined) && status.taskBrief !== 1) throw new Error("Hub lacks task briefs; no request sent");
     const task = await deliver(active!);
     active = undefined;
     if (detached) return;
     stdout.write(`Task ${task.chatId} created. /select ${task.chatId} inspects read-only; participate in Rex.\n`);
-    await runRex("open", String(task.chatId));
+    if (managed && status.rexOpen !== 1) stdout.write("No input submitted. Use deck agent --list and --resume NAME --here on the assigned host to chat.\n");
+    else await runRex("open", String(task.chatId));
   };
   const importInstructions = async () => {
     const draft = active!;
@@ -399,15 +405,16 @@ async function main() {
         if (text === "/retry" && active?.kind === "instructions") { await importInstructions(); continue; }
         if (text === "/retry" && active?.kind === "task") { await createTask(); continue; }
         if (text.startsWith("/new ")) {
-          create(); requireAcknowledged();
+          requireAcknowledged();
           const form = parseTaskForm(text.slice(5));
+          create(form.managedParentChatId !== undefined);
           if (form.machineId) {
             if (status.hostInventory !== 1) throw new Error("Hub lacks registered-host inventory");
             const hosts = await command("list_hosts", {});
             if (!(hosts.items as { machineId: string }[]).some(h => h.machineId === form.machineId)) throw new Error("Selected host is not registered; no task requested");
           }
           const binding = object((await command("status", { chatId: selected })).binding);
-          active = { kind: "task", chatId: selected, requestId: randomUUID(), machineId: String(binding.machineId), cwd: String(binding.cwd), ...form };
+          active = { kind: "task", chatId: selected, requestId: randomUUID(), ...(form.managedParentChatId === undefined ? { machineId: String(binding.machineId), cwd: String(binding.cwd) } : {}), ...form };
           await createTask(); continue;
         }
         if (text.startsWith("/task-at ")) {

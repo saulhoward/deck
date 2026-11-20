@@ -84,7 +84,7 @@ async function main() {
     return;
   }
   if (action === "list") {
-    for (const task of tasks) process.stdout.write(`${task.agentName ?? "(unnamed)"}\t${displayText(task.title, 200)}\t${displayText(task.cwd, 4096)}\n`);
+    for (const task of tasks) process.stdout.write(`${task.agentName ?? "(unnamed)"}\t${displayText(task.title, 200)}\t${displayText(task.cwd, 4096)}${task.managedParentChatId ? `\tmanaged child of ${task.managedParentChatId}` : ""}\n`);
     if (!tasks.length) process.stdout.write("No independent tasks on this worker.\n");
     return;
   }

@@ -63,8 +63,8 @@ export async function dispatch(runtime: DeckRuntime, request: Record<string, unk
 
       // Project Deck metadata without rewriting retained documents. Pi model
       // parameters and global inspection records remain compatible opaque data.
-      const binding = saved && { ...agentNameFields(saved), machineId: saved.machineId, cwd: saved.cwd, kind: saved.kind, title: saved.title, ...(saved.parentChatId === undefined ? {} : { parentChatId: saved.parentChatId }), ...(saved.ownerTaskId === undefined ? {} : { ownerTaskId: saved.ownerTaskId }), ...(saved.brief ? { brief: saved.brief } : {}) };
-      return { ...inventory, ...(runtime.authentication ? { authentication: runtime.authentication } : {}), ...(!taskClient && runtime.localMachineId ? { machineId: runtime.localMachineId } : {}), implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, modelSettings: 1, taskBrief: 1, ...(taskClient ? {} : { hostInventory: 1, rexAdopt: 1 }), rexStartup: 1, rexOpen: runtime.rexClient && runtime.localFiles ? 1 : 0, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding, ...(taskClient ? {} : { activity: await runtime.harness.inspect(context) }), provider: model?.provider, model: taskClient && model ? { provider: model.provider, modelId: model.modelId } : model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
+      const binding = saved && { ...agentNameFields(saved), machineId: saved.machineId, cwd: saved.cwd, kind: saved.kind, title: saved.title, ...(saved.parentChatId === undefined ? {} : { parentChatId: saved.parentChatId }), ...(saved.ownerTaskId === undefined ? {} : { ownerTaskId: saved.ownerTaskId }), ...(saved.managedParentChatId === undefined ? {} : { managedParentChatId: saved.managedParentChatId }), ...(saved.brief ? { brief: saved.brief } : {}) };
+      return { ...inventory, ...(runtime.authentication ? { authentication: runtime.authentication } : {}), ...(!taskClient && runtime.localMachineId ? { machineId: runtime.localMachineId } : {}), implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, modelSettings: 1, taskBrief: 1, ...(taskClient ? {} : { managedChildren: 1 }), ...(taskClient ? {} : { hostInventory: 1, rexAdopt: 1 }), rexStartup: 1, rexOpen: runtime.rexClient && runtime.localFiles ? 1 : 0, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding, ...(taskClient ? {} : { activity: await runtime.harness.inspect(context) }), provider: model?.provider, model: taskClient && model ? { provider: model.provider, modelId: model.modelId } : model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
     }
     case "model_settings":
     case "set_model_settings": {
@@ -112,6 +112,12 @@ export async function dispatch(runtime: DeckRuntime, request: Record<string, unk
         ...(args.after === undefined ? {} : { after: args.after }),
         ...(args.includeObservations === undefined ? {} : { includeObservations: args.includeObservations }),
       });
+    }
+    case "create_managed_child": {
+      if (taskClient || request.hubId !== runtime.hubId || !validMutationArgs("create_managed_child", args)) throw new DeckError("invalid", "Managed child creation requires the hub control surface, a parent and explicit hub identity");
+      const brief = briefFields(args);
+      const chat = await runtime.createManagedChild(args.parentChatId, args.title, args.requestId, brief);
+      return { chatId: String(chat.id), parentChatId: args.parentChatId, brief };
     }
     case "create_task": {
       if (!validMutationArgs("create_task", args)) throw new DeckError("invalid", "Invalid task creation arguments");

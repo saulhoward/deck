@@ -25,6 +25,7 @@ pub fn cwd(text: []const u8) bool {
 }
 pub fn form(value: V) bool {
     if (!wire.validTaskCreationForm(value) or !fields(value) or !title(value.object.get("title").?.string)) return false;
+    if (value.object.get("managedParentChatId")) |parent| return @import("managed_child.zig").safeId(parent) and !value.object.contains("machineId") and !value.object.contains("cwd");
     const path = value.object.get("cwd");
     return (value.object.contains("machineId") == (path != null)) and (if (path) |p| cwd(p.string) else true);
 }

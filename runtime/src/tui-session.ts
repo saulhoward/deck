@@ -16,10 +16,10 @@ import { DraftStore, type Draft } from "./drafts.js";
 import { hubCommand } from "./hub-client.js";
 import { HubError } from "./responses.js";
 import { validInventoryToolName, validMachineIdentity, validRexUuid, validTuiRequest, validTuiResponse, type TuiRequest, type TuiSnapshot, type TuiEntry, type TuiResponse } from "./generated/contracts.js";
-import { validSafePiId, validMutationArgs } from "./mutation-contracts.js";
+import { validManagedParent, validSafePiId, validMutationArgs } from "./mutation-contracts.js";
 
 import { validTaskTarget } from "./task-target.js";
-import { validForm, validBrief, taskCreationCommand } from "./task-brief.js";
+import { validForm, validBrief, taskCreationCommand, taskCreationArgs } from "./task-brief.js";
 import { validHosts } from "./host-inventory.js";
 
 export function validRequest(value: unknown): value is TuiRequest {
@@ -38,6 +38,7 @@ export function validReply(value: unknown, id: string, hubId?: string, chatId?: 
   if (!validTuiResponse(value) || value.id !== id || Buffer.byteLength(JSON.stringify(value)) >= 1024 * 1024) return false;
   if (!value.ok) return true;
   const s = value.snapshot;
+  if (!validManagedParent(s.chatId, s)) return false;
   if ((action === "models" || action === "configure") && !s.modelSettings) return false;
   const expectedChat = action === "select" ? target : action === "parent" ? inspectParentChatId : action === "subagent" ? undefined : chatId;
   if (action === "parent" && (!inspectParentChatId || s.inspectParentChatId !== undefined)) return false;
@@ -55,7 +56,7 @@ export function validReply(value: unknown, id: string, hubId?: string, chatId?: 
   if (s.tasks) {
     let previous = Number(s.tasks.after ?? 0);
     if (s.tasks.after !== undefined && !validSafePiId(s.tasks.after)) return false;
-    for (const row of s.tasks.items) { if (!validSafePiId(row.chatId) || Number(row.chatId) <= previous || (row.parentChatId !== undefined && (!validSafePiId(row.parentChatId) || row.kind !== "subagent" || Number(row.parentChatId) >= Number(row.chatId)))) return false; previous = Number(row.chatId); }
+    for (const row of s.tasks.items) { if (!validManagedParent(row.chatId, row) || !validSafePiId(row.chatId) || Number(row.chatId) <= previous || (row.parentChatId !== undefined && (!validSafePiId(row.parentChatId) || row.kind !== "subagent" || Number(row.parentChatId) >= Number(row.chatId)))) return false; previous = Number(row.chatId); }
     if (s.tasks.next !== undefined && (!validSafePiId(s.tasks.next) || Number(s.tasks.next) <= Number(s.tasks.after ?? 0) || Number(s.tasks.next) < previous)) return false;
   }
   if ((action === "rexStatus" || action === "rexInspect") && !s.rex) return false;
@@ -93,6 +94,7 @@ export class TuiSession {
   private supportsRex = false;
   private supportsStartup = false;
   private supportsBrief = false;
+  private supportsManaged = false;
   private supportsHosts = false;
   private startupBlocked = false;
   private attachmentMachine?: string;
@@ -155,11 +157,12 @@ export class TuiSession {
     this.localWorkspace = !inspectParent && status.binding?.cwd === process.cwd() && (this.mode === "task" || status.machineId === status.binding?.machineId);
     this.gitSampleAt = 0;
     this.supportsRex = !inspectParent && status.rexOpen === 1;
+    this.supportsManaged = !inspectParent && status.managedChildren === 1;
     this.supportsBrief = status.taskBrief === 1; this.supportsHosts = status.hostInventory === 1;
     this.supportsStartup = status.rexStartup === 1;
     this.supportsSettings = status.modelSettings === 1; this.settingsUncertain = !inspectParent && this.supportsSettings;
     const notice = inspectParent ? "Read-only subagent inspection. :parent returns to the parent; :subagent NAME selects a sibling." : !writable ? `${inspectOnly}${saved.length ? " Saved requests remain untouched; review them in the Rex client." : ""}` : active ? `Saved ${active.kind} ${active.requestId}: ${active.kind === "instructions" && !active.source ? "use --no-tui to retry workspace instructions, or :discard" : ":retry or :discard"}.${saved.length > 1 ? " Other drafts: --no-tui /drafts." : ""}` : "";
-    this.state = { ...(inspectParent ? { inspectParentChatId: inspectParent } : {}), ...(status.binding ? { cwd: displayText(status.binding.cwd, 4096), kind: status.binding.kind, ...(status.binding.agentRune === undefined ? {} : { agentRune: status.binding.agentRune }) } : {}), ...(status.binding?.agentName === undefined ? {} : { agentName: status.binding.agentName }), clientMode: this.mode, hubChatId: this.hubChatId!, hubId: this.hubId!, chatId: this.chatId!, title: this.chatId === this.hubChatId ? "Hub" : displayText(status.binding?.title || `Task ${this.chatId}`, 160), model: displayText(`${status.model?.provider ?? ""}/${status.model?.modelId ?? "unknown model"}`, 160), tools: status.tools, activityKnown: false, busy: false, queued: 0, entries: [], hasOlder: false, historical: false, preview: "", notice, draft: null, ...(status.binding?.brief ? { brief: { ...(status.binding.brief.problem === undefined ? {} : { problem: displayText(status.binding.brief.problem, 2048) }), ...(status.binding.brief.description === undefined ? {} : { description: displayText(status.binding.brief.description, 8192) }) } } : {}) };
+    this.state = { ...(status.binding?.managedParentChatId === undefined ? {} : { managedParentChatId: status.binding.managedParentChatId }), ...(inspectParent ? { inspectParentChatId: inspectParent } : {}), ...(status.binding ? { cwd: displayText(status.binding.cwd, 4096), kind: status.binding.kind, ...(status.binding.agentRune === undefined ? {} : { agentRune: status.binding.agentRune }) } : {}), ...(status.binding?.agentName === undefined ? {} : { agentName: status.binding.agentName }), clientMode: this.mode, hubChatId: this.hubChatId!, hubId: this.hubId!, chatId: this.chatId!, title: this.chatId === this.hubChatId ? "Hub" : displayText(status.binding?.title || `Task ${this.chatId}`, 160), model: displayText(`${status.model?.provider ?? ""}/${status.model?.modelId ?? "unknown model"}`, 160), tools: status.tools, activityKnown: false, busy: false, queued: 0, entries: [], hasOlder: false, historical: false, preview: "", notice, draft: null, ...(status.binding?.brief ? { brief: { ...(status.binding.brief.problem === undefined ? {} : { problem: displayText(status.binding.brief.problem, 2048) }), ...(status.binding.brief.description === undefined ? {} : { description: displayText(status.binding.brief.description, 8192) }) } } : {}) };
     this.inventorySampleAt = Date.now();
     this.inventory(status);
   }
@@ -284,7 +287,9 @@ export class TuiSession {
     if (this.active.kind === "instructions" && this.active.source !== "user") throw new Error("Use --no-tui to retry workspace instruction requests");
     if (this.active.kind === "task") {
       requireCreation(this.mode, this.chatId, this.hubChatId);
-      if (!this.supportsRex) throw new Error("Rex support is required to create a task; no request sent");
+      if (this.active.managedParentChatId !== undefined) {
+        if (!this.supportsManaged) throw new Error("Hub lacks managed children; no request sent");
+      } else if (!this.supportsRex) throw new Error("Rex support is required to create a task; no request sent");
     }
     if (this.active.kind === "task" && !this.supportsBrief && (this.active.problem !== undefined || this.active.description !== undefined)) throw new Error("Hub lacks task briefs; no request sent");
     this.activeSaved = false;
@@ -293,7 +298,8 @@ export class TuiSession {
     const method = this.active.kind === "task" ? taskCreationCommand(this.active) : this.active.kind === "instructions" ? "import_instructions" : "admit";
     const inputText = this.active.kind === "input" ? this.active.text : undefined;
     const { kind, chatId, requestId, ...args } = this.active;
-    const ack = await this.command(method, { requestId, ...args, ...(kind !== "task" ? { chatId } : {}) }, this.hubId);
+    const managed = this.active.kind === "task" && this.active.managedParentChatId !== undefined;
+    const ack = await this.command(method, this.active.kind === "task" ? taskCreationArgs(this.active) : { requestId, ...args, chatId }, this.hubId);
     this.activeSaved = false;
     await this.store!.remove(requestId); this.active = undefined;
     if (kind === "instructions") {
@@ -309,6 +315,10 @@ export class TuiSession {
       this.state!.notice = inputAdmittedNotice;
     }
     else {
+      if (managed && !this.supportsRex) {
+        this.state!.notice = `Managed child ${ack.chatId} created; no input submitted. :tasks shows its name; attach on its assigned host with deck agent --resume NAME --here.`;
+        return;
+      }
       // Creation is acknowledged and the exact draft is cleared before this
       // separate best-effort terminal attempt. Losing its reply must not turn
       // the acknowledged creation back into an input/task retry queue.
@@ -373,11 +383,12 @@ export class TuiSession {
       case "tasks": {
         const page = await this.command("list_chats", { limit: 25, ...(this.supportsHosts ? { includeObservations: true } : {}), ...(request.after ? { after: request.after } : {}) }, this.hubId);
         if (this.supportsHosts) state.hosts = await this.command("list_hosts", {}, this.hubId);
-        state.tasks = { items: page.items.map((row: any) => ({ ...(row.agentRune === undefined ? {} : { agentRune: row.agentRune }), ...(row.agentName === undefined ? {} : { agentName: row.agentName }), chatId: row.chatId, kind: row.kind, title: row.chatId === this.hubChatId ? "Hub" : displayText(row.title, 160), machineId: displayText(row.machineId, 80), cwd: displayText(row.cwd, 256), ...(row.parentChatId ? { parentChatId: row.parentChatId } : {}), activity: row.activity ?? "unknown", rexState: row.rexState ?? "unknown", connection: state.hosts ? state.hosts.items.find(h => h.machineId === row.machineId)?.connection ?? "unregistered" : "unknown" })), ...(request.after ? { after: request.after } : {}), ...(page.next ? { next: page.next } : {}) };
+        state.tasks = { items: page.items.map((row: any) => ({ ...(row.agentRune === undefined ? {} : { agentRune: row.agentRune }), ...(row.agentName === undefined ? {} : { agentName: row.agentName }), chatId: row.chatId, kind: row.kind, title: row.chatId === this.hubChatId ? "Hub" : displayText(row.title, 160), machineId: displayText(row.machineId, 80), cwd: displayText(row.cwd, 256), ...(row.parentChatId ? { parentChatId: row.parentChatId } : {}), ...(row.managedParentChatId ? { managedParentChatId: row.managedParentChatId } : {}), activity: row.activity ?? "unknown", rexState: row.rexState ?? "unknown", connection: state.hosts ? state.hosts.items.find(h => h.machineId === row.machineId)?.connection ?? "unregistered" : "unknown" })), ...(request.after ? { after: request.after } : {}), ...(page.next ? { next: page.next } : {}) };
         break;
       }
       case "create": {
-        if (!this.supportsRex) throw new Error("Rex support is required to create a task; no request sent");
+        const managed = request.taskForm?.managedParentChatId !== undefined;
+        if (managed ? !this.supportsManaged : !this.supportsRex) throw new Error(managed ? "Hub lacks managed children; no request sent" : "Rex support is required to create a task; no request sent");
         if (this.active || this.settingsUncertain) throw new Error("Resolve saved requests/settings before creating a task");
         const form = request.taskForm ?? request.taskTarget;
         if (!form?.machineId && !this.binding) throw new Error("Saved workspace binding unavailable; no task requested");
@@ -389,7 +400,7 @@ export class TuiSession {
           if (!hosts.items.some((h: any) => h.machineId === request.taskForm!.machineId)) throw new Error("Selected host is not registered; no task requested");
         }
         if (!this.supportsBrief && (form?.problem !== undefined || form?.description !== undefined)) throw new Error("Hub lacks task briefs; no request sent");
-        this.active = { kind: "task", chatId: this.chatId!, requestId: randomUUID(), title: request.text!, ...this.binding!, ...form }; this.activeSaved = false;
+        this.active = { kind: "task", chatId: this.chatId!, requestId: randomUUID(), title: request.text!, ...(managed ? {} : this.binding!), ...form }; this.activeSaved = false;
         await this.deliver(); break;
       }
       case "rexStatus":

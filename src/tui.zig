@@ -50,6 +50,7 @@ const help =
     \\:agentsmd             load ~/.codex/AGENTS.md from this chat's machine
     \\
     \\:new                  hub only: JSON task-brief composer (Ctrl-S creates)
+    \\:new-child [ID]       hub only: managed child of ID (defaults to hub)
     \\:hosts                registered hosts; Enter selects host for new task
     \\:brief                inspect saved creation brief (read only)
     \\:cancel               clear an unsubmitted task form, not admitted work
@@ -994,6 +995,26 @@ const Model = struct {
         self.focus = .prompt;
         self.note("Paste JSON {title,problem?,description?,machineId?,cwd?}. Ctrl-S creates; :cancel clears. No input/generation.");
     }
+    fn beginManagedForm(self: *Model, parent: []const u8) !void {
+        // A previous composer may already own task_form even when the normal
+        // navigation guards refuse. Never mistake that old flag for success.
+        if (self.task_form) {
+            self.note("Resolve the current task form first; :cancel clears only unsubmitted text.");
+            return;
+        }
+        if (!@import("managed_child.zig").safeId(.{ .string = parent })) {
+            self.note("Use :new-child with a parent chat ID from :tasks (or omit for hub).");
+            return;
+        }
+        try self.beginTaskForm(null);
+        if (!self.task_form) return;
+        const text = try std.fmt.allocPrint(self.a, "{{\"title\":\"\",\"managedParentChatId\":\"{s}\",\"problem\":\"\",\"description\":\"\"}}", .{parent});
+        defer self.a.free(text);
+        try self.editor.set(text);
+        self.editor.cursor = 10; // Inside the empty title string, not before the JSON.
+        self.editor.mode = .insert;
+        self.note("Managed child: edit JSON title/problem/description. Inherits parent host/model/tools; Ctrl-S creates, not input. :cancel clears.");
+    }
     fn submitTaskForm(self: *Model) !void {
         if (!self.canWrite() or !self.canList() or self.locked() or self.settings_uncertain) {
             self.note("Resolve saved requests/settings before creating.");
@@ -1115,6 +1136,10 @@ const Model = struct {
         } else if (std.mem.eql(u8, cmd, "tools")) {
             self.tools_view = true;
             self.tools_scroll = 0;
+        } else if (std.mem.eql(u8, cmd, "new-child")) {
+            if (self.state()) |s| try self.beginManagedForm(s.hubChatId);
+        } else if (std.mem.startsWith(u8, cmd, "new-child ")) {
+            try self.beginManagedForm(std.mem.trim(u8, cmd[10..], " "));
         } else if (std.mem.eql(u8, cmd, "new")) try self.beginTaskForm(null) else if (std.mem.eql(u8, cmd, "hosts")) try self.issue(.hosts) else if (std.mem.eql(u8, cmd, "brief")) {
             self.brief_view = true;
             self.help_scroll = 0;
@@ -1574,7 +1599,7 @@ const Model = struct {
                 const found = self.matches();
                 for (found.items[start..@min(found.len, start + count)], start..) |item, index| {
                     const task = page.items[item.index];
-                    const parent = if (task.parentChatId) |id| try std.fmt.allocPrint(ctx.arena, " child of {s}", .{id}) else "";
+                    const parent = if (task.managedParentChatId) |id| try std.fmt.allocPrint(ctx.arena, " managed child of {s}", .{id}) else if (task.parentChatId) |id| try std.fmt.allocPrint(ctx.arena, " captured child of {s}", .{id}) else "";
                     const text = try std.fmt.allocPrint(ctx.arena, "{s} {s} [{s}]{s} {s} · {s}", .{ if (index == self.task_index) ">" else " ", task.chatId, if (task.kind == .main) "hub" else @tagName(task.kind), parent, task.agentName orelse "unnamed", task.title });
                     const detail = try std.fmt.allocPrint(ctx.arena, "  saved {s}:{s}", .{ task.machineId, task.cwd });
                     const sample = try std.fmt.allocPrint(ctx.arena, "  link {s} · agent {s} · saved Rex {s}", .{ if (task.connection) |v| @tagName(v) else "unknown", if (task.activity) |v| @tagName(v) else "unknown", task.rexState orelse "unknown" });
@@ -1782,7 +1807,7 @@ const Model = struct {
         const symbol = if (s) |snap| rune(snap) else "·";
         const symbol_sep: []const u8 = if (symbol.len == 0) "" else " ";
         const symbol_width: u16 = @intCast(displayWidth(ctx, symbol) + symbol_sep.len);
-        const role = if (is_hub) "" else if (s) |snap| (if (snap.kind == .subagent) "subagent" else "agent") else "";
+        const role = if (is_hub) "" else if (s) |snap| (if (snap.kind == .subagent) "subagent" else if (snap.managedParentChatId) |parent| try std.fmt.allocPrint(ctx.arena, "managed child of {s}", .{parent}) else "agent") else "";
         if (layout.sidebar > 0) {
             for (0..h - 3) |y| @memset(surface.buffer[y * w + layout.main + 1 .. (y + 1) * w], .{ .style = dim });
             for (0..h - 3) |y| surface.writeCell(layout.main, @intCast(y), .{ .char = .{ .grapheme = if (y == upper) "┤" else "│", .width = 1 }, .style = Theme.rule });
@@ -2127,12 +2152,24 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     try model.beginTaskForm(null);
     try std.testing.expect(model.task_form);
     try model.editor.set("{\"title\":\"Unsubmitted\"}");
+    try model.beginManagedForm("2");
+    try std.testing.expectEqualStrings("{\"title\":\"Unsubmitted\"}", model.editor.text.items);
+    bridge.pending = .{ .version = 1, .id = "pending", .action = .create };
+    try model.beginManagedForm("2");
+    try std.testing.expectEqualStrings("{\"title\":\"Unsubmitted\"}", model.editor.text.items);
+    bridge.pending = null;
     try model.command.appendSlice(a, "cancel");
     try model.ex(&ctx);
     try std.testing.expect(!model.task_form);
     try std.testing.expectEqualStrings("", model.editor.text.items);
     try std.testing.expect(bridge.pending == null);
 
+    try model.beginManagedForm("9007199254740992");
+    try std.testing.expect(!model.task_form);
+    try model.beginManagedForm("2");
+    try std.testing.expect(model.task_form);
+    try std.testing.expect(std.mem.indexOf(u8, model.editor.text.items, "\"managedParentChatId\":\"2\"") != null);
+    model.task_form = false;
     // Hub inspection keeps the hub color but cannot edit or mutate a task.
     model.snapshot.?.value.case0.snapshot.draft = null;
     model.snapshot.?.value.case0.snapshot.chatId = "2";

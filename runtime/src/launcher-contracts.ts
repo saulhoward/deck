@@ -3,7 +3,7 @@ import { responseResult } from "./responses.js";
 import { validLauncherTaskReply, validLauncherRequest, validLauncherList, validLauncherCreated, validLauncherOpened, validLauncherAdopted, validLauncherInspection, validResponseEnvelope, type LauncherRequest, type ResponseEnvelope } from "./generated/contracts.js";
 import { validBrief, validBriefBinding, briefFields } from "./task-brief.js";
 import { validAdoptArgs, validRexReply } from "./rex-open-contracts.js";
-import { validSafePiId } from "./mutation-contracts.js";
+import { validManagedParent, validSafePiId } from "./mutation-contracts.js";
 export const launcherBodyLimit = 128 * 1024;
 export function validLaunchRequest(value: unknown): value is LauncherRequest {
   if (!validLauncherRequest(value) || Buffer.byteLength(JSON.stringify(value)) > launcherBodyLimit) return false;
@@ -30,7 +30,7 @@ export function validLaunchResponse(value: unknown, request: LauncherRequest, hu
         return true;
       } catch { return false; }
     }
-    case "launch_list": return validLauncherList(r) && r.hubId===hubId && r.machineId===machineId && (r.next===undefined || (validSafePiId(r.next) && Number(r.next)>Number(request.args.after??0))) && r.items.every((t,i)=>validSafePiId(t.chatId) && validBriefBinding("task",t.cwd) && Number(t.chatId)>Number(i?r.items[i-1]!.chatId:request.args.after??0) && (r.next===undefined || Number(t.chatId)<=Number(r.next)));
+    case "launch_list": return validLauncherList(r) && r.hubId===hubId && r.machineId===machineId && (r.next===undefined || (validSafePiId(r.next) && Number(r.next)>Number(request.args.after??0))) && r.items.every((t,i)=>validManagedParent(t.chatId, { ...t, kind: "task" }) && validSafePiId(t.chatId) && validBriefBinding("task",t.cwd) && Number(t.chatId)>Number(i?r.items[i-1]!.chatId:request.args.after??0) && (r.next===undefined || Number(t.chatId)<=Number(r.next)));
     case "launch_create": return validLauncherCreated(r) && r.hubId===hubId && r.machineId===machineId && r.requestId===request.args.requestId && validSafePiId(r.chatId) && r.title===request.args.title && r.cwd===request.args.cwd && validBrief(r.brief) && JSON.stringify(briefFields(r.brief))===JSON.stringify(briefFields(request.args));
     case "launch_adopt": return validLauncherAdopted(r) && r.hubId === hubId && r.machineId === machineId && validRexReply({ command: "rex_adopt", args: request.args, hubId }, r.ack);
     case "launch_open": return validLauncherOpened(r) && r.hubId===hubId && r.machineId===machineId && r.ack.chatId===request.args.chatId && r.ack.requestId===request.args.requestId && validSafePiId(r.ack.taskId);

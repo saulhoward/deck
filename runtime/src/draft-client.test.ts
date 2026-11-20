@@ -13,7 +13,7 @@ async function waitFor(check: () => boolean) {
   throw new Error("Client condition timed out");
 }
 
-for (const kind of ["input", "task"] as const) test(`SIGKILL recovery preserves ${kind} identity and original arguments across port/binding changes`, { timeout: 15_000 }, async (t) => {
+for (const kind of ["input", "task", "managed"] as const) test(`SIGKILL recovery preserves ${kind} identity and original arguments across port/binding changes`, { timeout: 15_000 }, async (t) => {
   const local = await clientEnv(); const store = new DraftStore("durable-hub", local.env.DECK_CLIENT_STATE_DIRECTORY);
   const calls: Record<string, unknown>[] = []; const effects = new Set<string>();
   let binding = { machineId: "offline-original", cwd: "/original" };
@@ -21,17 +21,17 @@ for (const kind of ["input", "task"] as const) test(`SIGKILL recovery preserves 
     const chunks = []; for await (const chunk of request) chunks.push(chunk);
     const { id, command, args } = JSON.parse(Buffer.concat(chunks).toString()) as { id: string; command: string; args: Record<string, unknown> };
     let result: unknown = {};
-    if (command === "status") result = { hubId: "durable-hub", hubGuard: 1, rexOpen: 1, chatId: args.chatId ?? "2", mainChatId: "2", model: {}, tools: "offline", binding };
+    if (command === "status") result = { hubId: "durable-hub", hubGuard: 1, ...(kind === "managed" ? { managedChildren: 1, taskBrief: 1 } : { rexOpen: 1 }), chatId: args.chatId ?? "2", mainChatId: "2", model: {}, tools: "offline", binding };
     else if (command === "history") result = { items: [] };
     else if (command === "rex_open") result = { version: 1, chatId: "3", requestId: args.requestId, taskId: "9", status: "admitted", completion: "not_waited", bestEffort: true };
     else {
-      assert.equal(command, kind === "input" ? "admit" : "create_task");
+      assert.equal(command, kind === "input" ? "admit" : kind === "managed" ? "create_managed_child" : "create_task");
       calls.push(args); effects.add(String(args.requestId));
       // This must already exist before even the first network request.
       const saved = (await store.load(String(args.requestId))).request;
-      assert.equal(saved.chatId, "2"); assert.equal(saved.kind, kind);
+      assert.equal(saved.chatId, "2"); assert.equal(saved.kind, kind === "managed" ? "task" : kind);
       if (calls.length === 1) return; // Commit happened; acknowledgement is lost.
-      result = kind === "input" ? { submissionId: "10" } : { chatId: "3" };
+      result = kind === "input" ? { submissionId: "10" } : kind === "managed" ? { chatId: "3", parentChatId: "1", brief: { problem: " exact 日本語\n", description: "saved child" } } : { chatId: "3" };
     }
     response.end(JSON.stringify({ version: 1, id, ok: true, result }));
   });
@@ -46,7 +46,7 @@ for (const kind of ["input", "task"] as const) test(`SIGKILL recovery preserves 
   };
   t.after(async () => { for (const child of clients) if (child.exitCode === null && child.signalCode === null) { const closed = once(child, "close"); child.kill("SIGKILL"); await closed; } server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); await local.close(); });
   const first = launch(); await waitFor(() => first.output().includes("Deck chat"));
-  first.child.stdin!.write(kind === "input" ? "Original input\n" : "/task Original task\n");
+  first.child.stdin!.write(kind === "input" ? "Original input\n" : kind === "managed" ? `/new ${JSON.stringify({ title: "Managed", managedParentChatId: "1", problem: " exact 日本語\n", description: "saved child" })}\n` : "/task Original task\n");
   await waitFor(() => calls.length === 1); first.child.kill("SIGKILL"); await first.closed;
   assert.equal((await store.list()).length, 1);
   server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -58,6 +58,7 @@ for (const kind of ["input", "task"] as const) test(`SIGKILL recovery preserves 
   assert.match(second.errors(), /Retry or discard/);
   assert.deepEqual(calls[1], calls[0]); assert.equal(effects.size, 1);
   if (kind === "task") { assert.equal(calls[1]!.machineId, "offline-original"); assert.equal(calls[1]!.cwd, "/original"); }
+  if (kind === "managed") { assert.equal(calls[1]!.parentChatId, "1"); assert.equal(calls[1]!.machineId, undefined); assert.equal(calls[1]!.cwd, undefined); }
   assert.deepEqual(await store.list(), []);
 });
 

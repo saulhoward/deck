@@ -77,6 +77,7 @@ pub fn validReply(command: []const u8, raw: V, expected_hub: ?V, value: V) bool 
             }
         }
         if (value.object.get("binding")) |binding| {
+            if (!@import("managed_child.zig").validLink(field(value, "chatId"), binding)) return false;
             if (binding.object.get("brief")) |brief| if (!@import("task_brief.zig").valid(brief)) return false;
             const parent = binding.object.get("parentChatId");
             const owner = binding.object.get("ownerTaskId");

@@ -6,6 +6,8 @@ export type Binding = { machineId: string; cwd: string };
 type Chat = Binding & AgentNameMetadata & {
   kind: "main" | "task" | "subagent";
   title: string;
+  // Deck relation only: never a Pi ownership/cancellation edge.
+  managedParentChatId?: string;
   parentChatId?: string;
   ownerTaskId?: string;
   brief?: TaskBrief;

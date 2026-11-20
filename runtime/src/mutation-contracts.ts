@@ -1,10 +1,16 @@
 // Semantic adapters for the migrated public mutations, not a command registry or
 // second source of wire shapes. Other commands keep their existing checks.
 import { validBrief, validBriefBinding } from "./task-brief.js";
-import { validAdmitArgs, validAdmitAck, validCreateTaskArgs, validCreateTaskBriefArgs, validCreateTaskAck, validInstructionImportArgs, validInstructionImportAck, validStopArgs, validStopAck, validRexStartupArgs, validRexStartupAck, validTransportId, validPiId, type StopArgs, type RexStartupArgs, type AdmitArgs, type CreateTaskArgs, type CreateTaskBriefArgs, type InstructionImportArgs, type RequestEnvelope } from "./generated/contracts.js";
+import { validCreateManagedChildArgs, validCreateManagedChildAck, type CreateManagedChildArgs, validAdmitArgs, validAdmitAck, validCreateTaskArgs, validCreateTaskBriefArgs, validCreateTaskAck, validInstructionImportArgs, validInstructionImportAck, validStopArgs, validStopAck, validRexStartupArgs, validRexStartupAck, validTransportId, validPiId, type StopArgs, type RexStartupArgs, type AdmitArgs, type CreateTaskArgs, type CreateTaskBriefArgs, type InstructionImportArgs, type RequestEnvelope } from "./generated/contracts.js";
 
 export type ReplyContext = Pick<RequestEnvelope, "command" | "args" | "hubId">;
 export const validSafePiId = (value: unknown): value is string => validPiId(value) && Number.isSafeInteger(Number(value));
+// Managed links are navigation metadata, never captured-child ownership.
+// Call only after the containing generated shape guard has succeeded.
+export function validManagedParent(chatId: string, value: { kind?: string; managedParentChatId?: string; parentChatId?: string; ownerTaskId?: string }): boolean {
+  return value.managedParentChatId === undefined || (value.kind === "task" && value.parentChatId === undefined && value.ownerTaskId === undefined && validSafePiId(chatId) && validSafePiId(value.managedParentChatId) && Number(value.managedParentChatId) < Number(chatId));
+}
+export function validMutationArgs(command: "create_managed_child", value: unknown): value is CreateManagedChildArgs;
 export function validMutationArgs(command: "admit", value: unknown): value is AdmitArgs;
 export function validMutationArgs(command: "create_task", value: unknown): value is CreateTaskArgs;
 export function validMutationArgs(command: "create_task_brief", value: unknown): value is CreateTaskBriefArgs;
@@ -18,6 +24,7 @@ export function validMutationArgs(command: string, value: unknown): boolean {
     // bounds. This migration does not widen admission or reinterpret saved bytes.
     case "admit": return validAdmitArgs(value) && validSafePiId(value.chatId) && value.requestId.length <= 200 && value.text.length <= 200_000;
     case "create_task": return validCreateTaskArgs(value) && value.requestId.length <= 200 && [value.title, value.machineId, value.cwd].every((text) => text.length <= 200_000);
+    case "create_managed_child": return validCreateManagedChildArgs(value) && validSafePiId(value.parentChatId) && value.requestId.length <= 200 && validBriefBinding(value.title, "/") && validBrief({ ...(value.problem === undefined ? {} : { problem: value.problem }), ...(value.description === undefined ? {} : { description: value.description }) });
     case "create_task_brief": return validCreateTaskBriefArgs(value) && value.requestId.length <= 200 && value.machineId.length <= 200_000 && validBriefBinding(value.title, value.cwd) && (value.problem !== undefined || value.description !== undefined) && validBrief({ ...(value.problem === undefined ? {} : { problem: value.problem }), ...(value.description === undefined ? {} : { description: value.description }) });
     case "import_instructions": return validInstructionImportArgs(value) && validSafePiId(value.chatId) && value.requestId.length <= 200 && [value.machineId, value.cwd].every((text) => text.length <= 200_000);
     case "stop": return validStopArgs(value) && validSafePiId(value.chatId);
@@ -30,6 +37,11 @@ export function validMutationAck(request: ReplyContext, value: unknown): boolean
   switch (request.command) {
     case "admit": return validAdmitAck(value) && validSafePiId(value.submissionId);
     case "create_task": return validCreateTaskAck(value) && validSafePiId(value.chatId) && value.brief === undefined;
+    case "create_managed_child": {
+      if (!validTransportId(request.hubId) || request.hubId.length > 200 || !validCreateManagedChildAck(value) || !validSafePiId(value.chatId) || !validSafePiId(value.parentChatId)) return false;
+      const original = request.args as CreateManagedChildArgs;
+      return Number(value.parentChatId) < Number(value.chatId) && value.parentChatId === original.parentChatId && validBrief(value.brief) && value.brief.problem === original.problem && value.brief.description === original.description;
+    }
     case "create_task_brief": {
       if (!validCreateTaskAck(value) || !validSafePiId(value.chatId)) return false;
       const original = request.args as CreateTaskBriefArgs;

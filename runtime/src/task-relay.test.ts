@@ -8,7 +8,8 @@ import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import type { TaskId } from "@earendil-works/pi-durable";
-import { DeckRuntime } from "./deck.js";
+import { ChatDoc, DeckRuntime } from "./deck.js";
+import { setup } from "./managed-child.test.support.js";
 import { RexDoc, type RexPlan } from "./rex-allocation.js";
 import { taskClientResponse } from "./remote-clients.js";
 import { taskCommand, taskScope } from "./task-client.js";
@@ -20,9 +21,10 @@ import { IMPLEMENTATION, model, provider, gate, within } from "./instructions.te
 import type { TaskClientScope } from "./generated/contracts.js";
 const machine = "b".repeat(32), uuid = "12345678-1234-1234-1234-123456789abc";
 const target = { executable: "/tools/rex", server: "unix:///tmp/private-rex.sock", hostId: uuid, instanceId: uuid };
-async function fixture() {
+async function fixture(managed = false) {
   const root = await mkdtemp(join(tmpdir(), "dcr-")); const client = { executable: "/tools/deck", socket: join(root, "client.sock") };
-  const { models, faux } = provider(); faux.setResponses(Array.from({ length: 8 }, () => fauxAssistantMessage("task reply")));
+  const managedSetup = managed ? setup() : undefined;
+  const { models, faux } = managedSetup ? { models: managedSetup.options.models, faux: managedSetup.faux } : provider(); faux.setResponses(Array.from({ length: 8 }, () => fauxAssistantMessage("task reply")));
   const binding = { machineId: machine, cwd: "/remote workspace" }; let admission: Promise<void> | undefined;
   const plans: RexPlan[] = []; let discoveries = 0;
   const runtime = await DeckRuntime.open(join(root, "pi.sqlite"), { models, model, implementation: IMPLEMENTATION, rexClient: "/hub/deck", binding: { machineId: "a".repeat(32), cwd: root }, environment: () => undefined, admissionGuard: async () => { await admission; }, hostFiles: {
@@ -35,16 +37,18 @@ async function fixture() {
       return { ok: true, code: "allocated", output: JSON.stringify({ version: 1, ...plan, sessionId: plan.sessionId ?? `session:${randomUUID()}`, windowId: `window:${randomUUID()}`, blockId: `block:${randomUUID()}`, readiness: "not_checked" }) };
     },
   } });
-  const chat = await runtime.createTask("remote", binding), chatId = String(chat.id);
-  const open = async () => {
-    const ack = await runtime.openTerminal({ chatId, requestId: randomUUID(), port: 52800 });
+  const parent = await runtime.createTask("remote", binding);
+  const chat = managed ? await runtime.createManagedChild(String(parent.id), "Managed remote child", randomUUID()) : parent, chatId = String(chat.id);
+  const open = async (id = chatId) => {
+    const selected = await runtime.chat(id);
+    const ack = await runtime.openTerminal({ chatId: id, requestId: randomUUID(), port: 52800 });
     await runtime.harness.waitForTask(Number(ack.taskId) as TaskId, context);
-    const doc = (await runtime.harness.snapshot(RexDoc, chat.id, context))!;
-    return taskScope(runtime.hubId, chatId, doc.allocationId, doc.binding!.blockId);
+    const doc = (await runtime.harness.snapshot(RexDoc, selected.id, context))!;
+    return taskScope(runtime.hubId, id, doc.allocationId, doc.binding!.blockId);
   };
   const scope = await open();
   const direct = async (name: string, args: object, s: TaskClientScope = scope, assigned = machine, hubId = runtime.hubId) => JSON.parse(await taskClientResponse(runtime, assigned, client, { connectionId: "a".repeat(64), id: "b".repeat(64), scope: s, body: JSON.stringify({ version: 1, id: randomUUID(), command: name, args, hubId }) }));
-  return { root, client, runtime, chat, chatId, scope, plans, open, direct, discoveries: () => discoveries, blockAdmission: (p?: Promise<void>) => { admission = p; }, close: async () => { await runtime.close(); await rm(root, { recursive: true, force: true }); } };
+  return { root, client, runtime, parent, chat, chatId, scope, plans, open, direct, discoveries: () => discoveries, blockAdmission: (p?: Promise<void>) => { admission = p; }, close: async () => { await runtime.close(); await rm(root, { recursive: true, force: true }); } };
 }
 test("assigned-host Rex launch pins its approved client/socket; remote commands are allocation/task scoped", async () => {
   const f = await fixture();
@@ -130,8 +134,8 @@ test("remote mutation scope is rechecked at serialized admission, not only at so
     assert.deepEqual((await f.runtime.modelSettings(f.chatId)).selection, selection);
   } finally { blocked.release(); await f.close(); }
 });
-test("private socket TUI keeps exact draft on lost admission ACK; reconnect is read-only, explicit retry deduplicates", async () => {
-  const f = await fixture(); const peers = new Set<Socket>(); const requests: any[] = [], admissions: any[] = []; let drop = true;
+for (const managed of [false, true]) test(`${managed ? "managed child" : "ordinary task"} private socket TUI keeps exact draft on lost admission ACK; reconnect is read-only, explicit retry deduplicates`, async () => {
+  const f = await fixture(managed); const peers = new Set<Socket>(); const requests: any[] = [], admissions: any[] = []; let drop = true;
   const server = createServer(socket => {
     peers.add(socket); socket.on("close", () => peers.delete(socket)); socket.on("error", () => {});
     socket.pipe(new FrameDecoder()).on("data", (message: any) => {
@@ -158,13 +162,16 @@ test("private socket TUI keeps exact draft on lost admission ACK; reconnect is r
     assert.deepEqual(admissions[0], { ...admissions[1], id: admissions[0].id });
     const sends = requests.filter(r => r.command === "admit"); assert.deepEqual(sends[0].args, sends[1].args);
     assert.equal(sends[0].args.text, text); assert.equal(requests.filter(r => r.command === "rex_startup").length, 1);
+    assert.equal((await f.runtime.history(f.chatId)).items.filter(e => e.kind === "deck.input").length, 1);
+    if (managed) assert.deepEqual((await f.runtime.history(String(f.parent.id))).items, [], "human input is not forwarded to the managed parent");
+    assert.equal(f.plans.length, 1, "participation never allocates another terminal");
     await assert.rejects(session.handle({ version: 1, id: "nav", action: "tasks" }), /locked/);
     await assert.rejects(taskCommand(f.client.socket, f.scope, "status", { chatId: String(f.runtime.main.id) }, f.runtime.hubId), /not sent/);
   } finally { for (const peer of peers) peer.destroy(); await new Promise<void>(r => server.close(() => r())); await f.close(); }
 });
 
-test("worker task TUI inspects named children through parent-pinned relay, never broadens ordinary chat scope", async () => {
-  const f = await fixture(), peers = new Set<Socket>(), requests: any[] = [];
+for (const managed of [false, true]) test(`${managed ? "managed child" : "ordinary task"} worker TUI inspects named children through parent-pinned relay, never broadens ordinary chat scope`, async () => {
+  const f = await fixture(managed), peers = new Set<Socket>(), requests: any[] = [];
   const { namedChildren } = await import("./subagent-view.test.support.js");
   const children = await namedChildren(f.runtime, f.chatId, 18), child = children[0]!;
   const other = await f.runtime.createTask("Other parent", { machineId: machine, cwd: "/remote workspace" });
@@ -199,4 +206,75 @@ test("worker task TUI inspects named children through parent-pinned relay, never
     await assert.rejects(act("poll")); await assert.rejects(act("parent"));
     assert.equal(requests.some(r => ["admit", "stop", "set_model_settings", "create_task", "rex_open"].includes(r.command)), false);
   } finally { for (const peer of peers) peer.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); await f.close(); }
+});
+
+test("managed child Rex participation changes only its own settings and cannot use its relationship as generic task authority", async () => {
+  const f = await fixture(true);
+  try {
+    const parentId = String(f.parent.id), parentSelection = (await f.runtime.modelSettings(parentId)).selection;
+    const sibling = await f.runtime.createManagedChild(parentId, "Sibling", randomUUID()), siblingId = String(sibling.id);
+    const status = await f.direct("status", { chatId: f.chatId }); assert.ok(status.ok);
+    assert.equal(status.result.binding.kind, "task"); assert.equal(status.result.binding.managedParentChatId, parentId);
+    assert.equal(status.result.managedChildren, undefined); assert.equal(status.result.activity, undefined);
+    const initial = (await f.runtime.modelSettings(f.chatId)).selection;
+    const settings = { chatId: f.chatId, expected: initial, selection: { ...initial, thinkingLevel: "high" } };
+    assert.notDeepEqual(settings.selection, initial);
+    assert.equal((await f.direct("set_model_settings", settings)).ok, false, "startup is required even for managed children");
+    assert.ok((await f.direct("rex_startup", { chatId: f.chatId, allocationId: f.scope.allocationId, blockId: f.scope.blockId })).ok);
+    for (const worker of ["c".repeat(32), "a".repeat(32)]) {
+      assert.equal((await f.direct("status", { chatId: f.chatId }, f.scope, worker)).ok, false);
+      assert.equal((await f.direct("set_model_settings", settings, f.scope, worker)).ok, false);
+      assert.equal((await f.direct("admit", { chatId: f.chatId, requestId: randomUUID(), text: "wrong worker", mode: "followUp" }, f.scope, worker)).ok, false);
+    }
+    assert.deepEqual((await f.direct("model_settings", { chatId: f.chatId })).result.selection, initial);
+    const changed = await f.direct("set_model_settings", settings); assert.ok(changed.ok); assert.deepEqual(changed.result.selection, settings.selection);
+    assert.deepEqual((await f.runtime.modelSettings(parentId)).selection, parentSelection);
+    assert.deepEqual((await f.runtime.modelSettings(siblingId)).selection, parentSelection);
+    const parentScope = await f.open(parentId);
+    assert.ok((await f.direct("rex_startup", { chatId: parentId, allocationId: parentScope.allocationId, blockId: parentScope.blockId }, parentScope)).ok);
+    assert.ok((await f.direct("status", { chatId: parentId }, parentScope)).ok);
+    assert.equal((await f.direct("status", { chatId: f.chatId }, parentScope)).ok, false, "parent allocation does not authorize even reads of its managed child");
+    for (const id of [parentId, siblingId, String(f.runtime.main.id), "999999"]) {
+      for (const [command, args] of [
+        ["status", { chatId: id }], ["history", { chatId: id }], ["model_settings", { chatId: id }], ["stop", { chatId: id }],
+        ["admit", { chatId: id, requestId: randomUUID(), text: "cross-task", mode: "followUp" }], ["set_model_settings", { ...settings, chatId: id }],
+      ] as const) {
+        const refused = await f.direct(command, args); assert.equal(refused.ok, false, `${command}: ${id}`);
+        assert.deepEqual(refused.error, { code: "conflict", message: "Remote task scope unavailable; earlier requests may have applied" }); assert.equal(refused.result, undefined);
+      }
+    }
+    for (const [command, args] of [
+      ["create_managed_child", { parentChatId: parentId, requestId: randomUUID(), title: "Forbidden sibling" }],
+      ["create_task", { requestId: randomUUID(), title: "Forbidden", machineId: machine, cwd: "/remote workspace" }],
+      ["list_chats", {}], ["list_hosts", {}], ["status", {}],
+      ["rex_open", { chatId: f.chatId, requestId: randomUUID(), port: 52800 }],
+    ] as const) {
+      const refused = await f.direct(command, args); assert.equal(refused.ok, false, command); assert.equal(refused.error.code, "conflict");
+    }
+    assert.equal((await f.runtime.listChats()).items.length, 4); assert.equal(f.plans.length, 2);
+    assert.deepEqual((await f.runtime.modelSettings(f.chatId)).selection, settings.selection);
+    for (const id of [f.chatId, parentId, siblingId]) assert.deepEqual((await f.runtime.history(id)).items.filter(item => item.kind === "deck.input"), []);
+  } finally { await f.close(); }
+});
+
+test("forged managed relationship cannot grant Rex authority when Pi canonical ownership is still captured", async () => {
+  const f = await fixture(true);
+  const { namedChildren } = await import("./subagent-view.test.support.js");
+  try {
+    const captured = (await namedChildren(f.runtime, f.chatId))[0]!, owned = await f.runtime.chat(captured.chatId);
+    await owned.commit(async tx => {
+      const saved = await tx.doc(ChatDoc, owned.id);
+      saved.kind = "task"; saved.managedParentChatId = String(f.parent.id);
+      delete saved.parentChatId; delete saved.ownerTaskId;
+    }, context);
+    assert.ok((await f.runtime.harness.commit(tx => tx.conversation(owned.id), context))!.owner);
+    const discoveries = f.discoveries(), allocations = f.plans.length;
+    await assert.rejects(dispatch(f.runtime, { version: 1, id: randomUUID(), command: "rex_open", hubId: f.runtime.hubId, args: { chatId: captured.chatId, requestId: randomUUID(), port: 52800 } }), { code: "invalid" });
+    assert.equal(f.discoveries(), discoveries); assert.equal(f.plans.length, allocations);
+    assert.equal(await f.runtime.harness.snapshot(RexDoc, owned.id, context), undefined);
+    const forgedScope = { ...f.scope, chatId: captured.chatId };
+    for (const command of ["status", "model_settings", "stop"]) assert.equal((await f.direct(command, { chatId: captured.chatId }, forgedScope)).ok, false);
+    assert.equal((await f.direct("rex_startup", { chatId: captured.chatId, allocationId: forgedScope.allocationId, blockId: forgedScope.blockId }, forgedScope)).ok, false);
+    assert.equal((await f.runtime.history(captured.chatId)).items.filter(item => item.kind === "deck.input").length, 0);
+  } finally { await f.close(); }
 });

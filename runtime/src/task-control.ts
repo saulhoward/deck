@@ -4,6 +4,7 @@ import type { Context } from "@earendil-works/chord";
 import { ChatDoc } from "./chat-doc.js";
 import type { DeckRuntime } from "./deck.js";
 import { briefFields, validForm } from "./task-brief.js";
+import { independentDeckChat } from "./managed-child.js";
 import { messageCausality, toolMessageOrigin, MAX_MESSAGE_HOPS } from "./message-causality.js";
 
 // Separate from inspection: read-only tool selection never grants mutation.
@@ -13,20 +14,22 @@ export function taskControl(runtime: () => DeckRuntime) {
   const sender = async (api: ToolExecutionApi, context: Context) => {
     const source = runtime(); const metadata = await source.harness.snapshot(ChatDoc, api.conversationId, context);
     const record = await source.harness.commit(tx => tx.conversation(api.conversationId), context);
-    if (!metadata || metadata.kind === "subagent" || !record || record.owner) throw new Error("Calling chat must be an independent Deck chat");
+    if (!metadata || !independentDeckChat(record, metadata, source.main.id)) throw new Error("Calling chat must be an independent Deck chat");
     return { source, metadata };
   };
-  const message = async (args: { chatId: string; text: string; mode?: "steer" | "followUp" }, api: ToolExecutionApi, context: Context, hub: boolean) => {
+  const message = async (args: { chatId: string; text: string; mode?: "steer" | "followUp" }, api: ToolExecutionApi, context: Context, route: "task" | "hub" | "parent") => {
     context.abortSignal?.throwIfAborted(); const { source, metadata } = await sender(api, context);
     const chat = await source.chat(args.chatId);
     if (chat.id === api.conversationId) throw new Error("task_message cannot message the calling chat");
     const target = await source.harness.snapshot(ChatDoc, chat.id, context);
     const record = await source.harness.commit(tx => tx.conversation(chat.id), context);
     if (!record || record.owner || !args.text.isWellFormed() || Buffer.byteLength(args.text) > 8192) throw new Error("Messaging requires an independent target and text up to 8192 UTF-8 bytes");
-    if (hub ? metadata.kind !== "task" || chat.id !== source.main.id : chat.id === source.main.id || target?.kind !== "task") throw new Error(hub ? "hub_message requires an independent task" : "task_message requires another existing Deck task, not main or an unmanaged chat");
+    if (route === "parent") {
+      if (metadata.managedParentChatId !== args.chatId || !independentDeckChat(record, target, source.main.id)) throw new Error("parent_message requires a managed child and its independent parent");
+    } else if (route === "hub" ? metadata.kind !== "task" || chat.id !== source.main.id : chat.id === source.main.id || target?.kind !== "task") throw new Error(route === "hub" ? "hub_message requires an independent task" : "task_message requires another existing Deck task, not main or an unmanaged chat");
     const requestId = `deck-tool:${api.taskId}:message`, mode = args.mode ?? "followUp";
     const legacy = { kind: "task-tool" as const, chatId: String(api.conversationId), taskId: String(api.taskId) };
-    const origin = !hub && await source.hasLegacyMessageReceipt(args.chatId, { requestId, text: args.text, mode, origin: legacy }) ? legacy : await toolMessageOrigin(api, context);
+    const origin = route === "task" && await source.hasLegacyMessageReceipt(args.chatId, { requestId, text: args.text, mode, origin: legacy }) ? legacy : await toolMessageOrigin(api, context);
     const submission = await source.admit(args.chatId, { requestId, text: args.text, mode, origin }, context.abortSignal);
     return result({ chatId: args.chatId, submissionId: String(submission.id), requestId, mode, origin, admitted: true, completion: "not_waited" });
   };
@@ -55,15 +58,25 @@ export function taskControl(runtime: () => DeckRuntime) {
     }),
     defineTool({
       name: "task_message", replay: "safe", callers: ["model"], outputLimits,
-      description: `Admit text to another existing independent task; returns admission, NOT an answer. Rejects main, children and self. Defaults to followUp; steer joins at a tool boundary. Preserves target host/model and authoritative sender/reply provenance. Agent chains stop at ${MAX_MESSAGE_HOPS} hops; another tool call does not reset them. Never automatically relay ACKs. Same Pi tool-task replay deduplicates; a NEW call is a NEW message. Caller stop does not cancel admitted target work.`,
+      description: `Admit text to another existing independent task; returns admission, NOT an answer. Rejects main, captured children and self. Managed children may exchange agent messages only with their parent. Defaults to followUp; steer joins at a tool boundary. Preserves target host/model and authoritative sender/reply provenance. Agent chains stop at ${MAX_MESSAGE_HOPS} hops; another tool call does not reset them. Never automatically relay ACKs. Same Pi tool-task replay deduplicates; a NEW call is a NEW message. Caller stop does not cancel admitted target work.`,
       parameters: Type.Object({ chatId: Type.String({ pattern: "^[1-9][0-9]*$", maxLength: 16 }), text: Type.String({ minLength: 1, maxLength: 8192 }), mode: Type.Optional(Type.Union([Type.Literal("followUp"), Type.Literal("steer")])) }),
-      execute: (args, api, context) => message(args, api, context, false),
+      execute: (args, api, context) => message(args, api, context, "task"),
     }),
     defineTool({
       name: "hub_message", replay: "safe", callers: ["model"], outputLimits,
       description: `Explicitly report from an independent task to the hub as follow-up input. Wakes/queues hub work; this is not a passive notification or returned answer. Sender, reply correlation and the ${MAX_MESSAGE_HOPS}-hop causal budget are assigned by Deck, not model arguments. Never echo ACKs or automatically forward status. Same-call replay deduplicates; a new call is a new message.`,
       parameters: Type.Object({ text: Type.String({ minLength: 1, maxLength: 8192 }) }),
-      execute: (args, api, context) => message({ ...args, chatId: String(runtime().main.id), mode: "followUp" }, api, context, true),
+      execute: (args, api, context) => message({ ...args, chatId: String(runtime().main.id), mode: "followUp" }, api, context, "hub"),
+    }),
+    defineTool({
+      name: "parent_message", replay: "safe", callers: ["model"], outputLimits,
+      description: `Explicitly send follow-up input from a managed child to its saved parent; no recipient argument. Returns admission, NOT an answer. Wakes/queues parent work with authoritative sender and reply correlation and the same ${MAX_MESSAGE_HOPS}-hop agent-message budget. Never automatically route status or relay ACKs. Same Pi tool-task replay deduplicates; a new call is a new message. Not available to captured delegations; ordinary independent tasks have no managed parent.`,
+      parameters: Type.Object({ text: Type.String({ minLength: 1, maxLength: 8192 }) }),
+      execute: async (args, api, context) => {
+        const { metadata } = await sender(api, context);
+        if (!metadata.managedParentChatId) throw new Error("parent_message requires a managed child");
+        return message({ ...args, chatId: metadata.managedParentChatId, mode: "followUp" }, api, context, "parent");
+      },
     }),
   ] });
 }

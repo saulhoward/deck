@@ -1,5 +1,5 @@
 // Local unacknowledged request cache, never an execution queue or transcript store.
-import { briefFields } from "./task-brief.js";
+import { briefFields, validForm } from "./task-brief.js";
 import type { TaskBrief } from "./generated/contracts.js";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
@@ -8,7 +8,7 @@ import { clientDirectory } from "./user-paths.js";
 import { isAbsolute, join } from "node:path";
 
 export type Draft = { kind: "input"; chatId: string; requestId: string; text: string; mode: "steer" } |
-  ({ kind: "task"; chatId: string; requestId: string; title: string; machineId: string; cwd: string } & TaskBrief) |
+  ({ kind: "task"; chatId: string; requestId: string; title: string; machineId?: string; cwd?: string; managedParentChatId?: string } & TaskBrief) |
   { kind: "instructions"; chatId: string; requestId: string; machineId: string; cwd: string; source?: "user" };
 type Saved = { version: 1; hubId: string; createdAt: number; request: Draft };
 export type DraftSummary = { kind: Draft["kind"]; chatId: string; requestId: string; createdAt: number };
@@ -27,6 +27,11 @@ function validate(value: unknown): Draft {
   const chatId = text(data.chatId); const id = text(data.requestId);
   if (!/^[1-9]\d*$/.test(chatId) || !Number.isSafeInteger(Number(chatId)) || !requestId.test(id)) throw new Error("Invalid saved draft identity");
   if (data.kind === "input" && data.mode === "steer") return { kind: "input", chatId, requestId: id, text: text(data.text), mode: "steer" };
+  if (data.kind === "task" && data.managedParentChatId !== undefined) {
+    const form = { title: data.title, managedParentChatId: data.managedParentChatId, ...briefFields(data as TaskBrief) };
+    if (data.machineId !== undefined || data.cwd !== undefined || !validForm(form)) throw new Error("Invalid managed child draft");
+    return { kind: "task", chatId, requestId: id, ...form };
+  }
   if (data.kind === "task" || data.kind === "instructions") {
     const cwd = text(data.cwd); if (!isAbsolute(cwd)) throw new Error("Invalid saved draft cwd");
     if (data.kind === "instructions") {
