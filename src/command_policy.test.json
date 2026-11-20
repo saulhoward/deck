@@ -46,5 +46,20 @@
   {"command":"create_managed_child","code":"settings_changed","source":"transport","outcome":"unconfirmed","action":"retry_saved"},
   {"command":"create_managed_child","code":"invalid_response","source":"transport","outcome":"unconfirmed","action":"retry_saved"},
   {"command":"create_managed_child","code":"too_large","source":"transport","outcome":"unconfirmed","action":"retry_saved"},
-  {"command":"create_managed_child","code":"future_error","source":"transport","outcome":"unconfirmed","action":"retry_saved"}
+  {"command":"create_managed_child","code":"future_error","source":"transport","outcome":"unconfirmed","action":"retry_saved"},
+  {"command":"open_managed_child","code":"conflict","source":"local","outcome":"not_sent","action":"fix_request"},
+  {"command":"open_managed_child","code":"invalid","source":"local","outcome":"not_sent","action":"fix_request"},
+  {"command":"open_managed_child","code":"offline","source":"local","outcome":"not_sent","action":"fix_request"},
+  {"command":"open_managed_child","code":"invalid_response","source":"local","outcome":"not_sent","action":"fix_request"},
+  {"command":"open_managed_child","code":"future_error","source":"local","outcome":"not_sent","action":"fix_request"},
+  {"command":"open_managed_child","code":"conflict","source":"remote","outcome":"unconfirmed","action":"inspect_terminal"},
+  {"command":"open_managed_child","code":"invalid","source":"remote","outcome":"unconfirmed","action":"inspect_terminal"},
+  {"command":"open_managed_child","code":"offline","source":"remote","outcome":"unconfirmed","action":"inspect_terminal"},
+  {"command":"open_managed_child","code":"invalid_response","source":"remote","outcome":"unconfirmed","action":"inspect_terminal"},
+  {"command":"open_managed_child","code":"future_error","source":"remote","outcome":"unconfirmed","action":"inspect_terminal"},
+  {"command":"open_managed_child","code":"conflict","source":"transport","outcome":"unconfirmed","action":"inspect_terminal"},
+  {"command":"open_managed_child","code":"invalid","source":"transport","outcome":"unconfirmed","action":"inspect_terminal"},
+  {"command":"open_managed_child","code":"offline","source":"transport","outcome":"unconfirmed","action":"inspect_terminal"},
+  {"command":"open_managed_child","code":"invalid_response","source":"transport","outcome":"unconfirmed","action":"inspect_terminal"},
+  {"command":"open_managed_child","code":"future_error","source":"transport","outcome":"unconfirmed","action":"inspect_terminal"}
 ]

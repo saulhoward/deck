@@ -15,7 +15,7 @@ fn foreground(fd: c_int, pid: std.posix.pid_t) !void {
 
 // A small argv grammar, not a shell: quotes/backslashes are supported, but no
 // expansion, interpolation, pipelines or redirection are performed.
-fn arguments(a: std.mem.Allocator, value: []const u8) ![]const []const u8 {
+pub fn arguments(a: std.mem.Allocator, value: []const u8) ![]const []const u8 {
     if (value.len == 0 or value.len > 4096 or std.mem.indexOfAny(u8, value, "\x00\r\n") != null) return error.InvalidEditor;
     var argv: std.ArrayList([]const u8) = .empty;
     var word: std.ArrayList(u8) = .empty;

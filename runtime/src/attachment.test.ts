@@ -168,7 +168,7 @@ test("managed child attachment allows its own model settings only on the assigne
       const inner = JSON.parse(response.result.body); assert.ok(inner.ok, JSON.stringify(inner)); return inner.result;
     };
     const status = await call("status"); assert.equal(status.binding.managedParentChatId, parentId); assert.equal(status.binding.kind, "task");
-    assert.equal(status.managedChildren, undefined, "participation clients must not advertise creation authority");
+    assert.equal(status.managedChildren, 1); assert.equal(status.managedChildOpen, 1);
     assert.equal(status.activity, undefined);
     const { selection } = await call("model_settings"), chosen = { ...selection, thinkingLevel: "high" };
     assert.notDeepEqual(chosen, selection);
@@ -224,5 +224,30 @@ test("forged managed relationship and task metadata cannot grant attachment auth
     assert.equal(response.result.items.some((item: { chatId: string }) => item.chatId === captured.chatId), false);
     assert.ok(response.result.items.some((item: { chatId: string }) => item.chatId === f.chatId));
     assert.equal((await f.runtime.history(captured.chatId)).items.filter(item => item.kind === "deck.input").length, 0);
+  } finally { await f.close(); }
+});
+
+test("attached managed parent grants only exact parent-scoped child creation/open and refuses unbound --here same-session opening", async () => {
+  const f = await fixture(true);
+  try {
+    const args = { parentChatId: f.chatId, title: "Nested attached", requestId: randomUUID() };
+    const request = f.request("create_managed_child", args); assert.ok(validLaunchRequest(request));
+    const response = await f.send(request); assert.ok(validLaunchResponse(response, request, f.runtime.hubId, machine)); assert.ok(response.ok);
+    assert.ok(validLauncherTaskReply(response.result));
+    const created = JSON.parse(response.result.body); assert.ok(created.ok, JSON.stringify(created)); assert.equal(created.result.parentChatId, f.chatId);
+    const childId = created.result.chatId;
+    assert.equal((await f.runtime.harness.snapshot(ChatDoc, (await f.runtime.chat(childId)).id, context))!.managedParentChatId, f.chatId);
+    assert.equal(validLaunchRequest(f.request("create_managed_child", { ...args, parentChatId: String(f.parent.id) })), false);
+    for (const extra of [{ chatId: f.chatId }, { machineId: machine }, { cwd: "/override" }]) assert.equal(validLaunchRequest(f.request("create_managed_child", { ...args, ...extra })), false);
+    const open = f.request("open_managed_child", { chatId: f.chatId, childId, requestId: randomUUID(), port: 52800 }); assert.ok(validLaunchRequest(open));
+    const opened = await f.send(open); assert.ok(validLaunchResponse(opened, open, f.runtime.hubId, machine)); assert.ok(opened.ok);
+    assert.ok(validLauncherTaskReply(opened.result));
+    const refused = JSON.parse(opened.result.body); assert.equal(refused.ok, false); assert.match(refused.error.message, /verified parent Rex binding/);
+    for (const id of [f.chatId, childId]) {
+      assert.equal((await f.runtime.terminalStatus(id)).status, "unallocated"); assert.deepEqual((await f.runtime.history(id)).items, []);
+    }
+    assert.equal(validLaunchRequest(f.request("open_managed_child", { chatId: String(f.parent.id), childId, requestId: randomUUID(), port: 52800 })), false);
+    assert.equal(validLaunchRequest(f.request("rex_open", { chatId: childId, requestId: randomUUID(), port: 52800 })), false);
+    assert.equal(validLaunchRequest(f.request("history", { chatId: childId })), false);
   } finally { await f.close(); }
 });

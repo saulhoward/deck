@@ -121,7 +121,7 @@ test("snapshot preserves callable-only, deferred and hidden enabled model-only t
   }
 });
 
-test("creation rejects leaf/owned/unmanaged/forged-main parents, paused workers and cancelled admission without partial receipts", async () => {
+test("creation permits nested managed parents but rejects owned/unmanaged/forged-main parents, paused workers and cancelled admission without partial receipts", async () => {
   const root = await mkdtemp(join(tmpdir(), "deck-managed-invalid-")); const f = setup(); const runtime = await f.open(join(root, "pi.sqlite"));
   try {
     const mainId = String(runtime.main.id), child = await runtime.createManagedChild(mainId, "Leaf", "leaf");
@@ -131,7 +131,9 @@ test("creation rejects leaf/owned/unmanaged/forged-main parents, paused workers 
     const unmanaged = await runtime.harness.createConversation({ ownership: { kind: "ownerless" } }, context);
     const forgedMain = await runtime.createTask("Forged main", f.options.binding);
     await forgedMain.commit(async tx => { (await tx.doc(ChatDoc, forgedMain.id)).kind = "main"; }, context);
-    for (const parent of [String(child.id), captured.chatId, String(unmanaged.id), String(forgedMain.id)]) await assert.rejects(runtime.createManagedChild(parent, "Rejected", `invalid-${parent}`), { code: "invalid" });
+    const grandchild = await runtime.createManagedChild(String(child.id), "Nested", "nested");
+    assert.equal((await runtime.harness.snapshot(ChatDoc, grandchild.id, context))!.managedParentChatId, String(child.id));
+    for (const parent of [captured.chatId, String(unmanaged.id), String(forgedMain.id)]) await assert.rejects(runtime.createManagedChild(parent, "Rejected", `invalid-${parent}`), { code: "invalid" });
     assert.equal(await runtime.harness.snapshot(ChatDoc, unmanaged.id, context), undefined);
     await runtime.pauseWorker(f.options.binding.machineId, "maintenance");
     await assert.rejects(runtime.createManagedChild(mainId, "Paused", "paused"), { code: "busy" });

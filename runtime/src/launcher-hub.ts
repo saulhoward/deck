@@ -49,7 +49,7 @@ export async function launcherResponse(runtime: DeckRuntime, machineId: string, 
           // The outer canonical guard is also rechecked at serialized mutation
           // admission and before releasing results. No Rex allocation is changed.
           let reply: ResponseEnvelope;
-          try { reply = { version: 1, id: inner.id, ok: true, result: await dispatch(runtime, inner, undefined, true) }; }
+          try { reply = { version: 1, id: inner.id, ok: true, result: await dispatch(runtime, inner, undefined, true, request.args.chatId) }; }
           catch (error) { reply = { version: 1, id: inner.id, ok: false, error: { code: error instanceof DeckError ? error.code : "runtime_failed", message: error instanceof DeckError ? error.message : "Attached task command failed; outcome unconfirmed" } }; }
           return { ...identity, chatId: request.args.chatId, body: responseFrame(reply, inner).subarray(4).toString("utf8") };
         }

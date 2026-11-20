@@ -1,0 +1,1250 @@
+[
+  {
+    "name": "complete digest verified",
+    "valid": true,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 5,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "hello"
+      }
+    }
+  },
+  {
+    "name": "nested complete exact child",
+    "valid": true,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "subagent_view",
+      "args": {
+        "chatId": "1",
+        "childId": "2",
+        "operation": "message_content",
+        "options": {
+          "entryId": "9",
+          "offset": 0
+        }
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "hubId": "hub",
+        "parentChatId": "1",
+        "childId": "2",
+        "operation": "message_content",
+        "result": {
+          "chatId": "2",
+          "entryId": "9",
+          "offset": 0,
+          "totalBytes": 5,
+          "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+          "text": "hello"
+        }
+      }
+    }
+  },
+  {
+    "name": "reject page chatId 2",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "2",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 5,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "hello"
+      }
+    }
+  },
+  {
+    "name": "reject page entryId 8",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "8",
+        "offset": 0,
+        "totalBytes": 5,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "hello"
+      }
+    }
+  },
+  {
+    "name": "reject page offset 1",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 1,
+        "totalBytes": 5,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "hello"
+      }
+    }
+  },
+  {
+    "name": "reject page totalBytes 4",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 4,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "hello"
+      }
+    }
+  },
+  {
+    "name": "reject page totalBytes 6",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 6,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "hello"
+      }
+    }
+  },
+  {
+    "name": "reject page sha256 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 5,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "text": "hello"
+      }
+    }
+  },
+  {
+    "name": "reject page sha256 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 5,
+        "sha256": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "text": "hello"
+      }
+    }
+  },
+  {
+    "name": "reject page next 5",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 5,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "hello",
+        "next": 5
+      }
+    }
+  },
+  {
+    "name": "reject page next 0",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 5,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "hello",
+        "next": 0
+      }
+    }
+  },
+  {
+    "name": "reject page extra True",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 5,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "hello",
+        "extra": true
+      }
+    }
+  },
+  {
+    "name": "reject page totalBytes 16777217",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 16777217,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "hello"
+      }
+    }
+  },
+  {
+    "name": "reject args chatId 0",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "0",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    }
+  },
+  {
+    "name": "reject args entryId 0",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "0",
+        "offset": 0
+      },
+      "hubId": "hub"
+    }
+  },
+  {
+    "name": "reject args entryId 9007199254740992",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9007199254740992",
+        "offset": 0
+      },
+      "hubId": "hub"
+    }
+  },
+  {
+    "name": "reject args entryId 09",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "09",
+        "offset": 0
+      },
+      "hubId": "hub"
+    }
+  },
+  {
+    "name": "reject args offset -1",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": -1
+      },
+      "hubId": "hub"
+    }
+  },
+  {
+    "name": "reject args offset 0.5",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0.5
+      },
+      "hubId": "hub"
+    }
+  },
+  {
+    "name": "reject args offset 16777217",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 16777217
+      },
+      "hubId": "hub"
+    }
+  },
+  {
+    "name": "reject args offset 0",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": "0"
+      },
+      "hubId": "hub"
+    }
+  },
+  {
+    "name": "reject args extra True",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "extra": true
+      },
+      "hubId": "hub"
+    }
+  },
+  {
+    "name": "args require chatId",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    }
+  },
+  {
+    "name": "args require entryId",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "offset": 0
+      },
+      "hubId": "hub"
+    }
+  },
+  {
+    "name": "args require offset",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9"
+      },
+      "hubId": "hub"
+    }
+  },
+  {
+    "name": "full sized intermediate chunk",
+    "valid": true,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 65536,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "",
+        "next": 32768
+      }
+    },
+    "repeat": {
+      "path": [
+        "reply",
+        "result",
+        "text"
+      ],
+      "text": "a",
+      "count": 32768
+    }
+  },
+  {
+    "name": "nested full sized intermediate chunk",
+    "valid": true,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "subagent_view",
+      "args": {
+        "chatId": "1",
+        "childId": "2",
+        "operation": "message_content",
+        "options": {
+          "entryId": "9",
+          "offset": 0
+        }
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "hubId": "hub",
+        "parentChatId": "1",
+        "childId": "2",
+        "operation": "message_content",
+        "result": {
+          "chatId": "2",
+          "entryId": "9",
+          "offset": 0,
+          "totalBytes": 65536,
+          "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+          "text": "",
+          "next": 32768
+        }
+      }
+    },
+    "repeat": {
+      "path": [
+        "reply",
+        "result",
+        "result",
+        "text"
+      ],
+      "text": "a",
+      "count": 32768
+    }
+  },
+  {
+    "name": "UTF8 bytes not codepoints cap",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 65536,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "",
+        "next": 32768
+      }
+    },
+    "repeat": {
+      "path": [
+        "reply",
+        "result",
+        "text"
+      ],
+      "text": "😀",
+      "count": 8193
+    }
+  },
+  {
+    "name": "ASCII byte cap",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 65536,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "",
+        "next": 32768
+      }
+    },
+    "repeat": {
+      "path": [
+        "reply",
+        "result",
+        "text"
+      ],
+      "text": "a",
+      "count": 32769
+    }
+  },
+  {
+    "name": "next must progress",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 65536,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "",
+        "next": 0
+      }
+    },
+    "repeat": {
+      "path": [
+        "reply",
+        "result",
+        "text"
+      ],
+      "text": "a",
+      "count": 32768
+    }
+  },
+  {
+    "name": "next must equal end",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 65536,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "",
+        "next": 32767
+      }
+    },
+    "repeat": {
+      "path": [
+        "reply",
+        "result",
+        "text"
+      ],
+      "text": "a",
+      "count": 32768
+    }
+  },
+  {
+    "name": "intermediate needs next",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 65536,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": ""
+      }
+    },
+    "repeat": {
+      "path": [
+        "reply",
+        "result",
+        "text"
+      ],
+      "text": "a",
+      "count": 32768
+    }
+  },
+  {
+    "name": "no empty intermediate",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 65536,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "",
+        "next": 32768
+      }
+    }
+  },
+  {
+    "name": "fixed chunk not arbitrary short",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 65536,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "",
+        "next": 32768
+      }
+    },
+    "repeat": {
+      "path": [
+        "reply",
+        "result",
+        "text"
+      ],
+      "text": "a",
+      "count": 32764
+    }
+  },
+  {
+    "name": "utf8 boundary loses three bytes",
+    "valid": true,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 65536,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "",
+        "next": 32765
+      }
+    },
+    "repeat": {
+      "path": [
+        "reply",
+        "result",
+        "text"
+      ],
+      "text": "a",
+      "count": 32765
+    }
+  },
+  {
+    "name": "integral offsets represented as floats",
+    "valid": true,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0.0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 5,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "hello"
+      }
+    }
+  },
+  {
+    "name": "final offset equals total",
+    "valid": true,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 5
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 5,
+        "totalBytes": 5,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": ""
+      }
+    }
+  },
+  {
+    "name": "offset beyond total",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 6
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 6,
+        "totalBytes": 5,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": ""
+      }
+    }
+  },
+  {
+    "name": "largest legal total and end",
+    "valid": true,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 16777215
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 16777215,
+        "totalBytes": 16777216,
+        "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+        "text": "a"
+      }
+    }
+  },
+  {
+    "name": "empty export valid shape and digest",
+    "valid": true,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "message_content",
+      "args": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "chatId": "1",
+        "entryId": "9",
+        "offset": 0,
+        "totalBytes": 0,
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "text": ""
+      }
+    }
+  },
+  {
+    "name": "nested rejects wrong digest",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "subagent_view",
+      "args": {
+        "chatId": "1",
+        "childId": "2",
+        "operation": "message_content",
+        "options": {
+          "entryId": "9",
+          "offset": 0
+        }
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "hubId": "hub",
+        "parentChatId": "1",
+        "childId": "2",
+        "operation": "message_content",
+        "result": {
+          "chatId": "2",
+          "entryId": "9",
+          "offset": 0,
+          "totalBytes": 5,
+          "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "text": "hello"
+        }
+      }
+    }
+  },
+  {
+    "name": "nested rejects unknown options",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "subagent_view",
+      "args": {
+        "chatId": "1",
+        "childId": "2",
+        "operation": "message_content",
+        "options": {
+          "entryId": "9",
+          "offset": 0,
+          "text": "no"
+        }
+      },
+      "hubId": "hub"
+    }
+  },
+  {
+    "name": "nested requires both options",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "subagent_view",
+      "args": {
+        "chatId": "1",
+        "childId": "2",
+        "operation": "message_content",
+        "options": {
+          "entryId": "9"
+        }
+      },
+      "hubId": "hub"
+    }
+  },
+  {
+    "name": "nested cannot override chatId",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "subagent_view",
+      "args": {
+        "chatId": "1",
+        "childId": "2",
+        "operation": "message_content",
+        "options": {
+          "entryId": "9",
+          "offset": 0,
+          "chatId": "3"
+        }
+      },
+      "hubId": "hub"
+    }
+  },
+  {
+    "name": "nested result cannot cross child",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "subagent_view",
+      "args": {
+        "chatId": "1",
+        "childId": "2",
+        "operation": "message_content",
+        "options": {
+          "entryId": "9",
+          "offset": 0
+        }
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "hubId": "hub",
+        "parentChatId": "1",
+        "childId": "2",
+        "operation": "message_content",
+        "result": {
+          "chatId": "3",
+          "entryId": "9",
+          "offset": 0,
+          "totalBytes": 5,
+          "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+          "text": "hello"
+        }
+      }
+    }
+  },
+  {
+    "name": "nested cannot export foreign entry identity",
+    "valid": false,
+    "request": {
+      "version": 1,
+      "id": "read",
+      "command": "subagent_view",
+      "args": {
+        "chatId": "1",
+        "childId": "2",
+        "operation": "message_content",
+        "options": {
+          "entryId": "9",
+          "offset": 0
+        }
+      },
+      "hubId": "hub"
+    },
+    "reply": {
+      "version": 1,
+      "id": "read",
+      "ok": true,
+      "result": {
+        "hubId": "hub",
+        "parentChatId": "1",
+        "childId": "2",
+        "operation": "message_content",
+        "result": {
+          "chatId": "2",
+          "entryId": "8",
+          "offset": 0,
+          "totalBytes": 5,
+          "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+          "text": "hello"
+        }
+      }
+    }
+  }
+]

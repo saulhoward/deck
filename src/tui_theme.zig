@@ -10,6 +10,7 @@ pub const sidebar_heading: vaxis.Style = .{ .fg = .{ .rgb = .{ 176, 176, 176 } }
 pub const rule: vaxis.Style = .{ .fg = .{ .rgb = .{ 80, 80, 80 } }, .bg = base.bg };
 pub const green: vaxis.Style = .{ .fg = .{ .rgb = .{ 153, 255, 228 } }, .bg = base.bg };
 pub const orange: vaxis.Style = .{ .fg = .{ .rgb = .{ 255, 199, 153 } }, .bg = base.bg };
+pub const message_selection: vaxis.Style = .{ .fg = .{ .rgb = .{ 0, 0, 0 } }, .bg = orange.fg };
 // Quake/Carmack lightstyle: one sample every 100ms, looping on the existing
 // monotonic 50ms clock. This changes color only, never text or work state.
 const activity_pattern = "mmamammmmammamamaaamammma";

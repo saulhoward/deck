@@ -10,6 +10,9 @@ export function validOpenArgs(value: unknown): value is wire.RexOpenArgs {
   const target = value.target;
   return !target || validTargetOptions(target);
 }
+export function validOpenManagedChildArgs(value: unknown): value is wire.OpenManagedChildArgs {
+  return wire.validOpenManagedChildArgs(value) && validSafePiId(value.chatId) && validSafePiId(value.childId) && Number(value.childId) > Number(value.chatId);
+}
 export function validTargetOptions(value: unknown): value is wire.RexTargetOptions {
   return wire.validRexTargetOptions(value) && (value.executable === undefined || (value.executable.startsWith("/") && !value.executable.includes("\0") && Buffer.byteLength(value.executable) <= 4096)) && (value.server === undefined || rexSocketPath(value.server) !== undefined);
 }
@@ -18,11 +21,15 @@ export function validResolvedTarget(value: unknown): value is wire.RexOpenTarget
 }
 export function validRexReadArgs(value: unknown): value is wire.RexReadArgs { return wire.validRexReadArgs(value) && validSafePiId(value.chatId); }
 export function validRexArgs(command: string, value: unknown): boolean {
-  return command === "rex_adopt" ? validAdoptArgs(value) : command === "rex_open" ? validOpenArgs(value) : ["rex_status", "rex_inspect"].includes(command) ? validRexReadArgs(value) : true;
+  return command === "open_managed_child" ? validOpenManagedChildArgs(value) : command === "rex_adopt" ? validAdoptArgs(value) : command === "rex_open" ? validOpenArgs(value) : ["rex_status", "rex_inspect"].includes(command) ? validRexReadArgs(value) : true;
 }
 export function validRexReply(request: ReplyContext, value: unknown): boolean {
-  if (!["rex_open", "rex_adopt", "rex_status", "rex_inspect"].includes(request.command)) return true;
+  if (!["open_managed_child", "rex_open", "rex_adopt", "rex_status", "rex_inspect"].includes(request.command)) return true;
   if (!wire.validRexUuid(request.hubId) || !validRexArgs(request.command, request.args)) return false;
+  if (request.command === "open_managed_child") {
+    const args = request.args as wire.OpenManagedChildArgs;
+    return wire.validOpenManagedChildAck(value) && value.parentChatId === args.chatId && value.childId === args.childId && value.ack.chatId === args.childId && value.ack.requestId === args.requestId && validSafePiId(value.ack.taskId);
+  }
   const args = request.args as wire.RexOpenArgs;
   if (request.command === "rex_adopt") return wire.validRexAdoptAck(value) && value.hubId === request.hubId && value.chatId === args.chatId && value.requestId === args.requestId && validSafePiId(value.taskId);
   if (request.command === "rex_open") return wire.validRexOpenAck(value) && value.chatId === args.chatId && value.requestId === args.requestId && validSafePiId(value.taskId);

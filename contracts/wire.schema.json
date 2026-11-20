@@ -17,7 +17,7 @@
       "additionalProperties": true
     },
     "TransportId": { "type": "string", "minLength": 1, "maxLength": 200 },
-    "HubCommand": { "enum": ["status", "login_start", "login_status", "login_reply", "login_cancel", "rex_open", "rex_adopt", "rex_status", "rex_inspect", "rex_startup", "activity", "progress", "list_chats", "list_hosts", "create_task", "create_task_brief", "create_managed_child", "mcp_catalog", "tool_profiles", "set_tool_profiles", "import_instructions", "instruction_status", "admit", "history", "stop", "model_settings", "set_model_settings", "subagent_view"] },
+    "HubCommand": { "enum": ["status", "login_start", "login_status", "login_reply", "login_cancel", "rex_open", "rex_adopt", "rex_status", "rex_inspect", "rex_startup", "activity", "progress", "list_chats", "list_hosts", "create_task", "create_task_brief", "create_managed_child", "open_managed_child", "mcp_catalog", "tool_profiles", "set_tool_profiles", "import_instructions", "instruction_status", "admit", "history", "stop", "model_settings", "set_model_settings", "subagent_view", "message_content"] },
     "KnownCommandErrorCode": { "enum": ["conflict", "offline", "not_found", "invalid", "auth_required", "busy", "settings_changed", "invalid_response", "too_large", "runtime_failed"] },
     "FailureSource": { "enum": ["local", "transport", "remote"] },
     "FailurePolicy": {
@@ -280,7 +280,7 @@
         "toolInventory": { "$ref": "#/$defs/ToolInventory" }, "toolInventoryStatus": { "$ref": "#/$defs/ToolInventoryStatus" },
         "authentication": { "enum": ["mock", "api_key", "chatgpt_oauth"] }, "machineId": { "$ref": "#/$defs/ChatListLabel" },
         "implementation": { "$ref": "#/$defs/Sha256" }, "hubId": { "$ref": "#/$defs/TransportId" },
-        "managedChildren": { "const": 1 }, "taskBrief": { "type": "integer", "minimum": 0, "maximum": 1 }, "hostInventory": { "type": "integer", "minimum": 0, "maximum": 1 }, "modelSettings": { "type": "integer", "minimum": 0, "maximum": 1 }, "hubGuard": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexStartup": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexAdopt": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexOpen": { "type": "integer", "minimum": 0, "maximum": 1 },
+        "managedChildren": { "const": 1 }, "managedChildOpen": { "const": 1 }, "taskBrief": { "type": "integer", "minimum": 0, "maximum": 1 }, "hostInventory": { "type": "integer", "minimum": 0, "maximum": 1 }, "modelSettings": { "type": "integer", "minimum": 0, "maximum": 1 }, "hubGuard": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexStartup": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexAdopt": { "type": "integer", "minimum": 0, "maximum": 1 }, "rexOpen": { "type": "integer", "minimum": 0, "maximum": 1 },
         "mainChatId": { "$ref": "#/$defs/PiId" }, "chatId": { "$ref": "#/$defs/PiId" }, "binding": { "$ref": "#/$defs/StatusBinding" },
         "activity": { "$ref": "#/$defs/StatusInspection" }, "provider": { "$ref": "#/$defs/ChatListLabel" }, "model": { "$ref": "#/$defs/StatusModel" }, "tools": { "type": "string", "minLength": 1, "maxLength": 32 }
       }, "required": ["hubId", "mainChatId", "chatId", "tools"]
@@ -469,6 +469,18 @@
       "description": "Exclusive entry cursor; only the literal zero or a canonical positive safe Pi ID is accepted semantically.",
       "type": "string", "pattern": "^[0-9]{1,16}$(?![\\s\\S])"
     },
+    "MessageContentArgs": {
+      "description": "Exact retained message read in the selected conversation. Offsets are UTF-8 byte positions in sanitized visible text, not raw archive data.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "entryId": { "$ref": "#/$defs/PiId" }, "offset": { "type": "integer", "minimum": 0, "maximum": 16777216 } },
+      "required": ["chatId", "entryId", "offset"]
+    },
+    "MessageContentPage": {
+      "description": "Sanitized visible message text only. Semantic validators enforce the 32768 UTF-8 byte chunk cap, exact request identity and contiguous next offset. SHA-256 covers the complete sanitized UTF-8 export; exports above 16 MiB are rejected, never truncated.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "entryId": { "$ref": "#/$defs/PiId" }, "offset": { "type": "integer", "minimum": 0, "maximum": 16777216 }, "totalBytes": { "type": "integer", "minimum": 0, "maximum": 16777216 }, "sha256": { "$ref": "#/$defs/Sha256" }, "text": { "type": "string", "maxLength": 32768 }, "next": { "type": "integer", "minimum": 0, "maximum": 16777216 } },
+      "required": ["chatId", "entryId", "offset", "totalBytes", "sha256", "text"]
+    },
     "HistoryArgs": {
       "description": "Legacy ignored extensions remain accepted. before/after are mutually exclusive; after zero bootstraps an empty chat. Limit defaults to 100.",
       "type": "object",
@@ -550,6 +562,18 @@
       "type": "object", "additionalProperties": false,
       "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "requestId": { "$ref": "#/$defs/RexUuid" }, "port": { "type": "integer", "minimum": 1, "maximum": 65535 }, "target": { "$ref": "#/$defs/RexTargetOptions" }, "confirmedOnly": { "type": "boolean" } },
       "required": ["chatId", "requestId", "port"]
+    },
+    "OpenManagedChildArgs": {
+      "description": "Open a direct persistent child from its pinned parent. Parent chatId is the transport scope; target, host, cwd and session are inherited server-side. Requires an explicit hub UUID.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "childId": { "$ref": "#/$defs/PiId" }, "requestId": { "$ref": "#/$defs/RexUuid" }, "port": { "type": "integer", "minimum": 1, "maximum": 65535 } },
+      "required": ["chatId", "childId", "requestId", "port"]
+    },
+    "OpenManagedChildAck": {
+      "description": "Exact parent/child correlation with the nested terminal admission ACK for childId. Not proof of terminal completion; uncertain failures require explicit inspection, never automatic retry.",
+      "type": "object", "additionalProperties": false,
+      "properties": { "parentChatId": { "$ref": "#/$defs/PiId" }, "childId": { "$ref": "#/$defs/PiId" }, "ack": { "$ref": "#/$defs/RexOpenAck" } },
+      "required": ["parentChatId", "childId", "ack"]
     },
     "RexReadArgs": {
       "type": "object", "additionalProperties": false,
@@ -707,7 +731,7 @@
     "AgentRune": { "enum": ["ᚠ", "ᚡ", "ᚢ", "ᚣ", "ᚤ", "ᚥ", "ᚦ", "ᚧ", "ᚨ", "ᚩ", "ᚪ", "ᚫ", "ᚬ", "ᚭ", "ᚮ", "ᚯ", "ᚰ", "ᚱ", "ᚲ", "ᚳ", "ᚴ", "ᚵ", "ᚶ", "ᚷ", "ᚸ", "ᚹ", "ᚺ", "ᚻ", "ᚼ", "ᚽ", "ᚾ", "ᚿ", "ᛀ", "ᛁ", "ᛂ", "ᛃ", "ᛄ", "ᛅ", "ᛆ", "ᛇ", "ᛈ", "ᛉ", "ᛊ", "ᛋ", "ᛌ", "ᛍ", "ᛎ", "ᛏ", "ᛐ", "ᛑ", "ᛒ", "ᛓ", "ᛔ", "ᛕ", "ᛖ", "ᛗ", "ᛘ", "ᛙ", "ᛚ", "ᛛ", "ᛜ", "ᛝ", "ᛞ", "ᛟ", "ᛠ", "ᛡ", "ᛢ", "ᛣ", "ᛤ", "ᛥ", "ᛦ", "ᛧ", "ᛨ", "ᛩ", "ᛪ", "ᛮ", "ᛯ", "ᛰ", "ᛱ", "ᛲ", "ᛳ", "ᛴ", "ᛵ", "ᛶ", "ᛷ", "ᛸ", "Δ"] },
     "AgentName": {"anyOf": [{"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9-]{0,63}$(?![\\s\\S])"}, {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Z]{2}00[1-9]$(?![\\s\\S])"}, {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Z]{2}0[1-9][0-9]$(?![\\s\\S])"}, {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Z]{2}[1-9][0-9]{2,61}$(?![\\s\\S])"}]},
     "AgentNameQuery": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-zA-Z][a-zA-Z0-9-]{0,63}$(?![\\s\\S])" },
-    "SubagentViewOperation": { "enum": ["status", "history", "activity", "progress", "model_settings"] },
+    "SubagentViewOperation": { "enum": ["status", "history", "activity", "progress", "model_settings", "message_content"] },
     "SubagentViewArgs": { "description": "Read-only direct child lookup. chatId remains the parent authority. Exactly one of name or childId; options validated as the selected nested read without chatId.", "type": "object", "additionalProperties": false, "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "name": { "$ref": "#/$defs/AgentNameQuery" }, "childId": { "$ref": "#/$defs/PiId" }, "operation": { "$ref": "#/$defs/SubagentViewOperation" }, "options": {} }, "required": ["chatId", "operation"] },
     "SubagentViewReply": { "type": "object", "additionalProperties": false, "properties": { "hubId": { "$ref": "#/$defs/TransportId" }, "parentChatId": { "$ref": "#/$defs/PiId" }, "childId": { "$ref": "#/$defs/PiId" }, "name": { "$ref": "#/$defs/AgentNameQuery" }, "operation": { "$ref": "#/$defs/SubagentViewOperation" }, "result": {} }, "required": ["hubId", "parentChatId", "childId", "operation", "result"] },
     "TaskBrief": { "type": "object", "additionalProperties": false, "properties": { "problem": { "type": "string", "maxLength": 2048 }, "description": { "type": "string", "maxLength": 8192 } }, "required": [] },
@@ -722,7 +746,7 @@
     "TuiRequest": {
       "description": "Client-only renderer bridge, never a Pi execution channel. One outstanding request; no replay on loss.",
       "type": "object", "additionalProperties": false,
-      "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "action": { "enum": ["poll", "older", "latest", "send", "retry", "discard", "stop", "models", "configure", "agentsmd", "tasks", "hosts", "select", "create", "rexStatus", "rexInspect", "rexOpen", "subagent", "parent"] }, "chatId": { "$ref": "#/$defs/PiId" }, "after": { "$ref": "#/$defs/PiId" }, "configuration": { "$ref": "#/$defs/ModelSettingsChange" }, "taskTarget": { "$ref": "#/$defs/TaskCreationTarget" }, "taskForm": { "$ref": "#/$defs/TaskCreationForm" }, "text": { "type": "string", "maxLength": 16384 }, "hold": { "type": "boolean" } }, "required": ["version", "id", "action"]
+      "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "before": { "$ref": "#/$defs/PiId" }, "action": { "enum": ["poll", "older", "newer", "latest", "send", "retry", "discard", "stop", "models", "configure", "agentsmd", "tasks", "hosts", "select", "create", "childOpen", "rexStatus", "rexInspect", "rexOpen", "subagent", "parent", "messageContent"] }, "entryId": { "$ref": "#/$defs/PiId" }, "offset": { "type": "integer", "minimum": 0, "maximum": 16777216 }, "chatId": { "$ref": "#/$defs/PiId" }, "after": { "$ref": "#/$defs/PiId" }, "configuration": { "$ref": "#/$defs/ModelSettingsChange" }, "taskTarget": { "$ref": "#/$defs/TaskCreationTarget" }, "taskForm": { "$ref": "#/$defs/TaskCreationForm" }, "text": { "type": "string", "maxLength": 16384 }, "hold": { "type": "boolean" } }, "required": ["version", "id", "action"]
     },
     "TuiPart": { "description": "Display provenance, not Markdown inference. Text is literal message content; notices and requests are generated metadata. Tool text is output only; clipped marks truncation without adding text to terminal output.", "type": "object", "additionalProperties": false, "properties": { "kind": { "enum": ["text", "notice", "tool_request", "tool"] }, "text": { "type": "string", "maxLength": 8192 }, "toolName": { "type": "string", "maxLength": 128 }, "isError": { "type": "boolean" }, "clipped": { "type": "boolean" } }, "required": ["kind", "text"] },
     "TuiEntry": { "description": "Canonical IDs are retained even with empty parts. Parts and their flattened text share an 8192-byte display budget including tool headings and separators; the projector enforces aggregate byte bounds.", "type": "object", "additionalProperties": false, "properties": { "id": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "role": { "enum": ["user", "assistant", "tool", "note"] }, "text": { "type": "string", "maxLength": 8192 }, "parts": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/TuiPart" } }, "thinkingTokens": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 } }, "required": ["id", "role", "text"] },
@@ -732,7 +756,7 @@
     "TuiTasks": { "description": "One bounded discovery page; labels are display-only, never routing authority.", "type": "object", "additionalProperties": false, "properties": { "items": { "type": "array", "maxItems": 25, "items": { "$ref": "#/$defs/TuiChat" } }, "after": { "$ref": "#/$defs/PiId" }, "next": { "$ref": "#/$defs/PiId" } }, "required": ["items"] },
     "TuiRex": { "description": "Selected-chat creation provenance and optional independent presence sample, not agent health.", "type": "object", "additionalProperties": false, "properties": { "status": { "$ref": "#/$defs/RexStatusSnapshot" }, "inspection": { "$ref": "#/$defs/RexInspectionSnapshot" } }, "required": ["status"] },
     "TuiClientMode": { "enum": ["hub", "task"] },
-    "TuiSnapshot": { "type": "object", "additionalProperties": false, "properties": { "managedParentChatId": { "$ref": "#/$defs/PiId" },
+    "TuiSnapshot": { "type": "object", "additionalProperties": false, "properties": { "newerAfter": { "$ref": "#/$defs/PiId" }, "newerFound": { "type": "boolean" }, "newerNext": { "$ref": "#/$defs/PiId" }, "messageContent": { "$ref": "#/$defs/MessageContentPage" }, "managedParentChatId": { "$ref": "#/$defs/PiId" },
       "inspectParentChatId": { "$ref": "#/$defs/PiId" },
       "activeTools": { "type": "array", "maxItems": 32, "items": { "type": "string", "maxLength": 80 } },
       "toolInventory": { "$ref": "#/$defs/ToolInventory" }, "toolInventoryStatus": { "$ref": "#/$defs/ToolInventoryStatus" },
@@ -741,7 +765,7 @@
     }, "required": ["clientMode", "hubChatId", "hubId", "chatId", "title", "model", "tools", "activityKnown", "busy", "queued", "entries", "hasOlder", "historical", "preview", "notice", "draft"] },
     "TuiResponse": { "oneOf": [
       { "type": "object", "additionalProperties": false, "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "ok": { "const": true }, "snapshot": { "$ref": "#/$defs/TuiSnapshot" } }, "required": ["version", "id", "ok", "snapshot"] },
-      { "type": "object", "additionalProperties": false, "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "ok": { "const": false }, "error": { "type": "string", "minLength": 1, "maxLength": 1024 } }, "required": ["version", "id", "ok", "error"] }
+      { "type": "object", "additionalProperties": false, "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "ok": { "const": false }, "notSent": { "const": true, "description": "Client-local refusal before any mutation draft/command. Never inferred from remote error codes or missing receipts." }, "error": { "type": "string", "minLength": 1, "maxLength": 1024 } }, "required": ["version", "id", "ok", "error"] }
     ] },
     "ThinkingLevel": { "enum": ["off", "minimal", "low", "medium", "high", "xhigh", "max"] },
     "ModelToken": { "type": "string", "minLength": 1, "maxLength": 200 },

@@ -1,8 +1,8 @@
 import { once } from "node:events";
 import { FrameDecoder, encodeFrame } from "./protocol.js";
 import { taskCommand, taskScope } from "./task-client.js";
-import { displayText, TuiSession, localSession, validRequest, validReply } from "./tui-session.js";
-import { validRexUuid, validMachineIdentity } from "./generated/contracts.js";
+import { displayText, TuiSession, TuiRequestNotSent, localSession, validRequest, validReply } from "./tui-session.js";
+import { validRexUuid, validMachineIdentity, type TuiResponse } from "./generated/contracts.js";
 import { attachedCommand } from "./attached-client.js";
 import { validMutationArgs } from "./mutation-contracts.js";
 import { bootstrapRecord, hereRecord, bootstrapPath, StartupFiles, finishStartup } from "./agent-storage.js";
@@ -73,12 +73,12 @@ try {
   }
   for await (const request of decoder) {
     if (abort.signal.aborted || !validRequest(request)) break;
-    let response;
+    let response: TuiResponse;
     try { response = { version: 1, id: request.id, ok: true, snapshot: await session.handle(request) }; }
-    catch (error) { response = { version: 1, id: request.id, ok: false, error: displayText(error instanceof Error ? error.message : "Client request failed; outcome unconfirmed", 1024) || "Client request failed" }; }
+    catch (error) { response = { version: 1, id: request.id, ok: false, ...(error instanceof TuiRequestNotSent ? { notSent: true as const } : {}), error: displayText(error instanceof Error ? error.message : "Client request failed; outcome unconfirmed", 1024) || "Client request failed" }; }
     if (abort.signal.aborted) break;
     const frame = encodeFrame(response);
-    if (!validReply(JSON.parse(frame.subarray(4).toString("utf8")), request.id, hubId, chatId, request.action, request.chatId, request.after, mode, hubChatId, inspectParentChatId)) break;
+    if (!validReply(JSON.parse(frame.subarray(4).toString("utf8")), request.id, hubId, chatId, request.action, request.chatId, request.after, mode, hubChatId, inspectParentChatId, request.entryId, request.offset)) break;
     if (response.ok) { hubId = response.snapshot!.hubId; chatId = response.snapshot!.chatId; hubChatId = response.snapshot!.hubChatId; inspectParentChatId = response.snapshot!.inspectParentChatId; }
     if (!process.stdout.write(frame)) await once(process.stdout, "drain", { signal: abort.signal });
   }

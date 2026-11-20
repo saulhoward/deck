@@ -1,3 +1,5 @@
+import { messageContent } from "./message-content.js";
+import { validMessageContentArgs } from "./message-content-contracts.js";
 import { subagentView } from "./subagent-view.js";
 import { validSubagentViewArgs } from "./subagent-view-contracts.js";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
@@ -5,6 +7,7 @@ import type { Readable, Writable } from "node:stream";
 import { ChatDoc } from "./chat-doc.js";
 import { DeckError } from "./deck-error.js";
 import type { DeckRuntime } from "./deck.js";
+import { independentDeckChat } from "./managed-child.js";
 import { agentNameFields } from "./agent-names.js";
 import { briefFields } from "./task-brief.js";
 import { validMcpArgs } from "./mcp-api.js";
@@ -12,7 +15,7 @@ import { validHostArgs } from "./host-inventory.js";
 import { validModelSettingsArgs } from "./model-settings-contracts.js";
 import type { SetModelSettingsArgs } from "./generated/contracts.js";
 import { validStatusLoginArgs } from "./status-login-contracts.js";
-import { validOpenArgs, validAdoptArgs, validRexReadArgs } from "./rex-open-contracts.js";
+import { validOpenManagedChildArgs, validOpenArgs, validAdoptArgs, validRexReadArgs } from "./rex-open-contracts.js";
 import type { Login } from "./login.js";
 import { encodeFrame, FrameDecoder, FrameSizeError, PROTOCOL_VERSION } from "./protocol.js";
 import { responseFrame } from "./responses.js";
@@ -31,7 +34,7 @@ function text(value: unknown, name: string): string {
   return value;
 }
 
-export async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, login?: Login, taskClient = false): Promise<unknown> {
+export async function dispatch(runtime: DeckRuntime, request: Record<string, unknown>, login?: Login, taskClient = false, pinnedTaskId?: string): Promise<unknown> {
   if (request.hubId !== undefined) {
     if (typeof request.hubId !== "string" || !request.hubId || request.hubId.length > 200) throw new DeckError("invalid", "Invalid expected hub identity");
     if (request.hubId !== runtime.hubId) throw new DeckError("conflict", "Hub identity changed; reconnect to the intended hub. No command applied");
@@ -57,6 +60,8 @@ export async function dispatch(runtime: DeckRuntime, request: Record<string, unk
       const chat = args.chatId === undefined ? runtime.main : await runtime.chat(text(args.chatId, "chatId"));
       const saved = await runtime.harness.snapshot(ChatDoc, chat.id, context);
       const model = (await chat.agent(context)).model;
+      const record = await runtime.harness.commit(tx => tx.conversation(chat.id), context);
+      const managed = (!taskClient || pinnedTaskId === String(chat.id)) && independentDeckChat(record, saved, runtime.main.id);
       let inventory: { toolInventory?: import("./generated/contracts.js").ToolInventory; toolInventoryStatus: "ready" | "unavailable" };
       try { inventory = { toolInventory: await runtime.toolInventory(String(chat.id)), toolInventoryStatus: "ready" }; }
       catch { inventory = { toolInventoryStatus: "unavailable" }; } // No stale/partial projection or diagnostic payload.
@@ -64,7 +69,7 @@ export async function dispatch(runtime: DeckRuntime, request: Record<string, unk
       // Project Deck metadata without rewriting retained documents. Pi model
       // parameters and global inspection records remain compatible opaque data.
       const binding = saved && { ...agentNameFields(saved), machineId: saved.machineId, cwd: saved.cwd, kind: saved.kind, title: saved.title, ...(saved.parentChatId === undefined ? {} : { parentChatId: saved.parentChatId }), ...(saved.ownerTaskId === undefined ? {} : { ownerTaskId: saved.ownerTaskId }), ...(saved.managedParentChatId === undefined ? {} : { managedParentChatId: saved.managedParentChatId }), ...(saved.brief ? { brief: saved.brief } : {}) };
-      return { ...inventory, ...(runtime.authentication ? { authentication: runtime.authentication } : {}), ...(!taskClient && runtime.localMachineId ? { machineId: runtime.localMachineId } : {}), implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, modelSettings: 1, taskBrief: 1, ...(taskClient ? {} : { managedChildren: 1 }), ...(taskClient ? {} : { hostInventory: 1, rexAdopt: 1 }), rexStartup: 1, rexOpen: runtime.rexClient && runtime.localFiles ? 1 : 0, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding, ...(taskClient ? {} : { activity: await runtime.harness.inspect(context) }), provider: model?.provider, model: taskClient && model ? { provider: model.provider, modelId: model.modelId } : model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
+      return { ...inventory, ...(runtime.authentication ? { authentication: runtime.authentication } : {}), ...(!taskClient && runtime.localMachineId ? { machineId: runtime.localMachineId } : {}), implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, modelSettings: 1, taskBrief: 1, ...(managed ? { managedChildren: 1, managedChildOpen: 1 } : {}), ...(taskClient ? {} : { hostInventory: 1, rexAdopt: 1 }), rexStartup: 1, rexOpen: runtime.rexClient && runtime.localFiles ? 1 : 0, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding, ...(taskClient ? {} : { activity: await runtime.harness.inspect(context) }), provider: model?.provider, model: taskClient && model ? { provider: model.provider, modelId: model.modelId } : model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
     }
     case "model_settings":
     case "set_model_settings": {
@@ -72,11 +77,11 @@ export async function dispatch(runtime: DeckRuntime, request: Record<string, unk
       return request.command === "model_settings" ? runtime.modelSettings(text(args.chatId, "chatId")) : runtime.setModelSettings(args as SetModelSettingsArgs);
     }
     case "rex_adopt": {
-      if (request.hubId !== runtime.hubId || !validAdoptArgs(args)) throw new DeckError("invalid", "Bootstrap adoption requires valid arguments and explicit hub identity");
+      if (taskClient || request.hubId !== runtime.hubId || !validAdoptArgs(args)) throw new DeckError("invalid", "Bootstrap adoption requires valid arguments and explicit hub identity");
       return runtime.adoptTerminal(args);
     }
     case "rex_open": {
-      if (request.hubId !== runtime.hubId || !validOpenArgs(args)) throw new DeckError("invalid", "Rex open requires valid arguments and explicit hub identity");
+      if (taskClient || request.hubId !== runtime.hubId || !validOpenArgs(args)) throw new DeckError("invalid", "Rex open requires valid arguments and explicit hub identity");
       return runtime.openTerminal(args);
     }
     case "rex_status":
@@ -114,18 +119,22 @@ export async function dispatch(runtime: DeckRuntime, request: Record<string, unk
       });
     }
     case "create_managed_child": {
-      if (taskClient || request.hubId !== runtime.hubId || !validMutationArgs("create_managed_child", args)) throw new DeckError("invalid", "Managed child creation requires the hub control surface, a parent and explicit hub identity");
+      if (request.hubId !== runtime.hubId || !validMutationArgs("create_managed_child", args) || (taskClient && (!pinnedTaskId || args.parentChatId !== pinnedTaskId))) throw new DeckError("invalid", "Managed child creation requires the pinned parent and explicit hub identity");
       const brief = briefFields(args);
       const chat = await runtime.createManagedChild(args.parentChatId, args.title, args.requestId, brief);
       return { chatId: String(chat.id), parentChatId: args.parentChatId, brief };
     }
+    case "open_managed_child": {
+      if (request.hubId !== runtime.hubId || !validOpenManagedChildArgs(args) || (taskClient && (!pinnedTaskId || args.chatId !== pinnedTaskId))) throw new DeckError("invalid", "Managed child open requires the pinned parent and explicit hub identity");
+      return runtime.openManagedChild(args);
+    }
     case "create_task": {
-      if (!validMutationArgs("create_task", args)) throw new DeckError("invalid", "Invalid task creation arguments");
+      if (taskClient || !validMutationArgs("create_task", args)) throw new DeckError("invalid", "Invalid task creation arguments");
       const chat = await runtime.createTask(args.title, { machineId: args.machineId, cwd: args.cwd }, args.requestId);
       return { chatId: String(chat.id) };
     }
     case "create_task_brief": {
-      if (!validMutationArgs("create_task_brief", args)) throw new DeckError("invalid", "Invalid task brief creation arguments");
+      if (taskClient || !validMutationArgs("create_task_brief", args)) throw new DeckError("invalid", "Invalid task brief creation arguments");
       const brief = briefFields(args);
       const chat = await runtime.createTask(args.title, { machineId: args.machineId, cwd: args.cwd }, args.requestId, undefined, brief);
       return { chatId: String(chat.id), brief };
@@ -144,6 +153,10 @@ export async function dispatch(runtime: DeckRuntime, request: Record<string, unk
       if (!validMutationArgs("admit", args)) throw new DeckError("invalid", "Invalid admission arguments");
       const submission = await runtime.admit(args.chatId, { requestId: args.requestId, text: args.text, mode: args.mode });
       return { submissionId: String(submission.id) };
+    }
+    case "message_content": {
+      if (!validMessageContentArgs(args)) throw new DeckError("invalid", "Invalid message content arguments");
+      return messageContent(runtime, args);
     }
     case "history": {
       if (!validHistoryArgs(args)) throw new DeckError("invalid", "Invalid history arguments");

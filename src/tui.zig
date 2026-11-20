@@ -8,6 +8,8 @@ const Native = @import("native.zig");
 const Bridge = @import("tui_bridge.zig");
 const Editor = @import("tui_editor.zig");
 const ExternalEditor = @import("tui_external_editor.zig");
+const MessageContent = @import("tui_message_content.zig");
+const MessageViewer = @import("tui_message_viewer.zig");
 const wire = @import("generated/contracts.zig");
 const TerminalStatus = @import("tui_status.zig");
 const Theme = @import("tui_theme.zig");
@@ -28,6 +30,10 @@ const help =
     \\Ctrl-W k / j          focus chat / prompt
     \\Chat j/k, gg/G        scroll / oldest loaded / latest
     \\Ctrl-U/D, Ctrl-B/F    half / full page (Normal mode)
+    \\Ctrl-P / Ctrl-N       select message: older / newer; newest → prompt
+    \\Click message        select without changing the unsent prompt
+    \\Selected v / l       full message in $EDITOR / Leaf (read-only copy)
+    \\Selected Esc         return to Normal prompt, keep scroll position
     \\Mouse wheel          scroll chat in any editing mode
     \\Shift-drag           terminal selection; use terminal Copy/Paste
     \\:mouse-toggle        opt out of wheel reporting for native selection
@@ -50,7 +56,8 @@ const help =
     \\:agentsmd             load ~/.codex/AGENTS.md from this chat's machine
     \\
     \\:new                  hub only: JSON task-brief composer (Ctrl-S creates)
-    \\:new-child [ID]       hub only: managed child of ID (defaults to hub)
+    \\:new-child [ID]       managed child (agent: self; hub: optional parent ID)
+    \\:child-open ID        explicitly open a direct child in this Rex session
     \\:hosts                registered hosts; Enter selects host for new task
     \\:brief                inspect saved creation brief (read only)
     \\:cancel               clear an unsubmitted task form, not admitted work
@@ -85,7 +92,7 @@ const dim = Theme.dim;
 const accent = Theme.green;
 const bar = Theme.dim;
 const hub_bar = bar;
-pub const Row = struct { text: []const u8 = "", style: vaxis.Style = base, offset: usize = 0, cells: ?Markdown.Line = null, speaker: ?[]const u8 = null, speaker_style: vaxis.Style = dim, user: bool = false, admitted: bool = false, active_prefix: usize = 0 };
+pub const Row = struct { entry_id: ?i64 = null, text: []const u8 = "", style: vaxis.Style = base, offset: usize = 0, cells: ?Markdown.Line = null, speaker: ?[]const u8 = null, speaker_style: vaxis.Style = dim, user: bool = false, admitted: bool = false, active_prefix: usize = 0 };
 
 const TransportStatus = enum {
     quiet,
@@ -294,6 +301,7 @@ fn transientRows(ctx: fw.DrawContext, entries: []const wire.TuiEntry, preview: [
     return list.items;
 }
 const Message = struct {
+    entry_id: ?i64 = null,
     role: @FieldType(wire.TuiEntry, "role"),
     text: []const u8,
     parts: @FieldType(wire.TuiEntry, "parts") = null,
@@ -302,10 +310,9 @@ const Message = struct {
 fn messageRows(ctx: fw.DrawContext, chat: *std.ArrayList(Row), entry: Message, width: u16, assistant: []const u8) !void {
     const user = entry.role == .user;
     const panel = user and !entry.admitted;
-    if (user) {
-        if (chat.items.len == 0) try chat.append(ctx.arena, .{});
-        try chat.append(ctx.arena, .{ .user = panel });
-    }
+    if (user and chat.items.len == 0) try chat.append(ctx.arena, .{});
+    const panel_start = chat.items.len;
+    if (user) try chat.append(ctx.arena, .{ .user = panel });
     const first = chat.items.len;
     if (entry.parts) |parts| {
         var index: usize = 0;
@@ -340,10 +347,11 @@ fn messageRows(ctx: fw.DrawContext, chat: *std.ArrayList(Row), entry: Message, w
     chat.items[first].speaker = if (user) "•" else if (entry.role == .assistant) assistant else "·";
     chat.items[first].speaker_style = if (panel) accent else dim;
     try chat.append(ctx.arena, .{ .user = panel });
+    for (chat.items[panel_start..]) |*row| row.entry_id = entry.entry_id;
     if (user) try chat.append(ctx.arena, .{});
 }
 fn chatRows(ctx: fw.DrawContext, chat: *std.ArrayList(Row), entries: []const wire.TuiEntry, width: u16, assistant: []const u8) !void {
-    for (entries) |entry| if (hasMessage(entry)) try messageRows(ctx, chat, .{ .role = entry.role, .text = entry.text, .parts = entry.parts }, width, assistant);
+    for (entries) |entry| if (hasMessage(entry)) try messageRows(ctx, chat, .{ .entry_id = entry.id, .role = entry.role, .text = entry.text, .parts = entry.parts }, width, assistant);
 }
 fn historyPageRows(ctx: fw.DrawContext, entries: []const wire.TuiEntry, width: u16, assistant: []const u8) ![]const Row {
     var page: std.ArrayList(Row) = .empty;
@@ -580,6 +588,25 @@ const Model = struct {
     completion_names: Completion.Names = .{},
     leader: bool = false,
     external_edit: bool = false,
+    message_view: ?struct { entry_id: i64, viewer: @import("tui_message_viewer.zig").Kind } = null,
+    selected_message: ?i64 = null,
+    selection_reveal: bool = false,
+    selection_older: bool = false, // One boundary traversal, not a queue of keys.
+    newer_anchor: ?i64 = null,
+    newer_after: i64 = 0,
+    newer_budget: u8 = 0,
+    newer_wanted: bool = false,
+    newer_inflight: bool = false,
+    // Native-owned viewport after a forward adoption or cancelled boundary
+    // traversal. Keep it across samples until older/latest/navigation syncs it.
+    forward_view: bool = false,
+    // Owned IDs from the last exact chat viewport, never borrowed draw rows.
+    message_hits: [120]?i64 = @splat(null),
+    message_hit_width: u16 = 0,
+    message_hit_height: u16 = 0,
+    message_frame_width: u16 = 0,
+    message_frame_height: u16 = 0,
+    newest_visible_message: ?i64 = null,
     model_picker: bool = false,
     model_index: usize = 0,
     filter: Filter = .{},
@@ -687,7 +714,172 @@ const Model = struct {
     fn chatVisible(self: *Model) bool {
         return !self.tools_view and !self.help_visible and !self.brief_view and !self.model_picker and !self.task_picker and !self.hosts_view and !self.rex_view and !self.task_form;
     }
+    fn messageHit(self: *Model, mouse: vaxis.Mouse) ?i64 {
+        if (self.terminal_status) |status| {
+            const window = status.vx.window();
+            // vxfw can batch a resize followed by a click before the next draw.
+            if (@min(512, window.width) != self.message_frame_width or @min(120, window.height) != self.message_frame_height) return null;
+        }
+        if (mouse.type != .press or mouse.button != .left or mouse.mods.shift or mouse.mods.ctrl or mouse.mods.alt or mouse.col < 0 or mouse.row < 0 or mouse.col >= self.message_hit_width or mouse.row >= self.message_hit_height) return null;
+        return self.message_hits[@intCast(mouse.row)];
+    }
+    fn cancelNewer(self: *Model) void {
+        self.newer_anchor = null;
+        self.newer_wanted = false;
+        self.newer_inflight = false;
+        self.newer_budget = 0;
+    }
+    fn clearSelection(self: *Model, normal: bool) void {
+        // Esc must not let the next ordinary poll perform the very forward jump
+        // it just cancelled, even when the old selected page looked live.
+        if (normal and self.newer_anchor != null) self.forward_view = true;
+        self.cancelNewer();
+        self.selected_message = null;
+        self.selection_reveal = false;
+        self.selection_older = false;
+        self.focus = .prompt;
+        if (normal) {
+            self.editor.mode = .normal;
+            self.editor.pending = null;
+            self.editor.count = 0;
+        }
+    }
+    fn messageNeighbor(self: *Model, id: ?i64, older: bool) ?i64 {
+        var found: ?i64 = null;
+        if (self.state()) |s| neighborEntries(s.entries, id, older, &found);
+        for (self.scrollback.pages.items) |page| neighborEntries(page.entries(), id, older, &found);
+        return found;
+    }
+    fn neighborEntries(entries: []const wire.TuiEntry, id: ?i64, older: bool, found: *?i64) void {
+        for (entries) |entry| {
+            if (!hasMessage(entry)) continue;
+            if (id) |boundary| {
+                if (older and entry.id >= boundary or !older and entry.id <= boundary) continue;
+            }
+            if (found.* == null or (if (older) entry.id > found.*.? else entry.id < found.*.?)) found.* = entry.id;
+        }
+    }
+    fn containsMessage(self: *Model, id: i64) bool {
+        if (self.state()) |s| for (s.entries) |entry| {
+            if (entry.id == id and hasMessage(entry)) return true;
+        };
+        for (self.scrollback.pages.items) |page| for (page.entries()) |entry| {
+            if (entry.id == id and hasMessage(entry)) return true;
+        };
+        return false;
+    }
+    fn selectionAtOldest(self: *Model) bool {
+        const id = self.selected_message orelse return false;
+        return self.messageNeighbor(id, true) == null;
+    }
+    fn selectionPrefetch(self: *Model) void {
+        if (self.newer_wanted or self.newer_inflight or !self.selectionAtOldest()) return;
+        const s = self.state() orelse return;
+        if (!s.hasOlder or self.auto_older or self.older_wanted) return;
+        self.latest_wanted = false;
+        // Retain the current live page when the older reply arrives, without
+        // pinning or otherwise moving the viewport just to prefetch.
+        if (!self.history_browsing) self.pad_newest = self.scroll_max == 0;
+        self.history_browsing = true;
+        self.older_failed = false;
+        self.older_wanted = true;
+        self.older_budget = 4;
+    }
+    fn selectMessage(self: *Model, id: i64, reveal: bool) void {
+        if (!self.containsMessage(id)) return;
+        self.cancelNewer();
+        self.selected_message = id;
+        self.selection_reveal = reveal;
+        self.selection_older = false;
+        self.leader = false;
+        self.window_prefix = false;
+        self.chat_g = false;
+        self.chat_count = 0;
+        self.selectionPrefetch();
+    }
+    fn traverseMessage(self: *Model, older: bool) void {
+        if (older) self.cancelNewer();
+        if (self.selected_message) |id| {
+            self.selection_older = false;
+            if (self.messageNeighbor(id, older)) |next| {
+                self.selectMessage(next, true);
+            } else if (!older) {
+                // Even a live-looking cached page may miss newly committed
+                // messages while selection holds polling. Prove the end fresh.
+                if (self.newer_wanted or self.newer_inflight) return;
+                if (self.newer_anchor != id) self.newer_after = id;
+                self.newer_anchor = id;
+                self.newer_budget = 4;
+                self.newer_wanted = true;
+                self.older_wanted = false;
+                self.older_budget = 0;
+                self.older_check_rows = null;
+            } else {
+                self.selection_older = if (self.state()) |s| s.hasOlder else false;
+                if (self.selection_older) self.selectionPrefetch();
+            }
+        } else if (older) {
+            // Even if a reply invalidated click geometry before this frame's
+            // draw, prefer the retained ID the user most recently saw.
+            const newest = if (self.newest_visible_message) |id| (if (self.containsMessage(id)) id else null) else null;
+            if (newest orelse self.messageNeighbor(null, true)) |id| self.selectMessage(id, true);
+        }
+    }
+    fn reconcileSelection(self: *Model) void {
+        self.message_hit_height = 0; // A reply can change layout before a redraw.
+        const id = self.selected_message orelse return;
+        if (!self.containsMessage(id)) {
+            self.clearSelection(false); // Eviction is not permission to select a different entry.
+            return;
+        }
+        if (self.selection_older) {
+            if (self.messageNeighbor(id, true)) |next| {
+                self.selected_message = next;
+                self.selection_reveal = true;
+                self.selection_older = false;
+                self.selectionPrefetch();
+            } else if (self.older_budget == 0 or !(if (self.state()) |s| s.hasOlder else false)) self.selection_older = false;
+        }
+    }
+    fn selectedKey(self: *Model, ctx: *fw.EventContext, key: vaxis.Key) !void {
+        if (key.matches(vaxis.Key.escape, .{})) {
+            self.clearSelection(true);
+        } else if (key.matches('p', .{ .ctrl = true }) or key.matches('n', .{ .ctrl = true })) {
+            self.traverseMessage(key.matches('p', .{ .ctrl = true }));
+        } else if (key.matches('v', .{}) or key.matches('l', .{})) {
+            if (self.bridge.failed) {
+                self.note("Message viewer unavailable: client bridge lost. Detach and reconnect.");
+            } else if (self.bridge.pending != null) {
+                self.note("Wait for the in-flight request before opening this message; press v/l again after its reply.");
+            } else {
+                self.message_view = .{ .entry_id = self.selected_message.?, .viewer = if (key.matches('v', .{})) .editor else .leaf };
+                ctx.quit = true;
+            }
+        } else if (key.matches(':', .{})) {
+            self.completion.reset();
+            self.command_mode = true;
+        } else if (key.matches(vaxis.Key.f1, .{})) {
+            self.help_visible = true;
+        } else if (key.matches('G', .{})) {
+            self.scrollChat(false, self.scroll_max);
+        } else if (key.matches('g', .{})) {
+            if (self.chat_g) self.scrollChat(true, self.scroll_max);
+            self.chat_g = !self.chat_g;
+        } else {
+            const up = key.matches('k', .{}) or key.matches(vaxis.Key.up, .{}) or key.matches(vaxis.Key.page_up, .{}) or key.matches('u', .{ .ctrl = true }) or key.matches('b', .{ .ctrl = true });
+            const down = key.matches('j', .{}) or key.matches(vaxis.Key.down, .{}) or key.matches(vaxis.Key.page_down, .{}) or key.matches('d', .{ .ctrl = true }) or key.matches('f', .{ .ctrl = true });
+            if (up or down) {
+                const half = key.matches('u', .{ .ctrl = true }) or key.matches('d', .{ .ctrl = true });
+                const full = key.matches(vaxis.Key.page_up, .{}) or key.matches(vaxis.Key.page_down, .{}) or key.matches('b', .{ .ctrl = true }) or key.matches('f', .{ .ctrl = true });
+                self.scrollChat(up, if (half) @max(1, self.chat_height / 2) else if (full) self.chat_height else 1);
+            }
+        }
+    }
     fn resetHistory(self: *Model) void {
+        self.cancelNewer();
+        self.message_hit_height = 0;
+        self.newest_visible_message = null;
+        self.selection_older = false;
         self.scrollback.clear(self.a);
         self.history_browsing = false;
         self.latest_wanted = false;
@@ -699,6 +891,10 @@ const Model = struct {
         self.older_check_rows = null;
     }
     fn scrollChat(self: *Model, up: bool, amount: usize) void {
+        self.cancelNewer();
+        self.message_hit_height = 0;
+        self.selection_reveal = false;
+        self.selection_older = false;
         if (!up) {
             self.scroll -|= amount;
             self.older_wanted = false;
@@ -708,7 +904,7 @@ const Model = struct {
             if (amount > 0 and self.scroll == 0) {
                 const pending = if (self.bridge.pending) |request| request.action else null;
                 if (pending != .latest) {
-                    if (self.auto_older or pending == .older or (if (self.state()) |s| s.historical else false)) {
+                    if (self.auto_older or pending == .older or self.forward_view or (if (self.state()) |s| s.historical else false)) {
                         self.latest_wanted = true;
                     } else if (self.history_browsing) self.resetHistory();
                 }
@@ -745,7 +941,7 @@ const Model = struct {
         }
     }
     fn flushOlder(self: *Model) !void {
-        if (self.latest_wanted) return;
+        if (self.latest_wanted or self.newer_wanted or self.newer_inflight) return;
         if (!self.older_wanted or self.auto_older or self.pin_top or self.older_check_rows != null) return;
         if (self.bridge.failed or self.older_budget == 0) {
             self.older_wanted = false;
@@ -753,17 +949,56 @@ const Model = struct {
         }
         if (self.bridge.pending != null or self.queued_send or !self.chatVisible() or self.command_mode or self.leader or self.paste_mode) return;
         const s = self.state() orelse return;
-        if (!s.hasOlder or self.scroll < self.scroll_max) {
+        if (!s.hasOlder or (self.scroll < self.scroll_max and !self.selectionAtOldest())) {
             self.older_wanted = false;
             return;
         }
-        if (try self.bridge.request(.older, null, null)) {
+        if (try self.bridge.older(self.forwardBefore())) {
             self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake);
             self.older_started = self.frame;
             self.older_wanted = false;
             self.auto_older = true;
             self.older_budget -= 1;
         }
+    }
+    fn forwardBefore(self: *Model) ?i64 {
+        const s = self.state() orelse return null;
+        return if (self.forward_view and s.entries.len > 0) s.entries[0].id else null;
+    }
+    fn flushNewer(self: *Model) !void {
+        if (!self.newer_wanted) return;
+        if (self.bridge.failed or self.newer_budget == 0 or self.selected_message != self.newer_anchor) {
+            self.newer_wanted = false;
+            return;
+        }
+        if (self.bridge.pending != null or self.auto_older or self.queued_send or !self.chatVisible() or self.command_mode or self.paste_mode) return;
+        if (try self.bridge.newer(self.newer_after)) {
+            self.newer_wanted = false;
+            self.newer_inflight = true;
+            self.newer_budget -= 1;
+            self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake);
+        }
+    }
+    // Return true only when the still-active gesture adopts a forward page.
+    fn acceptNewer(self: *Model, next: wire.TuiSnapshot) bool {
+        if (!self.newer_inflight or self.selected_message != self.newer_anchor) return false;
+        self.newer_inflight = false;
+        if (next.newerFound.?) {
+            var target: ?i64 = null;
+            neighborEntries(next.entries, self.newer_anchor, false, &target);
+            self.resetHistory(); // Forward pages cannot enter the newest-first older cache.
+            self.forward_view = true;
+            self.history_browsing = true;
+            self.selected_message = target;
+            self.selection_reveal = true;
+            return true;
+        }
+        if (next.newerNext) |cursor| {
+            self.newer_after = std.fmt.parseInt(i64, cursor, 10) catch unreachable;
+            self.newer_wanted = self.newer_budget > 0;
+            if (!self.newer_wanted) self.note("More newer history; Ctrl-N to continue.");
+        } else self.clearSelection(false); // Only a fresh, exhausted read proves the end.
+        return false;
     }
     fn acceptOlder(self: *Model, next: wire.TuiSnapshot) !void {
         self.auto_older = false;
@@ -830,7 +1065,45 @@ const Model = struct {
         self.pin_top = false;
         if (self.older_check_rows) |before| {
             self.older_check_rows = null;
-            if (self.rendered_rows == before and self.scroll == self.scroll_max and self.older_budget > 0 and (if (snap) |s| s.hasOlder else false)) self.older_wanted = true;
+            if (self.rendered_rows == before and (self.scroll == self.scroll_max or self.selectionAtOldest()) and self.older_budget > 0 and (if (snap) |s| s.hasOlder else false)) self.older_wanted = true;
+        }
+        if (self.selection_reveal) {
+            self.selection_reveal = false;
+            if (self.selected_message) |id| {
+                var offset: usize = 0;
+                var target: ?[]const Row = null;
+                for (active) |row| if (row.entry_id == id) {
+                    target = active;
+                    break;
+                };
+                if (target == null) {
+                    offset = active.len;
+                    var index = pages.len;
+                    while (index > 0) {
+                        index -= 1;
+                        const page = pages[index];
+                        for (page.entries()) |entry| if (entry.id == id and hasMessage(entry)) {
+                            target = try historyPageRows(ctx, page.entries(), width, speaker);
+                            break;
+                        };
+                        if (target != null) break;
+                        offset += page.rows;
+                    }
+                }
+                if (target) |content| {
+                    var begin: ?usize = null;
+                    var finish: usize = 0;
+                    for (content, 0..) |row, index| if (row.entry_id == id) {
+                        if (begin == null) begin = offset + index;
+                        finish = offset + index + 1;
+                    };
+                    if (begin) |top| {
+                        const first_row = self.scroll_max - self.scroll;
+                        const wanted = if (top < first_row or finish - top > height) top else if (finish > first_row + height) finish -| height else first_row;
+                        self.scroll = self.scroll_max -| @min(wanted, self.scroll_max);
+                    }
+                }
+            }
         }
         const first = self.scroll_max - self.scroll;
         const end = first + height;
@@ -859,7 +1132,7 @@ const Model = struct {
     fn locked(self: *Model) bool {
         if (self.queued_send) return true;
         if (self.state()) |s| if (s.draft != null) return true;
-        if (self.bridge.pending) |p| if (p.action == .send or p.action == .retry or p.action == .discard or p.action == .agentsmd or p.action == .create or p.action == .select or p.action == .subagent or p.action == .parent) return true;
+        if (self.bridge.pending) |p| if (p.action == .send or p.action == .retry or p.action == .discard or p.action == .agentsmd or p.action == .create or p.action == .childOpen or p.action == .select or p.action == .subagent or p.action == .parent) return true;
         return self.uncertain or self.snapshot == null or self.bridge.failed;
     }
     fn transportStatus(self: *Model, now: std.Io.Timestamp) TransportStatus {
@@ -869,6 +1142,7 @@ const Model = struct {
         return if (self.state()) |s| (s.kind == .subagent or s.inspectParentChatId != null or (s.clientMode == .hub and !std.mem.eql(u8, s.chatId, s.hubChatId))) else false;
     }
     fn canWrite(self: *Model) bool {
+        if (self.selected_message != null) return false;
         if (!self.readOnly()) return true;
         self.note(if (self.state().?.kind == .subagent) "Read-only subagent inspection. Use :parent to return." else "Read-only task inspection. :rex open to participate in its Rex session.");
         return false;
@@ -946,6 +1220,7 @@ const Model = struct {
         self.note("Selected model no longer in the hub catalog; choose :model.");
     }
     fn canNavigate(self: *Model) bool {
+        if (self.selected_message != null) return false;
         return self.canList() and self.canInspect();
     }
     fn canInspect(self: *Model) bool {
@@ -1003,11 +1278,22 @@ const Model = struct {
             return;
         }
         if (!@import("managed_child.zig").safeId(.{ .string = parent })) {
-            self.note("Use :new-child with a parent chat ID from :tasks (or omit for hub).");
+            self.note("Use :new-child for this agent, or a parent chat ID in the hub.");
             return;
         }
-        try self.beginTaskForm(null);
-        if (!self.task_form) return;
+        if (!self.canWrite() or !self.canInspect()) return;
+        const s = self.state() orelse return;
+        if (s.clientMode == .task and !std.mem.eql(u8, parent, s.chatId)) {
+            self.note("Task client locked: :new-child can only use this agent as parent.");
+            return;
+        }
+        if (self.bridge.pending != null) {
+            self.note("Client request in flight; creation composer not queued.");
+            return;
+        }
+        self.hosts_view = false;
+        self.task_form = true;
+        self.focus = .prompt;
         const text = try std.fmt.allocPrint(self.a, "{{\"title\":\"\",\"managedParentChatId\":\"{s}\",\"problem\":\"\",\"description\":\"\"}}", .{parent});
         defer self.a.free(text);
         try self.editor.set(text);
@@ -1015,8 +1301,17 @@ const Model = struct {
         self.editor.mode = .insert;
         self.note("Managed child: edit JSON title/problem/description. Inherits parent host/model/tools; Ctrl-S creates, not input. :cancel clears.");
     }
+    fn openChild(self: *Model, child: []const u8) !void {
+        if (!self.canWrite() or !self.canInspect()) return;
+        const s = self.state() orelse return;
+        if (!@import("managed_child.zig").precedes(.{ .string = s.chatId }, .{ .string = child })) {
+            self.note("Use :child-open with a direct child's numeric chat ID.");
+            return;
+        }
+        if (try self.bridge.childOpen(child)) self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake) else self.note("Client request in flight; child open not queued.");
+    }
     fn submitTaskForm(self: *Model) !void {
-        if (!self.canWrite() or !self.canList() or self.locked() or self.settings_uncertain) {
+        if (!self.canWrite() or self.locked() or self.settings_uncertain) {
             self.note("Resolve saved requests/settings before creating.");
             return;
         }
@@ -1031,6 +1326,13 @@ const Model = struct {
         }
         const form = try wire.parseTaskCreationForm(self.a, self.editor.text.items);
         defer form.deinit();
+        if (self.bridge.client_mode == .task) {
+            const own = if (self.state()) |s| s.chatId else "";
+            if (form.value.managedParentChatId == null or !std.mem.eql(u8, form.value.managedParentChatId.?, own)) {
+                self.note("Task client locked: form must create a managed child of this agent.");
+                return;
+            }
+        }
         if (try self.bridge.createForm(form.value)) self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake) else self.note("Client request in flight; creation not queued.");
     }
     fn createAt(self: *Model, json: []const u8) !void {
@@ -1062,10 +1364,17 @@ const Model = struct {
         if (started) self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake) else self.note("Client request in flight; task creation not queued.");
     }
     fn issue(self: *Model, action: Action) !void {
+        if (self.selected_message != null and action != .poll and action != .older and action != .latest) return;
         if (action == .send and self.queued_send) return; // Repeated Enter is not another message.
         if (action == .hosts and !self.canList()) return;
         if (action == .send and self.task_form) return self.submitTaskForm();
         if ((action == .send or action == .retry or action == .discard or action == .stop or action == .configure or action == .agentsmd) and !self.canWrite()) return;
+        if (action == .retry and !self.uncertain and !self.context_draft) if (self.state()) |s| {
+            if (s.draft == null) {
+                self.note("No pending draft to retry. For a created child, use :child-open ID.");
+                return;
+            }
+        };
         if (self.settings_uncertain and (action == .send or action == .retry or action == .agentsmd)) {
             self.note("Settings outcome unconfirmed; wait for a fresh observation before input.");
             return;
@@ -1087,11 +1396,13 @@ const Model = struct {
             return;
         }
         if (action == .latest or action == .older or action == .send) {
+            self.cancelNewer();
             self.latest_wanted = false;
             self.older_wanted = false;
             self.older_budget = 0;
         }
-        if (try self.bridge.request(action, if (action == .send) self.editor.text.items else null, if (action == .poll) (self.scroll > 0 or self.history_browsing) else null)) {
+        const started = if (action == .older) try self.bridge.older(self.forwardBefore()) else try self.bridge.request(action, if (action == .send) self.editor.text.items else null, if (action == .poll) (self.scroll > 0 or self.history_browsing or self.selected_message != null or self.forward_view) else null);
+        if (started) {
             self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake);
             if (action == .agentsmd) self.context_draft = true;
             if (action == .rexStatus or action == .rexInspect or action == .rexOpen) self.rex_view = true;
@@ -1101,7 +1412,7 @@ const Model = struct {
         } else self.note("Client request in flight; action not queued. Try again after its reply.");
     }
     fn flushQueuedSend(self: *Model) !void {
-        if (!self.queued_send or self.bridge.pending != null) return;
+        if (!self.queued_send or self.bridge.pending != null or self.selected_message != null) return;
         self.queued_send = false;
         try self.issue(.send); // Rechecks drafts, settings, authority and the fenced bridge.
         if (self.bridge.pending) |pending| if (pending.action == .send) self.note("Sending message; awaiting acknowledgement.");
@@ -1131,15 +1442,23 @@ const Model = struct {
     }
     fn ex(self: *Model, ctx: *fw.EventContext) !void {
         const cmd = self.command.items;
+        if (self.selected_message != null and !std.mem.eql(u8, cmd, "q") and !std.mem.eql(u8, cmd, "quit") and !std.mem.eql(u8, cmd, "q!") and !std.mem.eql(u8, cmd, "older") and !std.mem.eql(u8, cmd, "latest") and !std.mem.eql(u8, cmd, "help")) {
+            self.note("Message selected: Esc returns to the prompt; only history, help and detach commands are available.");
+            self.command_mode = false;
+            self.command.clearRetainingCapacity();
+            return;
+        }
         if (std.mem.eql(u8, cmd, "sidebar-toggle")) {
             self.sidebar_override = !self.sidebar_visible;
         } else if (std.mem.eql(u8, cmd, "tools")) {
             self.tools_view = true;
             self.tools_scroll = 0;
         } else if (std.mem.eql(u8, cmd, "new-child")) {
-            if (self.state()) |s| try self.beginManagedForm(s.hubChatId);
+            if (self.state()) |s| try self.beginManagedForm(s.chatId);
         } else if (std.mem.startsWith(u8, cmd, "new-child ")) {
             try self.beginManagedForm(std.mem.trim(u8, cmd[10..], " "));
+        } else if (std.mem.startsWith(u8, cmd, "child-open ")) {
+            try self.openChild(std.mem.trim(u8, cmd[11..], " "));
         } else if (std.mem.eql(u8, cmd, "new")) try self.beginTaskForm(null) else if (std.mem.eql(u8, cmd, "hosts")) try self.issue(.hosts) else if (std.mem.eql(u8, cmd, "brief")) {
             self.brief_view = true;
             self.help_scroll = 0;
@@ -1173,7 +1492,7 @@ const Model = struct {
     }
     fn press(self: *Model, ctx: *fw.EventContext, key: vaxis.Key) !void {
         if (self.paste_mode) {
-            if (!self.reject_paste and !self.paste_overflow) {
+            if (self.selected_message == null and !self.reject_paste and !self.paste_overflow) {
                 const text = if (key.matches(vaxis.Key.enter, .{})) "\r" else if (key.matches('j', .{ .ctrl = true })) "\n" else if (key.matches(vaxis.Key.tab, .{})) "    " else key.text orelse "";
                 const existing = if (self.filter_paste) self.filter.len else self.editor.text.items.len;
                 const limit: usize = if (self.filter_paste) 256 else Editor.limit;
@@ -1185,7 +1504,11 @@ const Model = struct {
             self.quit(ctx, false);
             return;
         }
-        if (self.queued_send and !self.command_mode and key.matches(vaxis.Key.escape, .{})) {
+        if (self.selected_message != null and !self.command_mode and !self.help_visible) {
+            try self.selectedKey(ctx, key);
+            return;
+        }
+        if (self.selected_message == null and self.queued_send and !self.command_mode and key.matches(vaxis.Key.escape, .{})) {
             self.queued_send = false;
             self.editor.mode = .normal;
             self.note("Queued send cancelled; prompt preserved.");
@@ -1245,7 +1568,7 @@ const Model = struct {
             } else self.filterKey(key, &self.model_index);
             return;
         }
-        if (!self.command_mode and key.matches(vaxis.Key.tab, .{ .shift = true })) {
+        if (self.selected_message == null and !self.command_mode and key.matches(vaxis.Key.tab, .{ .shift = true })) {
             try self.cycleThinking();
             return;
         }
@@ -1280,6 +1603,10 @@ const Model = struct {
             return;
         }
         const normal = self.focus == .chat or self.editor.mode != .insert or self.locked() or self.readOnly();
+        if (normal and self.chatVisible() and key.matches('p', .{ .ctrl = true })) {
+            self.traverseMessage(true);
+            return;
+        }
         if (normal and self.leader) {
             self.leader = false;
             if (key.matches('t', .{})) try self.taskPage(null) else if (key.matches('m', .{})) try self.issue(.models) else if (key.matches('n', .{})) try self.beginTaskForm(null);
@@ -1400,6 +1727,8 @@ const Model = struct {
                     self.auto_older = false;
                     self.latest_wanted = false;
                     self.older_check_rows = null;
+                    self.selection_older = false;
+                    self.cancelNewer();
                     ctx.redraw = true;
                     try ctx.tick(50, self.widget());
                     return;
@@ -1416,6 +1745,10 @@ const Model = struct {
                         self.older_wanted = false;
                         self.older_budget = 0;
                         self.older_check_rows = null;
+                        self.selection_older = false;
+                        self.newer_wanted = false;
+                        self.newer_inflight = false;
+                        self.newer_budget = 0;
                         if (self.queued_send) {
                             const message = try std.fmt.allocPrint(self.a, "Queued message not sent; prompt preserved. {s}", .{response.value.case1.@"error"});
                             defer self.a.free(message);
@@ -1424,14 +1757,53 @@ const Model = struct {
                         } else self.note(response.value.case1.@"error");
                         self.online = false;
                         if (self.terminal_status) |status| status.presentation.invalidate();
-                        if (action == .send or action == .retry or action == .create) self.uncertain = true;
+                        if (action == .send or action == .retry or action == .create) self.uncertain = !(response.value.case1.notSent orelse false);
                         if (action == .configure) self.settings_uncertain = true;
                         response.deinit();
-                    } else {
-                        const s = response.value.case0.snapshot;
-                        const navigation = action == .select or action == .subagent or action == .parent;
-                        const automatic_older = action == .older and self.auto_older;
-                        if (automatic_older) try self.acceptOlder(s);
+                    } else success: {
+                        var s = response.value.case0.snapshot;
+                        if (action == .newer) {
+                            if (!self.acceptNewer(s)) {
+                                response.deinit();
+                                break :success;
+                            }
+                            // Reply-only fields must never leak into ordinary snapshots.
+                            s.newerAfter = null;
+                            s.newerFound = null;
+                            s.newerNext = null;
+                        }
+                        const navigation = action == .select or action == .subagent or action == .parent or (if (self.state()) |prior| !std.mem.eql(u8, prior.chatId, s.chatId) else false);
+                        if (navigation) self.clearSelection(false);
+                        // Samples/ACKs still belong to the helper's old page after
+                        // a nonmutating forward read. Copy only our retained viewport
+                        // into their owned arena, keeping all fresh status fields.
+                        if ((self.forward_view or self.newer_wanted or self.newer_inflight) and action != .newer and action != .older and action != .latest and !navigation) {
+                            const prior = self.state().?;
+                            const bytes = try std.json.Stringify.valueAlloc(self.a, prior.entries, .{});
+                            defer self.a.free(bytes);
+                            s.entries = try std.json.parseFromSliceLeaky([]const wire.TuiEntry, response.arena.allocator(), bytes, .{ .allocate = .alloc_always });
+                            s.hasOlder = prior.hasOlder;
+                            s.historical = prior.historical;
+                        }
+                        const automatic_older = action == .older and (self.auto_older or self.forward_view);
+                        if (automatic_older) {
+                            if (self.state()) |prior| if (s.entries.len == 0 or (prior.entries.len > 0 and s.entries[s.entries.len - 1].id >= prior.entries[0].id)) {
+                                // Empty/overlapping replies must not replace the retained
+                                // anchor or duplicate a cached page. Require fresh intent.
+                                self.auto_older = false;
+                                self.older_wanted = false;
+                                self.older_budget = 0;
+                                self.older_check_rows = null;
+                                self.selection_older = false;
+                                self.older_failed = s.hasOlder;
+                                self.note(if (s.hasOlder) "Older history made no progress; scroll up to retry." else "Start of history.");
+                                self.snapshot.?.value.case0.snapshot.hasOlder = s.hasOlder;
+                                response.deinit();
+                                break :success;
+                            };
+                            try self.acceptOlder(s);
+                            self.forward_view = false;
+                        }
                         if (navigation or action == .latest or (action == .older and !automatic_older) or action == .send or action == .retry) {
                             // A down gesture during manual :older still means
                             // return live after that page replacement finishes.
@@ -1439,6 +1811,7 @@ const Model = struct {
                             self.resetHistory();
                             self.latest_wanted = return_at_bottom;
                         }
+                        if (navigation or action == .latest) self.forward_view = false;
                         if (self.snapshot == null or navigation) self.animations.attach(self.frame, !std.mem.eql(u8, s.chatId, s.hubChatId));
                         if (action == .poll or action == .latest or navigation) self.activity_seen = self.frame;
                         if (self.terminal_status) |status| if (s.cwd) |cwd| try status.identity(rune(s), cwd);
@@ -1503,6 +1876,8 @@ const Model = struct {
                         if (action != .poll or self.state() == null or !std.mem.eql(u8, self.state().?.notice, s.notice)) self.note(s.notice);
                         if (self.snapshot) |old| old.deinit();
                         self.snapshot = response;
+                        self.snapshot.?.value.case0.snapshot = s;
+                        self.reconcileSelection();
                         self.observeCompletionNames();
                         self.online = true;
                         self.animations.advance(self.frame, self.freshBusy());
@@ -1510,6 +1885,7 @@ const Model = struct {
                     }
                 }
                 try self.flushLatest(); // Return at the bottom, behind any explicit queued send.
+                try self.flushNewer(); // One bounded read intent, serialized behind pending reads.
                 try self.flushOlder(); // Only explicit upward intent; never a polling crawl.
                 self.ticks += 1;
                 if (self.ticks % 10 == 0 and self.bridge.pending == null and !self.command_mode and !self.leader and !self.paste_mode and !self.model_picker and !self.task_picker and !self.hosts_view and !self.brief_view and !self.rex_view) {
@@ -1526,9 +1902,12 @@ const Model = struct {
                 // An already-issued request is never cancelled or replayed.
                 self.ticks = 0;
                 if (self.terminal_status) |status| status.presentation.acknowledge();
+                const prior_cursor = self.editor.cursor;
+                const prior_length = self.editor.text.items.len;
                 self.press(ctx, key) catch |err| {
                     if (err == error.PromptTooLarge) self.note("Prompt limit: 16 KiB. Paste/edit refused; nothing submitted.") else if (err == error.InvalidUtf8) self.note("Invalid UTF-8 input refused; prompt unchanged.") else return err;
                 };
+                if (prior_cursor != self.editor.cursor or prior_length != self.editor.text.items.len) self.message_hit_height = 0;
                 ctx.consumeAndRedraw();
             },
             .paste_start => {
@@ -1536,7 +1915,7 @@ const Model = struct {
                 self.paste_mode = true;
                 self.leader = false;
                 self.filter_paste = self.model_picker or self.task_picker or self.hosts_view;
-                self.reject_paste = self.command_mode or self.help_visible or self.brief_view or self.tools_view or self.rex_view or (!self.filter_paste and (self.locked() or self.readOnly()));
+                self.reject_paste = self.selected_message != null or self.command_mode or self.help_visible or self.brief_view or self.tools_view or self.rex_view or (!self.filter_paste and (self.locked() or self.readOnly()));
                 self.paste_overflow = false;
                 self.paste_buffer.clearRetainingCapacity();
             },
@@ -1548,11 +1927,12 @@ const Model = struct {
                         self.task_index = 0;
                         self.host_index = 0;
                     }
-                } else if (!self.reject_paste and !self.locked() and !self.readOnly()) {
+                } else if (!self.reject_paste and self.selected_message == null and !self.locked() and !self.readOnly()) {
                     self.editor.paste(self.paste_buffer.items) catch |err| {
                         if (err == error.PromptTooLarge or err == error.InvalidUtf8) self.note("Invalid or oversized paste refused in full; prompt unchanged.") else return err;
                     };
                 }
+                self.message_hit_height = 0;
                 self.paste_mode = false;
                 self.reject_paste = false;
                 self.paste_buffer.clearRetainingCapacity();
@@ -1564,7 +1944,7 @@ const Model = struct {
                 if (self.tools_view) {
                     if (mouse.button == .wheel_up) self.tools_scroll -|= 3 else if (mouse.button == .wheel_down) self.tools_scroll = @min(self.tools_max, self.tools_scroll + 3);
                 } else if (self.chatVisible() and !self.command_mode and !self.paste_mode) {
-                    if (mouse.button == .wheel_up) self.scrollChat(true, 3) else if (mouse.button == .wheel_down) self.scrollChat(false, 3);
+                    if (mouse.button == .wheel_up) self.scrollChat(true, 3) else if (mouse.button == .wheel_down) self.scrollChat(false, 3) else if (self.messageHit(mouse)) |id| self.selectMessage(id, false);
                 }
                 ctx.consumeAndRedraw();
             },
@@ -1573,11 +1953,15 @@ const Model = struct {
     }
     fn draw(ptr: *anyopaque, ctx: fw.DrawContext) std.mem.Allocator.Error!fw.Surface {
         const self: *Model = @ptrCast(@alignCast(ptr));
+        self.message_hit_height = 0;
+        self.newest_visible_message = null;
         self.sidebar_flickering = false;
         self.shown_transport = self.transportStatus(std.Io.Timestamp.now(self.bridge.io, .awake));
         const w = @min(512, ctx.max.width orelse 80);
         // vxfw Surface multiplies u16 dimensions; stay below 65,536 cells.
         const h = @min(120, ctx.max.height orelse 24);
+        self.message_frame_width = w;
+        self.message_frame_height = h;
         var surface = try fw.Surface.init(ctx.arena, self.widget(), .{ .width = w, .height = h });
         @memset(surface.buffer, .{ .style = base });
         if (w == 0 or h == 0) return surface;
@@ -1739,10 +2123,17 @@ const Model = struct {
         self.chat_height = chat_h;
         const fallback = if (s == null) (if (self.bridge.failed) "Selected hub connection failed; no local fallback." else if (self.worker_transport) "Connecting to the selected hub via this worker…" else "Connecting to the selected hub…") else if (s.?.inspectParentChatId != null) "Read-only subagent · :parent to return" else if (self.readOnly()) "Read-only inspection · :rex open to participate" else "Enter to send · Esc for Normal mode · :help";
         const visible = try self.historyViewport(ctx, layout.body, chat_h, if (shown.len == 0) fallback else "");
+        self.message_hit_width = layout.main;
+        self.message_hit_height = @intCast(visible.len);
         for (visible, 0..) |row, y| {
-            if (row.user) for (0..layout.main) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = Theme.user });
+            self.message_hits[y] = row.entry_id;
+            if (row.entry_id) |id| self.newest_visible_message = id;
+            const selected_row = row.entry_id != null and row.entry_id == self.selected_message;
+            if (selected_row) for (0..layout.main) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = Theme.message_selection });
+            if (row.user and !selected_row) for (0..layout.main) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = Theme.user });
             var speaker_style = row.speaker_style;
             if (row.user) speaker_style.bg = Theme.user.bg;
+            if (selected_row) speaker_style = Theme.message_selection;
             if (row.speaker) |speaker| lineLimit(ctx, surface, layout.x -| 2, @intCast(y), speaker, speaker_style, null, 0, layout.x);
             if (row.cells) |cells| {
                 var x = layout.x;
@@ -1753,11 +2144,12 @@ const Model = struct {
                         cell.style.fg = dim.fg;
                         cell.style.bg = base.bg;
                     }
+                    if (selected_row) cell.style = Theme.message_selection;
                     if (x + cell.char.width > layout.x + layout.body) break;
                     surface.writeCell(x, @intCast(y), cell);
                     x += cell.char.width;
                 }
-            } else lineLimit(ctx, surface, layout.x, @intCast(y), row.text, row.style, null, 0, layout.x + layout.body);
+            } else lineLimit(ctx, surface, layout.x, @intCast(y), row.text, if (selected_row) Theme.message_selection else row.style, null, 0, layout.x + layout.body);
         }
         for (shown, 0..) |row, i| lineLimit(ctx, surface, layout.x, @intCast(visible.len + i), row.text, dim, null, 0, layout.x + layout.body);
         if (away) {
@@ -1765,7 +2157,7 @@ const Model = struct {
             lineLimit(ctx, surface, 1, upper - 1, history_notice, accent, null, 0, right);
         }
         const sending = if (self.bridge.pending) |pending| pending.action == .send else false;
-        const mode = if (self.readOnly()) "READ ONLY" else if (self.queued_send) "SEND QUEUED" else if (sending) "SENDING" else if (s != null and s.?.draft != null and !s.?.draft.?.saved) "LOCKED UNSAVED" else if (s != null and s.?.draft != null and s.?.draft.?.clipped) "SAVED PREVIEW" else if (s != null and s.?.draft != null and s.?.draft.?.saved) "SAVED LOCKED" else if (self.locked()) "LOCKED" else "";
+        const mode = if (self.selected_message != null) "SELECT MESSAGE · Ctrl-P/N · v editor / l Leaf · Esc" else if (self.readOnly()) "READ ONLY" else if (self.queued_send) "SEND QUEUED" else if (sending) "SENDING" else if (s != null and s.?.draft != null and !s.?.draft.?.saved) "LOCKED UNSAVED" else if (s != null and s.?.draft != null and s.?.draft.?.clipped) "SAVED PREVIEW" else if (s != null and s.?.draft != null and s.?.draft.?.saved) "SAVED LOCKED" else if (self.locked()) "LOCKED" else "";
         for (0..layout.main) |x| surface.writeCell(@intCast(x), upper, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = Theme.rule });
         for (0..w) |x| surface.writeCell(@intCast(x), h - 3, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = Theme.rule });
         const border = try std.fmt.allocPrint(ctx.arena, " {s}{s} ", .{ if (self.task_form) "TASK BRIEF " else "", mode });
@@ -1796,8 +2188,8 @@ const Model = struct {
             cursor_row = i;
         };
         const start = (cursor_row + 1) -| prompt_h;
-        for (prompt.items[start..@min(prompt.items.len, start + prompt_h)], 0..) |row, y| lineLimit(ctx, surface, layout.x, @intCast(prompt_y + y), row.text, if (self.queued_send or sending) dim else base, if (self.queued_send or sending) null else self.editor.selection(), row.offset, layout.x + layout.body);
-        if (self.focus == .prompt and !self.command_mode and !self.locked() and !self.readOnly()) {
+        for (prompt.items[start..@min(prompt.items.len, start + prompt_h)], 0..) |row, y| lineLimit(ctx, surface, layout.x, @intCast(prompt_y + y), row.text, if (self.queued_send or sending) dim else base, if (self.selected_message != null or self.queued_send or sending) null else self.editor.selection(), row.offset, layout.x + layout.body);
+        if (self.selected_message == null and self.focus == .prompt and !self.command_mode and !self.locked() and !self.readOnly()) {
             const row = prompt.items[cursor_row];
             const end = @min(self.editor.cursor - row.offset, row.text.len);
             surface.cursor = .{ .col = @intCast(layout.x + @min(layout.body - 1, displayWidth(ctx, row.text[0..end]))), .row = @intCast(prompt_y + cursor_row - start), .shape = if (self.editor.mode == .insert) .beam else .block };
@@ -1883,6 +2275,25 @@ pub fn selected(args: []const []const u8, terminal: bool) !bool {
     }
     if (force and plain) return error.ConflictingClientModes;
     return force or (terminal and !plain);
+}
+
+fn messageViewError(err: anyerror) []const u8 {
+    return switch (err) {
+        error.EditorNotSet => "Set $EDITOR to view messages in an editor; prompt unchanged.",
+        error.InvalidEditor => "$EDITOR has invalid quoting or arguments; prompt unchanged.",
+        error.EditorUnavailable => "Configured $EDITOR executable is unavailable; prompt unchanged.",
+        error.LeafUnavailable => "Leaf is unavailable on PATH; install https://github.com/RivoLink/leaf.",
+        error.ViewerRexContext => "Cannot verify this terminal's Rex session/block; no viewer opened.",
+        error.ViewerRexUnavailable => "Local Rex is unavailable or changed identity; no viewer opened.",
+        error.ViewerLaunchUnconfirmed => "Viewer launch unconfirmed. Inspect Rex before retrying; private export retained (details on terminal scrollback).",
+        error.MessageTooLarge => "Message exceeds the 16 MiB export limit; nothing truncated or opened.",
+        error.MessageContentBusy => "Client request in flight; wait before opening the message.",
+        error.MessageContentUnavailable => "Full retained message unavailable (missing, oversized, unsupported hub or connection failure); no viewer opened.",
+        error.InvalidMessageContent => "Full-message integrity check failed; no viewer opened.",
+        error.MessageContentTimeout => "Message read timed out; connection fenced, no viewer opened.",
+        error.MessageContentCancelled, error.Cancelled => "Message viewing cancelled; prompt unchanged.",
+        else => "Could not create the private message export; prompt unchanged.",
+    };
 }
 
 pub fn run(init: std.process.Init, args: []const []const u8) !void {
@@ -1997,11 +2408,27 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
             defer model.terminal_status = null;
             try app.run(model.widget(), .{ .framerate = 30 });
         } // Event loop joined, raw mode/alternate screen/title restored first.
-        if (!model.external_edit or stopping.load(.monotonic)) break;
-        model.external_edit = false;
+        if (stopping.load(.monotonic)) break;
+        if (!model.external_edit and model.message_view == null) break;
         for (model.scrollback.pages.items) |*page| page.width = 0; // Next app negotiates terminal width handling anew.
         model.online = false;
         model.animations.mode = .idle;
+        if (model.message_view) |view| {
+            model.message_view = null; // Explicit action, never retried on redraw or reconnect.
+            const native: @import("native.zig") = .{ .io = init.io, .environ = init.minimal.environ };
+            const content = MessageContent.download(native, init.gpa, &bridge, view.entry_id, &stopping) catch |err| {
+                model.note(messageViewError(err));
+                continue;
+            };
+            defer init.gpa.free(content);
+            MessageViewer.open(native, init.gpa, init.environ_map, content, view.viewer, &stopping) catch |err| {
+                model.note(messageViewError(err));
+                continue;
+            };
+            model.note("Message viewer launch admitted in this Rex session; export copy only, prompt unchanged.");
+            continue;
+        }
+        model.external_edit = false;
         const edited = ExternalEditor.run(.{ .io = init.io, .environ = init.minimal.environ }, init.gpa, init.environ_map, model.editor.text.items, &stopping) catch |err| {
             var message: [256]u8 = undefined;
             model.note(std.fmt.bufPrint(&message, "Editor failed ({s}); prompt unchanged. Set $EDITOR to an executable with optional arguments.", .{@errorName(err)}) catch "Editor failed; prompt unchanged.");
@@ -3552,4 +3979,635 @@ test "subagent completion retains sibling names through inspection but clears un
     model.observeCompletionNames();
     try std.testing.expectEqual(0, model.completion_names.len);
     try std.testing.expect(!model.completion.active);
+}
+
+fn selectionTestDraw(a: std.mem.Allocator, width: u16, height: u16) fw.DrawContext {
+    fw.DrawContext.init(.unicode);
+    return .{ .arena = a, .min = .{}, .max = .{ .width = width, .height = height }, .cell_size = .{ .width = 8, .height = 16 } };
+}
+fn selectionTestMouse(x: i16, y: i16) vaxis.Mouse {
+    return .{ .col = x, .row = y, .button = .left, .type = .press, .mods = .{} };
+}
+
+test "select message keyboard mode locks exact unsent editor state and all prompt actions" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    defer bridge.output.deinit(a);
+    var model = try testChatModel(a, &bridge);
+    defer model.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const draw_ctx = selectionTestDraw(arena.allocator(), 100, 40);
+    var event_ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
+    defer event_ctx.cmds.deinit(a);
+    const exact = "  Unsent 界 é 👩‍💻\ntrailing  \n";
+    try model.editor.set(exact);
+    model.editor.cursor = 3;
+    model.editor.mode = .insert;
+    model.snapshot.?.value.case0.snapshot.entries = &.{
+        .{ .id = 1, .role = .user, .text = "Oldest" },
+        .{ .id = 2, .role = .tool, .text = "bash\nnot selectable" },
+        .{ .id = 3, .role = .note, .text = "not a typed message" },
+        .{ .id = 4, .role = .note, .text = "", .parts = &.{.{ .kind = .text, .text = "Typed task message" }} },
+        .{ .id = 5, .role = .assistant, .text = "Newest retained" },
+        .{ .id = 6, .role = .assistant, .text = "", .parts = &.{.{ .kind = .tool_request, .text = "read" }} },
+    };
+    _ = try Model.draw(&model, draw_ctx);
+    try model.press(&event_ctx, .{ .codepoint = 'p', .mods = .{ .ctrl = true } });
+    try std.testing.expect(model.selected_message == null); // Insert Ctrl-P is not chat navigation.
+    model.editor.mode = .normal;
+    try model.press(&event_ctx, .{ .codepoint = 'p', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqual(@as(?i64, 5), model.selected_message);
+    const before = model.editor;
+    for ([_]vaxis.Key{
+        .{ .codepoint = 'x', .text = "x" },               .{ .codepoint = 'i', .text = "i" },                            .{ .codepoint = 'a', .text = "a" },
+        .{ .codepoint = 'p', .text = "p" },               .{ .codepoint = 'u', .text = "u" },                            .{ .codepoint = ' ', .text = " " },
+        .{ .codepoint = vaxis.Key.enter },                .{ .codepoint = vaxis.Key.enter, .mods = .{ .shift = true } }, .{ .codepoint = 's', .mods = .{ .ctrl = true } },
+        .{ .codepoint = 'j', .mods = .{ .ctrl = true } }, .{ .codepoint = vaxis.Key.tab },                               .{ .codepoint = vaxis.Key.tab, .mods = .{ .shift = true } },
+        .{ .codepoint = 'w', .mods = .{ .ctrl = true } }, .{ .codepoint = 'r', .mods = .{ .ctrl = true } },
+    }) |key| try model.press(&event_ctx, key);
+    try Model.event(&model, &event_ctx, .paste_start);
+    try model.press(&event_ctx, .{ .codepoint = 0, .text = "must not enter prompt\n" });
+    try Model.event(&model, &event_ctx, .paste_end);
+    for ([_][]const u8{ "send", "discard", "retry", "cancel", "new", "new-child", "child-open 2", "select 2", "hub", "parent", "agentsmd", "model", "tasks" }) |cmd| {
+        try model.command.appendSlice(a, cmd);
+        try model.ex(&event_ctx);
+    }
+    try std.testing.expectEqualStrings(exact, model.editor.text.items);
+    try std.testing.expectEqual(before.cursor, model.editor.cursor);
+    try std.testing.expectEqual(before.mode, model.editor.mode);
+    try std.testing.expectEqual(before.undo.items.len, model.editor.undo.items.len);
+    try std.testing.expect(!model.external_edit and !model.leader and !model.window_prefix and !model.queued_send);
+    try std.testing.expect(bridge.pending == null and bridge.sequence == 0);
+    const selected_surface = try Model.draw(&model, draw_ctx);
+    try std.testing.expect(selected_surface.cursor == null);
+    try std.testing.expect(std.mem.indexOf(u8, try testSurfaceText(draw_ctx.arena, selected_surface), "SELECT MESSAGE") != null);
+    for ([_]i64{ 4, 1 }) |id| {
+        try model.press(&event_ctx, .{ .codepoint = 'p', .mods = .{ .ctrl = true } });
+        try std.testing.expectEqual(@as(?i64, id), model.selected_message);
+    }
+    for ([_]i64{ 4, 5 }) |id| {
+        try model.press(&event_ctx, .{ .codepoint = 'n', .mods = .{ .ctrl = true } });
+        try std.testing.expectEqual(@as(?i64, id), model.selected_message);
+    }
+    try model.press(&event_ctx, .{ .codepoint = 'n', .mods = .{ .ctrl = true } });
+    try std.testing.expect(model.selected_message == 5 and model.newer_wanted);
+    model.newer_inflight = true;
+    var end = model.state().?;
+    end.newerFound = false;
+    try std.testing.expect(!model.acceptNewer(end));
+    try std.testing.expect(model.selected_message == null and model.focus == .prompt);
+    try std.testing.expect((try Model.draw(&model, draw_ctx)).cursor != null);
+    // Deferred sends are postponed, not dropped or sent by selecting a message.
+    model.selectMessage(5, false);
+    model.queued_send = true;
+    try model.flushQueuedSend();
+    try std.testing.expect(model.queued_send and bridge.pending == null);
+    model.clearSelection(false);
+    try model.flushQueuedSend();
+    try std.testing.expect(bridge.pending.?.action == .send and !model.queued_send);
+}
+
+test "message mouse hit map matches full panels and markdown colors through resize" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    var model = try testChatModel(a, &bridge);
+    defer model.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    var event_ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
+    defer event_ctx.cmds.deinit(a);
+    model.snapshot.?.value.case0.snapshot.entries = &.{
+        .{ .id = 10, .role = .user, .text = "**User** `code`" },
+        .{ .id = 11, .role = .assistant, .text = "# Heading\n\n**bold** *italic* ~~strike~~ [link](https://example.com) 界\n\n```zig\nconst x = 1;\n```\n\n| Name | State |\n| --- | --- |\n| 界 | ready |" },
+        .{ .id = 12, .role = .tool, .text = "bash\nnot selectable" },
+    };
+    try model.editor.set("  preserved unsent\ntext  ");
+    model.editor.mode = .insert;
+    model.editor.cursor = 5;
+    for ([_]u16{ 140, 60, 112, 20 }) |width| {
+        const draw_ctx = selectionTestDraw(arena.allocator(), width, 40);
+        model.scroll = 0;
+        model.clearSelection(false);
+        _ = try Model.draw(&model, draw_ctx);
+        const layout = Theme.Layout.init(width, null);
+        var hit_row: ?usize = null;
+        for (model.message_hits[0..model.message_hit_height], 0..) |id, y| if (id == 11) {
+            hit_row = y;
+            break;
+        };
+        const y = hit_row.?;
+        // Both outer margins belong to the panel, not the sidebar separator.
+        for ([_]i16{ 0, @intCast(layout.main - 1) }) |x| {
+            try Model.event(&model, &event_ctx, .{ .mouse = selectionTestMouse(x, @intCast(y)) });
+            try std.testing.expectEqual(@as(?i64, 11), model.selected_message);
+            try std.testing.expectEqual(Editor.Mode.insert, model.editor.mode);
+            try std.testing.expectEqual(5, model.editor.cursor);
+            const colored = try Model.draw(&model, draw_ctx);
+            try std.testing.expect(colored.cursor == null);
+            for (model.message_hits[0..model.message_hit_height], 0..) |id, row| {
+                for (0..layout.main) |col| {
+                    const style = colored.buffer[row * width + col].style;
+                    if (id == 11) {
+                        try std.testing.expectEqualDeep(Theme.orange.fg, style.bg);
+                        try std.testing.expectEqualDeep(vaxis.Color{ .rgb = .{ 0, 0, 0 } }, style.fg);
+                        try std.testing.expect(!style.reverse);
+                    } else try std.testing.expect(!std.meta.eql(Theme.orange.fg, style.bg));
+                }
+            }
+            // Fresh end proof restores the exact prior editing mode/cursor.
+            try model.press(&event_ctx, .{ .codepoint = 'n', .mods = .{ .ctrl = true } });
+            model.newer_inflight = true;
+            var end = model.state().?;
+            end.newerFound = false;
+            try std.testing.expect(!model.acceptNewer(end));
+            try std.testing.expect(model.selected_message == null and model.editor.mode == .insert);
+        }
+        for ([_][2]i16{ .{ @intCast(layout.main), @intCast(y) }, .{ 0, @intCast(model.message_hit_height) }, .{ 0, 37 }, .{ 0, 39 }, .{ -1, 0 }, .{ 0, -1 } }) |point| {
+            try Model.event(&model, &event_ctx, .{ .mouse = selectionTestMouse(point[0], point[1]) });
+            try std.testing.expect(model.selected_message == null);
+        }
+        var modified = selectionTestMouse(0, @intCast(y));
+        modified.mods.shift = true;
+        try Model.event(&model, &event_ctx, .{ .mouse = modified });
+        modified.mods.shift = false;
+        for ([_]vaxis.Mouse.Type{ .release, .drag, .motion }) |kind| {
+            modified.type = kind;
+            try Model.event(&model, &event_ctx, .{ .mouse = modified });
+        }
+        try std.testing.expect(model.selected_message == null);
+        // Dialog and too-small layouts invalidate the map instead of retaining old hits.
+        model.tools_view = true;
+        _ = try Model.draw(&model, draw_ctx);
+        try std.testing.expectEqual(0, model.message_hit_height);
+        try Model.event(&model, &event_ctx, .{ .mouse = selectionTestMouse(0, @intCast(y)) });
+        try std.testing.expect(model.selected_message == null);
+        model.tools_view = false;
+        _ = try Model.draw(&model, selectionTestDraw(arena.allocator(), 10, 8));
+        try std.testing.expectEqual(0, model.message_hit_height);
+    }
+    try std.testing.expectEqualStrings("  preserved unsent\ntext  ", model.editor.text.items);
+}
+
+test "selection starts at newest visible retained entry not preview or admitted input and scroll keeps input enabled" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    var model = try testChatModel(a, &bridge);
+    defer model.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const draw_ctx = selectionTestDraw(arena.allocator(), 60, 24);
+    var event_ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
+    defer event_ctx.cmds.deinit(a);
+    var entries: [30]wire.TuiEntry = undefined;
+    for (&entries, 0..) |*entry, i| entry.* = .{ .id = @intCast(i + 1), .role = .assistant, .text = "A retained message with wrapped Unicode 界 and enough text to wrap at a narrow width." };
+    const snap = &model.snapshot.?.value.case0.snapshot;
+    snap.entries = &entries;
+    snap.admittedInputs = &.{.{ .requestId = "queued", .text = "not retained" }};
+    snap.preview = "transient preview";
+    model.editor.mode = .normal;
+    _ = try Model.draw(&model, draw_ctx);
+    // Admitted echoes, preview, notice, prompt and footer cells carry no ID.
+    for (0..24) |y| {
+        if (y < model.message_hit_height and model.message_hits[y] != null) continue;
+        try Model.event(&model, &event_ctx, .{ .mouse = selectionTestMouse(0, @intCast(y)) });
+        try std.testing.expect(model.selected_message == null);
+    }
+    model.scrollChat(true, 9999);
+    const scrolled = try Model.draw(&model, draw_ctx);
+    try std.testing.expect(model.selected_message == null and scrolled.cursor != null);
+    var newest: ?i64 = null;
+    for (model.message_hits[0..model.message_hit_height]) |id| if (id != null) {
+        newest = id;
+    };
+    try std.testing.expect(newest.? < 30);
+    model.reconcileSelection(); // A poll between the last visible frame and Ctrl-P.
+    try model.press(&event_ctx, .{ .codepoint = 'p', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqual(newest, model.selected_message);
+    for (0..8) |_| try model.press(&event_ctx, .{ .codepoint = 'n', .mods = .{ .ctrl = true } });
+    _ = try Model.draw(&model, draw_ctx);
+    var selected_visible = false;
+    for (model.message_hits[0..model.message_hit_height]) |id| if (id == model.selected_message) {
+        selected_visible = true;
+    };
+    try std.testing.expect(selected_visible);
+    const selected_id = model.selected_message;
+    const before = model.scroll;
+    model.scrollChat(true, 2);
+    _ = try Model.draw(&model, draw_ctx);
+    try std.testing.expectEqual(selected_id, model.selected_message);
+    const kept = model.scroll;
+    try model.press(&event_ctx, .{ .codepoint = vaxis.Key.escape });
+    try std.testing.expect(model.selected_message == null and model.editor.mode == .normal);
+    try std.testing.expectEqual(kept, model.scroll);
+    try std.testing.expect(kept >= before);
+    // Scrolling alone must not turn the prompt read-only, even while away.
+    model.editor.mode = .insert;
+    try model.press(&event_ctx, .{ .codepoint = 'x', .text = "x" });
+    try std.testing.expectEqualStrings("x", model.editor.text.items);
+    try std.testing.expect((try Model.draw(&model, draw_ctx)).cursor != null);
+}
+
+test "selected message viewers are explicit retained ID handoffs and never queue behind reads" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    var model = try testChatModel(a, &bridge);
+    defer model.deinit();
+    var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
+    defer ctx.cmds.deinit(a);
+    model.snapshot.?.value.case0.snapshot.entries = &.{.{ .id = 9, .role = .assistant, .text = "[view clipped]" }};
+    model.snapshot.?.value.case0.snapshot.kind = .subagent;
+    try model.editor.set("unsent exact  ");
+    model.selectMessage(9, false);
+    bridge.pending = .{ .version = 1, .id = "1", .action = .poll };
+    try model.press(&ctx, .{ .codepoint = 'v' });
+    try std.testing.expect(model.message_view == null and !ctx.quit);
+    try std.testing.expect(std.mem.indexOf(u8, model.notice[0..model.notice_len], "Wait for the in-flight") != null);
+    bridge.pending = null;
+    try std.testing.expect(model.message_view == null); // No retry/automatic open after reply.
+    bridge.failed = true;
+    try model.press(&ctx, .{ .codepoint = 'l' });
+    try std.testing.expect(model.message_view == null and !ctx.quit);
+    bridge.failed = false;
+    try model.press(&ctx, .{ .codepoint = 'v', .mods = .{ .alt = true } });
+    try std.testing.expect(model.message_view == null);
+    for ([_]u21{ 'v', 'l' }) |key| {
+        ctx.quit = false;
+        model.message_view = null;
+        try model.press(&ctx, .{ .codepoint = key });
+        try std.testing.expect(ctx.quit and !model.external_edit);
+        try std.testing.expectEqual(9, model.message_view.?.entry_id);
+        try std.testing.expectEqual(if (key == 'v') @import("tui_message_viewer.zig").Kind.editor else .leaf, model.message_view.?.viewer);
+    }
+    try std.testing.expectEqualStrings("unsent exact  ", model.editor.text.items);
+    try std.testing.expect(bridge.sequence == 0);
+    ctx.quit = false;
+    try model.press(&ctx, .{ .codepoint = 'c', .mods = .{ .ctrl = true } });
+    try std.testing.expect(!ctx.quit); // Detach still protects unsaved input.
+    try model.command.appendSlice(a, "q!");
+    try model.ex(&ctx);
+    try std.testing.expect(ctx.quit);
+}
+
+const SelectionTestPipe = struct {
+    bridge: Bridge,
+    peer_read: std.posix.fd_t,
+    peer_write: std.posix.fd_t,
+    fn init() !@This() {
+        const input = try Native.pipe();
+        errdefer for (input) |fd| Native.close(fd);
+        const output = try Native.pipe();
+        errdefer for (output) |fd| Native.close(fd);
+        const flags = try Native.fcntl(output[0], std.posix.F.GETFL, 0);
+        _ = try Native.fcntl(output[0], std.posix.F.SETFL, flags | @as(u32, @bitCast(std.posix.O{ .NONBLOCK = true })));
+        return .{ .peer_read = input[0], .peer_write = output[1], .bridge = .{
+            .a = std.testing.allocator,
+            .io = std.testing.io,
+            .child = .{ .id = null, .thread_handle = {}, .stdin = .{ .handle = input[1], .flags = .{ .nonblocking = false } }, .stdout = .{ .handle = output[0], .flags = .{ .nonblocking = true } }, .stderr = null, .request_resource_usage_statistics = false },
+        } };
+    }
+    fn deinit(self: *@This()) void {
+        self.bridge.deinit();
+        Native.close(self.peer_read);
+        Native.close(self.peer_write);
+    }
+    fn reply(self: *@This(), model: *Model, ctx: *fw.EventContext, snapshot: ?wire.TuiSnapshot) !void {
+        const response: wire.TuiResponse = if (snapshot) |s| .{ .case0 = .{ .version = 1, .id = self.bridge.pending.?.id, .ok = true, .snapshot = s } } else .{ .case1 = .{ .version = 1, .id = self.bridge.pending.?.id, .ok = false, .@"error" = "older unavailable", .notSent = true } };
+        const bytes = try std.json.Stringify.valueAlloc(std.testing.allocator, response, .{});
+        defer std.testing.allocator.free(bytes);
+        const file: std.Io.File = .{ .handle = self.peer_write, .flags = .{ .nonblocking = false } };
+        var header: [4]u8 = undefined;
+        std.mem.writeInt(u32, &header, @intCast(bytes.len), .big);
+        try file.writeStreamingAll(std.testing.io, &header);
+        try file.writeStreamingAll(std.testing.io, bytes);
+        stopping.store(false, .monotonic);
+        try Model.event(model, ctx, .tick);
+    }
+};
+
+test "selection older boundary uses bounded automatic pages, skips sparse entries and anchors cached identity" {
+    const a = std.testing.allocator;
+    var pipe = try SelectionTestPipe.init();
+    defer pipe.deinit();
+    var model = try testChatModel(a, &pipe.bridge);
+    defer model.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const draw_ctx = selectionTestDraw(arena.allocator(), 100, 24);
+    var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
+    defer ctx.cmds.deinit(a);
+    try model.editor.set("Unsaved exact 界\n  draft ");
+    model.snapshot.?.value.case0.snapshot.entries = &.{.{ .id = 100, .role = .assistant, .text = "# Newest retained\n\n**Message**" }};
+    model.snapshot.?.value.case0.snapshot.hasOlder = true;
+    _ = try Model.draw(&model, draw_ctx);
+    model.selectMessage(100, true);
+    _ = try Model.draw(&model, draw_ctx);
+    try model.flushOlder(); // Merely selecting oldest starts the prefetch.
+    try std.testing.expectEqual(Action.older, pipe.bridge.pending.?.action);
+    try std.testing.expectEqual(1, pipe.bridge.sequence);
+    try model.press(&ctx, .{ .codepoint = 'p', .mods = .{ .ctrl = true } });
+    try std.testing.expect(model.selection_older);
+    for (0..4) |i| {
+        // Repeated keys do not enqueue more reads or reset the invisible-page budget.
+        for (0..3) |_| {
+            try model.press(&ctx, .{ .codepoint = 'p', .mods = .{ .ctrl = true } });
+            try model.flushOlder();
+        }
+        try std.testing.expectEqual(i + 1, pipe.bridge.sequence);
+        const before = try Model.draw(&model, draw_ctx);
+        const old_scroll = model.scroll;
+        var next = model.state().?;
+        const entries: []const wire.TuiEntry = &.{.{ .id = @intCast(99 - i), .role = .tool, .text = "bash\nsparse tool page" }};
+        next.entries = entries;
+        next.historical = true;
+        try pipe.reply(&model, &ctx, next);
+        const after = try Model.draw(&model, draw_ctx);
+        try std.testing.expectEqual(old_scroll, model.scroll);
+        try std.testing.expectEqual(@as(?i64, 100), model.selected_message);
+        for (0..model.chat_height) |row| try std.testing.expectEqualStrings(try testSurfaceRowText(draw_ctx.arena, before, row, 0), try testSurfaceRowText(draw_ctx.arena, after, row, 0));
+        try model.flushOlder();
+    }
+    try std.testing.expectEqual(4, pipe.bridge.sequence);
+    try std.testing.expect(pipe.bridge.pending == null and !model.selection_older);
+    try model.press(&ctx, .{ .codepoint = 'p', .mods = .{ .ctrl = true } });
+    _ = try Model.draw(&model, draw_ctx);
+    try model.flushOlder(); // Fresh boundary gesture gets a new bounded budget.
+    var next = model.state().?;
+    next.entries = &.{.{ .id = 80, .role = .assistant, .text = "Older retained message\n\n```zig\nconst x = 1;\n```" }};
+    next.hasOlder = false;
+    try pipe.reply(&model, &ctx, next);
+    try std.testing.expectEqual(@as(?i64, 80), model.selected_message);
+    try std.testing.expect(!model.selection_older);
+    _ = try Model.draw(&model, selectionTestDraw(arena.allocator(), 40, 24));
+    var visible = false;
+    for (model.message_hits[0..model.message_hit_height]) |id| if (id == 80) {
+        visible = true;
+    };
+    try std.testing.expect(visible);
+    try model.press(&ctx, .{ .codepoint = 'n', .mods = .{ .ctrl = true } });
+    try std.testing.expectEqual(@as(?i64, 100), model.selected_message);
+    _ = try Model.draw(&model, draw_ctx);
+    // A historical poll preserves selection even when the entry is in a cached page.
+    try model.issue(.poll);
+    try std.testing.expect(pipe.bridge.pending.?.hold.?);
+    next = model.state().?;
+    try pipe.reply(&model, &ctx, next);
+    try std.testing.expectEqual(@as(?i64, 100), model.selected_message);
+    try std.testing.expectEqualStrings("Unsaved exact 界\n  draft ", model.editor.text.items);
+    try std.testing.expectEqual(5, model.scrollback.pages.items.len);
+}
+
+test "selection errors no-progress latest navigation and eviction never retarget an entry ID" {
+    const a = std.testing.allocator;
+    var pipe = try SelectionTestPipe.init();
+    defer pipe.deinit();
+    var model = try testChatModel(a, &pipe.bridge);
+    defer model.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const draw_ctx = selectionTestDraw(arena.allocator(), 100, 24);
+    var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
+    defer ctx.cmds.deinit(a);
+    model.snapshot.?.value.case0.snapshot.entries = &.{.{ .id = 100, .role = .assistant, .text = "Selected anchor" }};
+    model.snapshot.?.value.case0.snapshot.hasOlder = true;
+    _ = try Model.draw(&model, draw_ctx);
+    model.selectMessage(100, false);
+    _ = try Model.draw(&model, draw_ctx);
+    try model.flushOlder();
+    model.traverseMessage(true);
+    try pipe.reply(&model, &ctx, null);
+    try std.testing.expectEqual(@as(?i64, 100), model.selected_message);
+    try std.testing.expect(model.older_failed and !model.selection_older and !model.auto_older and !model.older_wanted);
+    for (0..2) |attempt| {
+        model.traverseMessage(true);
+        _ = try Model.draw(&model, draw_ctx);
+        try model.flushOlder();
+        var next = model.state().?;
+        if (attempt == 0) next.entries = &.{}; // Empty, then overlapping: neither may drop/duplicate anchor.
+        try pipe.reply(&model, &ctx, next);
+        try std.testing.expectEqual(@as(?i64, 100), model.selected_message);
+        try std.testing.expectEqual(0, model.scrollback.pages.items.len);
+        try std.testing.expect(!model.selection_older and !model.auto_older and !model.older_wanted);
+        try std.testing.expectEqual(100, model.state().?.entries[0].id);
+    }
+    // :latest can retain the same identity, but cannot transfer it to another message.
+    try model.issue(.latest);
+    var latest = model.state().?;
+    latest.historical = false;
+    latest.hasOlder = false;
+    try pipe.reply(&model, &ctx, latest);
+    try std.testing.expectEqual(@as(?i64, 100), model.selected_message);
+    try model.issue(.latest);
+    latest = model.state().?;
+    latest.entries = &.{.{ .id = 101, .role = .assistant, .text = "Different retained message" }};
+    try pipe.reply(&model, &ctx, latest);
+    try std.testing.expect(model.selected_message == null);
+    // Actual navigation clears even if the new chat happens to have the same ID.
+    model.selectMessage(101, false);
+    try std.testing.expect(try pipe.bridge.selectChat("2"));
+    latest = model.state().?;
+    latest.chatId = "2";
+    try pipe.reply(&model, &ctx, latest);
+    try std.testing.expect(model.selected_message == null);
+    // Cache eviction clears instead of snapping selection to the same row number.
+    _ = try model.scrollback.retain(a, &.{.{ .id = 999, .role = .assistant, .text = "Newer cached anchor" }}, 2);
+    model.selectMessage(999, false);
+    for (0..Scrollback.max_pages) |i| {
+        _ = try model.scrollback.retain(a, &.{.{ .id = @intCast(998 - i), .role = .assistant, .text = "Older page" }}, 2);
+    }
+    model.reconcileSelection();
+    try std.testing.expect(model.selected_message == null and model.scrollback.newer_omitted);
+}
+
+fn forwardTestEntry(id: i64) wire.TuiEntry {
+    return .{ .id = id, .role = .assistant, .text = "Forward message", .parts = &.{.{ .kind = .text, .text = "Forward message" }} };
+}
+
+test "newer boundary fresh reads serialize behind polls and replace rather than stitch forward pages" {
+    const a = std.testing.allocator;
+    for (0..3) |origin| {
+        var pipe = try SelectionTestPipe.init();
+        defer pipe.deinit();
+        var model = try testChatModel(a, &pipe.bridge);
+        defer model.deinit();
+        var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
+        defer ctx.cmds.deinit(a);
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const draw_ctx = selectionTestDraw(arena.allocator(), 100, 24);
+        try model.editor.set("exact unsent 🧪  ");
+        model.snapshot.?.value.case0.snapshot.entries = &.{forwardTestEntry(100)};
+        model.snapshot.?.value.case0.snapshot.hasOlder = false;
+        model.snapshot.?.value.case0.snapshot.historical = origin == 1;
+        model.scrollback.newer_omitted = origin == 2;
+        _ = try Model.draw(&model, draw_ctx);
+        try model.issue(.poll); // May have started unheld before selection.
+        model.selectMessage(100, false);
+        model.traverseMessage(false);
+        try model.flushNewer();
+        try std.testing.expect(pipe.bridge.pending.?.action == .poll and model.selected_message == 100);
+        var old = model.state().?;
+        old.entries = &.{forwardTestEntry(200)}; // In-flight latest must not evict the selected anchor.
+        try pipe.reply(&model, &ctx, old);
+        try std.testing.expectEqual(@as(?i64, 100), model.selected_message);
+        try std.testing.expectEqual(100, model.state().?.entries[0].id);
+        try std.testing.expectEqual(Action.newer, pipe.bridge.pending.?.action);
+        try std.testing.expectEqualStrings("100", pipe.bridge.pending.?.after.?);
+        var next = model.state().?;
+        next.newerAfter = "100";
+        next.newerFound = true;
+        next.entries = &.{ forwardTestEntry(101), forwardTestEntry(102) };
+        next.hasOlder = true;
+        try pipe.reply(&model, &ctx, next);
+        try std.testing.expectEqual(@as(?i64, 101), model.selected_message);
+        try std.testing.expect(model.forward_view and !model.scrollback.newer_omitted and model.scrollback.pages.items.len == 0);
+        _ = try Model.draw(&model, draw_ctx);
+        try model.issue(.poll);
+        old = model.state().?;
+        old.entries = &.{forwardTestEntry(100)};
+        try pipe.reply(&model, &ctx, old); // Helper never committed the forward read.
+        try std.testing.expectEqual(101, model.state().?.entries[0].id);
+        try std.testing.expectEqual(@as(?i64, 101), model.selected_message);
+        try std.testing.expectEqualStrings("exact unsent 🧪  ", model.editor.text.items);
+        // Backward traversal explicitly reloads the correct previous page.
+        model.traverseMessage(true);
+        _ = try Model.draw(&model, draw_ctx);
+        try model.flushOlder();
+        try std.testing.expectEqual(Action.older, pipe.bridge.pending.?.action);
+        try std.testing.expectEqualStrings("101", pipe.bridge.pending.?.before.?);
+        old = model.state().?;
+        old.entries = &.{forwardTestEntry(100)};
+        old.hasOlder = false;
+        old.historical = true;
+        try pipe.reply(&model, &ctx, old);
+        try std.testing.expectEqual(@as(?i64, 100), model.selected_message);
+        try std.testing.expect(!model.forward_view);
+        model.traverseMessage(false);
+        try std.testing.expectEqual(@as(?i64, 101), model.selected_message);
+    }
+}
+
+test "newer sparse continuation is four pages per gesture, retries only explicitly, and exits only at fresh end" {
+    const a = std.testing.allocator;
+    var pipe = try SelectionTestPipe.init();
+    defer pipe.deinit();
+    var model = try testChatModel(a, &pipe.bridge);
+    defer model.deinit();
+    var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
+    defer ctx.cmds.deinit(a);
+    model.snapshot.?.value.case0.snapshot.entries = &.{forwardTestEntry(100)};
+    model.snapshot.?.value.case0.snapshot.hasOlder = false;
+    try model.editor.set("sparse draft");
+    model.selectMessage(100, false);
+    model.traverseMessage(false);
+    try model.flushNewer();
+    for (0..4) |i| {
+        model.traverseMessage(false); // Repeats cannot reset the gesture budget.
+        var next = model.state().?;
+        var after: [20]u8 = undefined;
+        var cursor: [20]u8 = undefined;
+        next.newerAfter = try std.fmt.bufPrint(&after, "{d}", .{100 + i});
+        next.newerNext = try std.fmt.bufPrint(&cursor, "{d}", .{101 + i});
+        next.newerFound = false;
+        try pipe.reply(&model, &ctx, next);
+        try std.testing.expectEqual(@as(?i64, 100), model.selected_message);
+        try std.testing.expectEqual(100, model.state().?.entries[0].id);
+    }
+    try std.testing.expect(pipe.bridge.pending == null and pipe.bridge.sequence == 4);
+    model.traverseMessage(false);
+    try model.flushNewer();
+    try std.testing.expectEqualStrings("104", pipe.bridge.pending.?.after.?);
+    try pipe.reply(&model, &ctx, null);
+    try model.flushNewer();
+    try std.testing.expect(pipe.bridge.pending == null and model.selected_message == 100);
+    model.traverseMessage(false);
+    try model.flushNewer();
+    try std.testing.expectEqualStrings("104", pipe.bridge.pending.?.after.?);
+    var end = model.state().?;
+    end.newerAfter = "104";
+    end.newerFound = false;
+    try pipe.reply(&model, &ctx, end);
+    try std.testing.expect(model.selected_message == null);
+    try std.testing.expectEqualStrings("sparse draft", model.editor.text.items);
+}
+
+test "Esc click and reversal cancel newer before or after dispatch without changing the viewport" {
+    const a = std.testing.allocator;
+    for (0..3) |cancel| {
+        var pipe = try SelectionTestPipe.init();
+        defer pipe.deinit();
+        var model = try testChatModel(a, &pipe.bridge);
+        defer model.deinit();
+        var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
+        defer ctx.cmds.deinit(a);
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        const draw_ctx = selectionTestDraw(arena.allocator(), 100, 24);
+        model.snapshot.?.value.case0.snapshot.entries = &.{ forwardTestEntry(99), forwardTestEntry(100) };
+        model.snapshot.?.value.case0.snapshot.hasOlder = false;
+        try model.editor.set("cancelled draft");
+        _ = try Model.draw(&model, draw_ctx);
+        model.selectMessage(100, false);
+        model.traverseMessage(false);
+        try model.flushNewer();
+        const before = try Model.draw(&model, draw_ctx);
+        const scroll = model.scroll;
+        switch (cancel) {
+            0 => try model.press(&ctx, .{ .codepoint = vaxis.Key.escape }),
+            1 => model.selectMessage(100, false), // Click same identity still cancels old intent.
+            else => model.traverseMessage(true),
+        }
+        var next = model.state().?;
+        next.newerAfter = "100";
+        next.newerFound = true;
+        next.entries = &.{forwardTestEntry(101)};
+        try pipe.reply(&model, &ctx, next);
+        try std.testing.expectEqual(@as(?i64, if (cancel == 0) null else if (cancel == 1) 100 else 99), model.selected_message);
+        try std.testing.expectEqual(99, model.state().?.entries[0].id);
+        if (cancel == 0) {
+            const after = try Model.draw(&model, draw_ctx);
+            try std.testing.expectEqual(scroll, model.scroll);
+            for (0..model.chat_height) |row| try std.testing.expectEqualStrings(try testSurfaceRowText(draw_ctx.arena, before, row, 0), try testSurfaceRowText(draw_ctx.arena, after, row, 0));
+        }
+        try model.issue(.poll);
+        try pipe.reply(&model, &ctx, model.state().?);
+        try std.testing.expectEqual(99, model.state().?.entries[0].id);
+        try std.testing.expectEqualStrings("cancelled draft", model.editor.text.items);
+        model.selectMessage(100, false);
+        try model.issue(.poll);
+        model.traverseMessage(false);
+        model.clearSelection(true);
+        try pipe.reply(&model, &ctx, model.state().?);
+        try std.testing.expect(pipe.bridge.pending == null and !model.newer_wanted);
+    }
+}
+
+test "newer intent waits behind already dispatched oldest prefetch" {
+    const a = std.testing.allocator;
+    var pipe = try SelectionTestPipe.init();
+    defer pipe.deinit();
+    var model = try testChatModel(a, &pipe.bridge);
+    defer model.deinit();
+    var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
+    defer ctx.cmds.deinit(a);
+    model.snapshot.?.value.case0.snapshot.entries = &.{forwardTestEntry(100)};
+    model.snapshot.?.value.case0.snapshot.hasOlder = true;
+    model.selectMessage(100, false);
+    try model.flushOlder();
+    model.traverseMessage(false);
+    try model.flushNewer();
+    try std.testing.expectEqual(Action.older, pipe.bridge.pending.?.action);
+    var older = model.state().?;
+    older.entries = &.{forwardTestEntry(90)};
+    older.historical = true;
+    try pipe.reply(&model, &ctx, older);
+    try std.testing.expectEqual(@as(?i64, 100), model.selected_message);
+    try std.testing.expectEqual(Action.newer, pipe.bridge.pending.?.action);
+    var next = model.state().?;
+    next.entries = &.{forwardTestEntry(101)};
+    next.newerAfter = "100";
+    next.newerFound = true;
+    try pipe.reply(&model, &ctx, next);
+    try std.testing.expectEqual(@as(?i64, 101), model.selected_message);
+    try std.testing.expectEqual(0, model.scrollback.pages.items.len);
 }

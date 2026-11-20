@@ -87,7 +87,7 @@ test("managed child IPC creates only an idle ownerless task and projects exact b
   } finally { await f.close(); }
 });
 
-test("managed child dispatch rejects unpinned, task-client and non-closed creation requests before runtime admission", async t => {
+test("managed child dispatch rejects unpinned task-client and non-closed creation requests before runtime admission", async t => {
   const f = await fixture();
   try {
     const args = { requestId: randomUUID(), parentChatId: String(f.runtime.main.id), title: "Not created" };
@@ -128,5 +128,32 @@ test("managed child IPC replays exact ACKs across restart, rejects conflicting b
     assert.notEqual(empty.chatId, ack.chatId);
     assert.deepEqual((await f.runtime.history(ack.chatId)).items, []); assert.deepEqual((await f.runtime.history(empty.chatId)).items, []);
     assert.equal(f.faux.state.callCount, 0); assert.deepEqual(f.effects, []);
+  } finally { await f.close(); }
+});
+
+test("only canonical pinned task dispatch advertises managed actions; create scopes to exactly its parent and captured views have no capability", async () => {
+  const f = await fixture();
+  try {
+    const parent = await f.runtime.createTask("Parent", binding), parentId = String(parent.id);
+    const call = (command: string, args: object, pin?: string) => dispatch(f.runtime, { version: 1, id: randomUUID(), command, args, hubId: f.runtime.hubId }, undefined, true, pin);
+    const status = await call("status", { chatId: parentId }, parentId) as StatusSnapshot;
+    assert.equal(status.managedChildren, 1); assert.equal(status.managedChildOpen, 1);
+    const args = { parentChatId: parentId, requestId: randomUUID(), title: "Scoped" };
+    for (const pin of [undefined, String(f.runtime.main.id)]) await assert.rejects(call("create_managed_child", args, pin), { code: "invalid" });
+    const created = await call("create_managed_child", args, parentId) as CreateManagedChildAck;
+    const nested = await call("create_managed_child", { parentChatId: created.chatId, requestId: randomUUID(), title: "Nested" }, created.chatId) as CreateManagedChildAck;
+    assert.equal(nested.parentChatId, created.chatId);
+    for (const pin of [undefined, created.chatId]) await assert.rejects(call("open_managed_child", { chatId: parentId, childId: created.chatId, requestId: randomUUID(), port: 52800 }, pin), { code: "invalid" });
+    await assert.rejects(call("rex_open", { chatId: parentId, requestId: randomUUID(), port: 52800 }, parentId), { code: "invalid" });
+    await assert.rejects(call("create_task", { requestId: randomUUID(), title: "Not scoped", ...binding }, parentId), { code: "invalid" });
+    const { namedChildren } = await import("./subagent-view.test.support.js");
+    const captured = (await namedChildren(f.runtime, parentId))[0]!, owned = await f.runtime.chat(captured.chatId);
+    // A valid captured read must not imply parent scope capability.
+    const viewed = await call("subagent_view", { chatId: parentId, childId: captured.chatId, operation: "status" }, parentId) as { result: StatusSnapshot };
+    assert.equal(viewed.result.managedChildren, undefined); assert.equal(viewed.result.managedChildOpen, undefined);
+    await owned.commit(async tx => { Object.assign(await tx.doc(ChatDoc, owned.id), { kind: "task", managedParentChatId: parentId }); }, context);
+    const forged = await call("status", { chatId: captured.chatId }, captured.chatId) as StatusSnapshot;
+    assert.equal(forged.managedChildren, undefined); assert.equal(forged.managedChildOpen, undefined);
+    await assert.rejects(call("create_managed_child", { parentChatId: captured.chatId, requestId: randomUUID(), title: "Not independent" }, captured.chatId), { code: "invalid" });
   } finally { await f.close(); }
 });

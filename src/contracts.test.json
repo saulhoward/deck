@@ -1,5 +1,7 @@
 {
   "bases": {
+    "OpenManagedChildArgs": {"chatId":"2","childId":"3","requestId":"11111111-1111-4111-8111-111111111111","port":52800},
+    "OpenManagedChildAck": {"parentChatId":"2","childId":"3","ack":{"version":1,"chatId":"3","requestId":"11111111-1111-4111-8111-111111111111","taskId":"9","status":"admitted","completion":"not_waited","bestEffort":true}},
     "CreateManagedChildArgs": {"requestId":"saved-managed","parentChatId":"2","title":"Child"},
     "CreateManagedChildAck": {"chatId":"3","parentChatId":"2","brief":{}},
     "TaskCreationForm": {"title":"Child"},
@@ -151,6 +153,22 @@
     }
   },
   "cases": [
+    {"name":"OpenManagedChildArgs closed valid","schema":"OpenManagedChildArgs","valid":true},
+    {"name":"OpenManagedChildArgs closed extras","schema":"OpenManagedChildArgs","set":{"extra":true},"valid":false},
+    {"name":"OpenManagedChildArgs requires chatId","schema":"OpenManagedChildArgs","remove":["chatId"],"valid":false},
+    {"name":"OpenManagedChildArgs requires childId","schema":"OpenManagedChildArgs","remove":["childId"],"valid":false},
+    {"name":"OpenManagedChildArgs requires requestId","schema":"OpenManagedChildArgs","remove":["requestId"],"valid":false},
+    {"name":"OpenManagedChildArgs requires port","schema":"OpenManagedChildArgs","remove":["port"],"valid":false},
+    {"name":"OpenManagedChildAck closed valid","schema":"OpenManagedChildAck","valid":true},
+    {"name":"OpenManagedChildAck closed extras","schema":"OpenManagedChildAck","set":{"extra":true},"valid":false},
+    {"name":"OpenManagedChildAck requires parentChatId","schema":"OpenManagedChildAck","remove":["parentChatId"],"valid":false},
+    {"name":"OpenManagedChildAck requires childId","schema":"OpenManagedChildAck","remove":["childId"],"valid":false},
+    {"name":"OpenManagedChildAck requires ack","schema":"OpenManagedChildAck","remove":["ack"],"valid":false},
+    {"name":"managed child open capability 1","schema":"StatusSnapshot","set":{"managedChildOpen":1},"valid":true},
+    {"name":"managed child open capability 0","schema":"StatusSnapshot","set":{"managedChildOpen":0},"valid":false},
+    {"name":"managed child open capability 2","schema":"StatusSnapshot","set":{"managedChildOpen":2},"valid":false},
+    {"name":"managed child open capability None","schema":"StatusSnapshot","set":{"managedChildOpen":null},"valid":false},
+    {"name":"childOpen action","schema":"TuiRequest","set":{"action":"childOpen","chatId":"3"},"valid":true},
     { "name": "current terminal creation provenance", "schema": "AgentHereRecord", "valid": true },
     { "name": "current terminal has no Rex block authority", "schema": "AgentHereRecord", "set": { "blockId": "block:00000000-0000-4000-8000-000000000001" }, "valid": false },
     { "name": "current terminal requires native process", "schema": "AgentHereRecord", "remove": ["pid"], "valid": false },

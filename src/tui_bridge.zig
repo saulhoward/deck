@@ -5,6 +5,7 @@ const Native = @import("native.zig");
 const paths = @import("runtime_paths.zig");
 const model_settings = @import("model_settings.zig");
 const wire = @import("generated/contracts.zig");
+const message_content = @import("message_content.zig");
 const Bridge = @This();
 const cap = 1024 * 1024;
 a: std.mem.Allocator,
@@ -18,6 +19,8 @@ pending: ?wire.TuiRequest = null,
 id_buf: [32]u8 = undefined,
 target_buf: [20]u8 = undefined,
 after_buf: [20]u8 = undefined,
+before_buf: [20]u8 = undefined,
+entry_buf: [20]u8 = undefined,
 failed: bool = false,
 hub_id: ?[]const u8 = null,
 chat_id: ?[]const u8 = null,
@@ -80,29 +83,61 @@ pub fn deinit(self: *Bridge) void {
     if (self.inspect_parent_id) |id| self.a.free(id);
 }
 pub fn request(self: *Bridge, action: @FieldType(wire.TuiRequest, "action"), text: ?[]const u8, hold: ?bool) !bool {
-    return self.requestConfigured(action, text, hold, null, null, null, null, null);
+    return self.requestConfigured(action, text, hold, null, null, null, null, null, null, null, null);
 }
 pub fn configure(self: *Bridge, change: wire.ModelSettingsChange) !bool {
-    return self.requestConfigured(.configure, null, null, change, null, null, null, null);
+    return self.requestConfigured(.configure, null, null, change, null, null, null, null, null, null, null);
 }
 pub fn selectChat(self: *Bridge, chat_id: []const u8) !bool {
-    return self.requestConfigured(.select, null, null, null, chat_id, null, null, null);
+    return self.requestConfigured(.select, null, null, null, chat_id, null, null, null, null, null, null);
+}
+pub fn childOpen(self: *Bridge, child_id: []const u8) !bool {
+    return self.requestConfigured(.childOpen, null, null, null, child_id, null, null, null, null, null, null);
 }
 pub fn tasks(self: *Bridge, after: ?[]const u8) !bool {
-    return self.requestConfigured(.tasks, null, null, null, null, after, null, null);
+    return self.requestConfigured(.tasks, null, null, null, null, after, null, null, null, null, null);
+}
+/// Forward reads are scoped to one canonical ID, never a latest-page jump.
+pub fn newer(self: *Bridge, after: i64) !bool {
+    var buf: [20]u8 = undefined;
+    const cursor = try std.fmt.bufPrint(&buf, "{d}", .{after});
+    return self.requestConfigured(.newer, null, null, null, null, cursor, null, null, null, null, null);
+}
+pub fn older(self: *Bridge, before: ?i64) !bool {
+    var buf: [20]u8 = undefined;
+    const cursor = if (before) |id| try std.fmt.bufPrint(&buf, "{d}", .{id}) else null;
+    return self.requestConfigured(.older, null, null, null, null, null, null, null, null, null, cursor);
 }
 pub fn createAt(self: *Bridge, target: wire.TaskCreationTarget) !bool {
-    return self.requestConfigured(.create, null, null, null, null, null, target, null);
+    return self.requestConfigured(.create, null, null, null, null, null, target, null, null, null, null);
 }
 pub fn createForm(self: *Bridge, form: wire.TaskCreationForm) !bool {
-    return self.requestConfigured(.create, null, null, null, null, null, null, form);
+    return self.requestConfigured(.create, null, null, null, null, null, null, form, null, null, null);
 }
-fn requestConfigured(self: *Bridge, action: @FieldType(wire.TuiRequest, "action"), text: ?[]const u8, hold: ?bool, configuration: ?wire.ModelSettingsChange, chat_id: ?[]const u8, after: ?[]const u8, task_target: ?wire.TaskCreationTarget, task_form: ?wire.TaskCreationForm) !bool {
+/// Read-only content of an entry in the already pinned selection. No chat
+/// argument or navigation exception: captured task inspection remains read-only.
+pub fn messageContent(self: *Bridge, entry_id: i64, offset: usize) !bool {
+    // Do not overwrite entry_buf while a previous request still refers to it.
     if (self.failed or self.pending != null) return false;
-    if (self.client_mode == .task and (action == .select or action == .tasks or action == .hosts or action == .create)) return error.TaskLocked;
+    if (self.chat_id == null or entry_id <= 0 or entry_id > 9007199254740991 or offset > 16 * 1024 * 1024) return error.InvalidContract;
+    const entry = try std.fmt.bufPrint(&self.entry_buf, "{d}", .{entry_id});
+    return self.requestConfigured(.messageContent, null, null, null, null, null, null, null, entry, @intCast(offset), null);
+}
+fn requestConfigured(self: *Bridge, action: @FieldType(wire.TuiRequest, "action"), text: ?[]const u8, hold: ?bool, configuration: ?wire.ModelSettingsChange, chat_id: ?[]const u8, after: ?[]const u8, task_target: ?wire.TaskCreationTarget, task_form: ?wire.TaskCreationForm, entry_id: ?[]const u8, offset: ?i64, before: ?[]const u8) !bool {
+    if (self.failed or self.pending != null) return false;
+    if (self.client_mode == .task) {
+        if (action == .select or action == .tasks or action == .hosts) return error.TaskLocked;
+        if (action == .create) {
+            const form = task_form orelse return error.TaskLocked;
+            const parent = form.managedParentChatId orelse return error.TaskLocked;
+            const own = self.chat_id orelse return error.TaskLocked;
+            if (self.inspect_parent_id != null or !std.mem.eql(u8, parent, own)) return error.TaskLocked;
+        }
+        if (action == .childOpen and self.inspect_parent_id != null) return error.TaskLocked;
+    }
     self.sequence += 1;
     const id = try std.fmt.bufPrint(&self.id_buf, "{d}", .{self.sequence});
-    var request_value: wire.TuiRequest = .{ .version = 1, .id = id, .action = action, .text = text, .hold = hold, .configuration = configuration, .chatId = chat_id, .after = after, .taskTarget = task_target, .taskForm = task_form };
+    var request_value: wire.TuiRequest = .{ .version = 1, .id = id, .action = action, .text = text, .hold = hold, .configuration = configuration, .chatId = chat_id, .after = after, .before = before, .taskTarget = task_target, .taskForm = task_form, .entryId = entry_id, .offset = offset };
     const bytes = try std.json.Stringify.valueAlloc(self.a, request_value, .{});
     defer self.a.free(bytes);
     const checked = try std.json.parseFromSlice(std.json.Value, self.a, bytes, .{});
@@ -111,6 +146,9 @@ fn requestConfigured(self: *Bridge, action: @FieldType(wire.TuiRequest, "action"
     if (bytes.len > cap or (action == .send and (text == null or text.?.len == 0 or text.?.len > 16384))) return error.InvalidContract;
     self.output.clearRetainingCapacity();
     self.sent = 0;
+    // Allocation/correlation failures before pending is installed must not leave
+    // a partial frame for the resumed event loop to transmit.
+    errdefer self.output.clearRetainingCapacity();
     var header: [4]u8 = undefined;
     std.mem.writeInt(u32, &header, @intCast(bytes.len), .big);
     try self.output.appendSlice(self.a, &header);
@@ -118,6 +156,7 @@ fn requestConfigured(self: *Bridge, action: @FieldType(wire.TuiRequest, "action"
     // Commands may be edited while waiting. Keep correlation targets owned,
     // not borrowed from the command buffer or an old display page.
     if (chat_id) |target| request_value.chatId = try std.fmt.bufPrint(&self.target_buf, "{s}", .{target});
+    if (before) |cursor| request_value.before = try std.fmt.bufPrint(&self.before_buf, "{s}", .{cursor});
     if (after) |cursor| request_value.after = try std.fmt.bufPrint(&self.after_buf, "{s}", .{cursor});
     // The complete mutation payload is owned by output; reply correlation does
     // not retain borrowed JSON task-target strings after the command is parsed.
@@ -136,10 +175,17 @@ pub fn validRequest(value: std.json.Value) bool {
     if (!wire.validTuiRequest(value)) return false;
     const action = value.object.get("action").?.string;
     const text = value.object.get("text");
-    if (std.mem.eql(u8, action, "select")) {
+    if (std.mem.eql(u8, action, "select") or std.mem.eql(u8, action, "childOpen")) {
         if (!safeId(value.object.get("chatId") orelse return false)) return false;
     } else if (value.object.contains("chatId")) return false;
-    if (value.object.get("after")) |after| if (!std.mem.eql(u8, action, "tasks") or !safeId(after)) return false;
+    if (std.mem.eql(u8, action, "messageContent")) {
+        if (!safeId(value.object.get("entryId") orelse return false)) return false;
+        const offset = value.object.get("offset") orelse return false;
+        if (offset != .integer or offset.integer < 0 or offset.integer > 16 * 1024 * 1024) return false;
+    } else if (value.object.contains("entryId") or value.object.contains("offset")) return false;
+    if (value.object.get("after")) |after| if ((!std.mem.eql(u8, action, "tasks") and !std.mem.eql(u8, action, "newer")) or !safeId(after)) return false;
+    if (std.mem.eql(u8, action, "newer") and !value.object.contains("after")) return false;
+    if (value.object.get("before")) |before| if (!std.mem.eql(u8, action, "older") or !safeId(before)) return false;
     if (value.object.contains("hold") and !std.mem.eql(u8, action, "poll")) return false;
     if ((value.object.contains("taskTarget") or value.object.contains("taskForm")) and !std.mem.eql(u8, action, "create")) return false;
     if (value.object.contains("taskTarget") and value.object.contains("taskForm")) return false;
@@ -180,9 +226,55 @@ fn validEntryParts(entry: std.json.Value) bool {
     return remaining.len == 0;
 }
 pub fn validReply(value: std.json.Value, expected: []const u8, hub_id: ?[]const u8, chat_id: ?[]const u8) bool {
+    return validReplyContext(value, expected, hub_id, chat_id, null);
+}
+/// Payload-bearing reads are correlated to the outstanding request, never to
+/// display entries or a newly returned selection. Ordinary replies forbid them.
+pub fn validReplyAction(value: std.json.Value, request_value: wire.TuiRequest, hub_id: ?[]const u8, chat_id: ?[]const u8) bool {
+    return validReplyContext(value, request_value.id, hub_id, chat_id, request_value);
+}
+fn validReplyContext(value: std.json.Value, expected: []const u8, hub_id: ?[]const u8, chat_id: ?[]const u8, request_value: ?wire.TuiRequest) bool {
     if (!wire.validTuiResponse(value) or !std.mem.eql(u8, value.object.get("id").?.string, expected)) return false;
     if (!value.object.get("ok").?.bool) return true;
     const s = value.object.get("snapshot").?;
+    if (request_value != null and request_value.?.action == .messageContent) {
+        const page = s.object.get("messageContent") orelse return false;
+        var args: std.json.Value = .{ .object = .empty };
+        defer args.object.deinit(std.heap.page_allocator);
+        args.object.put(std.heap.page_allocator, "chatId", .{ .string = chat_id orelse return false }) catch return false;
+        args.object.put(std.heap.page_allocator, "entryId", .{ .string = request_value.?.entryId orelse return false }) catch return false;
+        args.object.put(std.heap.page_allocator, "offset", .{ .integer = request_value.?.offset orelse return false }) catch return false;
+        if (!message_content.validArgs(args) or !message_content.validPage(args, page)) return false;
+    } else if (s.object.contains("messageContent")) return false;
+    if (request_value != null and request_value.?.action == .newer) {
+        const after = request_value.?.after orelse return false;
+        const echo = s.object.get("newerAfter") orelse return false;
+        const found = s.object.get("newerFound") orelse return false;
+        if (!safeId(echo) or !std.mem.eql(u8, after, echo.string)) return false;
+        const boundary = std.fmt.parseInt(i64, after, 10) catch return false;
+        var last = boundary;
+        var message = false;
+        if (found.bool) for (s.object.get("entries").?.array.items) |entry| {
+            const raw = entry.object.get("id").?;
+            const id: i64 = if (raw == .integer) raw.integer else @intFromFloat(raw.float);
+            if (id <= boundary) return false;
+            last = id;
+            const role = entry.object.get("role").?.string;
+            if (!std.mem.eql(u8, role, "tool")) {
+                if (entry.object.get("parts")) |parts| {
+                    for (parts.array.items) |part| {
+                        if (std.mem.eql(u8, part.object.get("kind").?.string, "text") and part.object.get("text").?.string.len > 0) message = true;
+                    }
+                } else if (!std.mem.eql(u8, role, "note") and entry.object.get("text").?.string.len > 0) message = true;
+            }
+        };
+        if (found.bool and !message) return false;
+        if (s.object.get("newerNext")) |next| {
+            if (!safeId(next)) return false;
+            const n = std.fmt.parseInt(i64, next.string, 10) catch return false;
+            if (n <= boundary or n < last) return false;
+        }
+    } else if (s.object.contains("newerAfter") or s.object.contains("newerFound") or s.object.contains("newerNext")) return false;
     if (hub_id) |id| if (!std.mem.eql(u8, id, s.object.get("hubId").?.string)) return false;
     const chat = s.object.get("chatId").?.string;
     if (!@import("managed_child.zig").validLink(s.object.get("chatId").?, s)) return false;
@@ -305,7 +397,7 @@ fn receive(self: *Bridge) !?std.json.Parsed(wire.TuiResponse) {
     if (!std.unicode.utf8ValidateSlice(body)) return error.InvalidFrame;
     const raw = try std.json.parseFromSlice(std.json.Value, self.a, body, .{});
     defer raw.deinit();
-    if (!validReply(raw.value, pending.id, self.hub_id, if (pending.action == .select) pending.chatId else if (pending.action == .subagent) null else if (pending.action == .parent) self.inspect_parent_id else self.chat_id)) return error.InvalidFrame;
+    if (!validReplyAction(raw.value, pending, self.hub_id, if (pending.action == .select) pending.chatId else if (pending.action == .subagent) null else if (pending.action == .parent) self.inspect_parent_id else self.chat_id)) return error.InvalidFrame;
     if (!validNavigation(raw.value, pending.action, self.chat_id, self.inspect_parent_id)) return error.InvalidFrame;
     // Own all strings: the receive buffer is reused while the UI retains the
     // last valid snapshot. Shape/semantic guards ran on the original bytes above.
@@ -340,11 +432,11 @@ fn receive(self: *Bridge) !?std.json.Parsed(wire.TuiResponse) {
     return parsed;
 }
 
-const TestPipe = struct {
+pub const TestPipe = struct {
     bridge: Bridge,
     peer_read: std.posix.fd_t,
     peer_write: std.posix.fd_t,
-    fn init() !@This() {
+    pub fn init() !@This() {
         const input = try Native.pipe();
         errdefer for (input) |fd| Native.close(fd);
         const output = try Native.pipe();
@@ -357,12 +449,12 @@ const TestPipe = struct {
             .child = .{ .id = null, .thread_handle = {}, .stdin = .{ .handle = input[1], .flags = .{ .nonblocking = false } }, .stdout = .{ .handle = output[0], .flags = .{ .nonblocking = true } }, .stderr = null, .request_resource_usage_statistics = false },
         } };
     }
-    fn deinit(self: *@This()) void {
+    pub fn deinit(self: *@This()) void {
         self.bridge.deinit();
         Native.close(self.peer_read);
         if (self.peer_write >= 0) Native.close(self.peer_write);
     }
-    fn reply(self: *@This(), bytes: []const u8) !void {
+    pub fn reply(self: *@This(), bytes: []const u8) !void {
         const file: std.Io.File = .{ .handle = self.peer_write, .flags = .{ .nonblocking = false } };
         var header: [4]u8 = undefined;
         std.mem.writeInt(u32, &header, @intCast(bytes.len), .big);
@@ -565,6 +657,9 @@ test "renderer boundary correlates transport, chat, hub and canonical history be
         "{\"version\":1,\"id\":\"1\",\"action\":\"send\",\"text\":\"x\",\"hold\":true}",
         "{\"version\":1,\"id\":\"1\",\"action\":\"poll\",\"text\":\"x\"}",
         "{\"version\":1,\"id\":\"1\",\"action\":\"configure\"}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"childOpen\"}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"childOpen\",\"chatId\":\"9007199254740992\"}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"childOpen\",\"chatId\":\"3\",\"text\":\"x\"}",
         "{\"version\":1,\"id\":\"1\",\"action\":\"select\"}",
         "{\"version\":1,\"id\":\"1\",\"action\":\"select\",\"chatId\":\"9007199254740992\"}",
         "{\"version\":1,\"id\":\"1\",\"action\":\"poll\",\"chatId\":\"2\"}",
@@ -721,4 +816,213 @@ test "admitted echoes validate identity uniqueness, byte bounds and writable sco
     try snapshot.object.put(a, "kind", .{ .string = "subagent" });
     try response.object.put(a, "snapshot", snapshot);
     try std.testing.expect(!validReply(response, "1", "hub", "2"));
+}
+
+test "task bridge creates only its own managed children and childOpen never selects the child" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]bool{ false, true }) |navigate| {
+        var fixture = try TestPipe.init();
+        defer fixture.deinit();
+        fixture.bridge.client_mode = .task;
+        fixture.bridge.hub_id = try std.testing.allocator.dupe(u8, "hub");
+        fixture.bridge.hub_chat_id = try std.testing.allocator.dupe(u8, "1");
+        fixture.bridge.chat_id = try std.testing.allocator.dupe(u8, "2");
+        try std.testing.expectError(error.TaskLocked, fixture.bridge.createForm(.{ .title = "Cross-parent", .managedParentChatId = "1" }));
+        try std.testing.expectError(error.TaskLocked, fixture.bridge.createForm(.{ .title = "Unscoped" }));
+        try std.testing.expectError(error.TaskLocked, fixture.bridge.request(.hosts, null, null));
+        try std.testing.expect(try fixture.bridge.createForm(.{ .title = "Child", .managedParentChatId = "2" }));
+        const bases = (try std.json.parseFromSlice(std.json.Value, a, @embedFile("contracts.test.json"), .{})).value;
+        var snapshot = bases.object.get("bases").?.object.get("TuiSnapshot").?;
+        try snapshot.object.put(a, "clientMode", .{ .string = "task" });
+        try snapshot.object.put(a, "chatId", .{ .string = "2" });
+        var response = (try std.json.parseFromSlice(std.json.Value, a, "{\"version\":1,\"id\":\"1\",\"ok\":true}", .{})).value;
+        try response.object.put(a, "snapshot", snapshot);
+        try fixture.reply(try std.json.Stringify.valueAlloc(a, response, .{}));
+        const created = (try fixture.bridge.poll()).?;
+        created.deinit();
+        try std.testing.expectEqualStrings("2", fixture.bridge.chat_id.?);
+        var child = [_]u8{'3'};
+        try std.testing.expect(try fixture.bridge.childOpen(&child));
+        child[0] = '4';
+        try std.testing.expectEqualStrings("3", fixture.bridge.pending.?.chatId.?);
+        if (navigate) try snapshot.object.put(a, "chatId", .{ .string = "3" });
+        try response.object.put(a, "snapshot", snapshot);
+        try response.object.put(a, "id", .{ .string = "2" });
+        try fixture.reply(try std.json.Stringify.valueAlloc(a, response, .{}));
+        if (navigate) {
+            try std.testing.expectError(error.InvalidFrame, fixture.bridge.poll());
+        } else {
+            const opened = (try fixture.bridge.poll()).?;
+            opened.deinit();
+            fixture.bridge.inspect_parent_id = try std.testing.allocator.dupe(u8, "1");
+            try std.testing.expectError(error.TaskLocked, fixture.bridge.childOpen("3"));
+            try std.testing.expectError(error.TaskLocked, fixture.bridge.createForm(.{ .title = "Captured", .managedParentChatId = "2" }));
+        }
+        try std.testing.expectEqualStrings("2", fixture.bridge.chat_id.?);
+    }
+}
+
+test "message content requests own identity and have no navigation or mutation arguments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var fixture = try TestPipe.init();
+    defer fixture.deinit();
+    try std.testing.expectError(error.InvalidContract, fixture.bridge.messageContent(7, 0));
+    fixture.bridge.chat_id = try std.testing.allocator.dupe(u8, "2");
+    for ([_]i64{ 0, -1, 9007199254740992 }) |entry| try std.testing.expectError(error.InvalidContract, fixture.bridge.messageContent(entry, 0));
+    try std.testing.expectError(error.InvalidContract, fixture.bridge.messageContent(7, 16777217));
+    try std.testing.expect(try fixture.bridge.messageContent(7, 32768));
+    try std.testing.expect(!try fixture.bridge.messageContent(9999, 0));
+    try std.testing.expectEqualStrings("7", fixture.bridge.pending.?.entryId.?);
+    try std.testing.expectEqual(32768, fixture.bridge.pending.?.offset.?);
+    const request_value = (try std.json.parseFromSlice(std.json.Value, a, fixture.bridge.output.items[4..], .{})).value;
+    try std.testing.expect(validRequest(request_value));
+    try std.testing.expectEqual(5, request_value.object.count());
+    try std.testing.expect(!request_value.object.contains("chatId"));
+    for ([_][]const u8{
+        "{\"version\":1,\"id\":\"1\",\"action\":\"messageContent\",\"entryId\":\"7\",\"offset\":0}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"messageContent\",\"entryId\":\"9007199254740991\",\"offset\":16777216}",
+    }) |bytes| try std.testing.expect(validRequest((try std.json.parseFromSlice(std.json.Value, a, bytes, .{})).value));
+    for ([_][]const u8{
+        "{\"version\":1,\"id\":\"1\",\"action\":\"messageContent\",\"offset\":0}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"messageContent\",\"entryId\":\"7\"}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"messageContent\",\"entryId\":\"7\",\"offset\":-1}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"messageContent\",\"entryId\":\"7\",\"offset\":16777217}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"messageContent\",\"entryId\":\"9007199254740992\",\"offset\":0}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"messageContent\",\"entryId\":\"7\",\"offset\":0,\"chatId\":\"2\"}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"messageContent\",\"entryId\":\"7\",\"offset\":0,\"text\":\"send\"}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"messageContent\",\"entryId\":\"7\",\"offset\":0,\"hold\":true}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"messageContent\",\"entryId\":\"7\",\"offset\":0,\"after\":\"1\"}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"poll\",\"entryId\":\"7\",\"offset\":0}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"send\",\"text\":\"x\",\"offset\":0}",
+    }) |bytes| try std.testing.expect(!validRequest((try std.json.parseFromSlice(std.json.Value, a, bytes, .{})).value));
+}
+
+test "content replies correlate page identity and reject stale payloads on ordinary polls" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Case = enum { valid, missing, stale, wrong_chat, wrong_entry, wrong_offset, wrong_total, wrong_digest, sparse_next, navigation };
+    for (std.enums.values(Case)) |case| {
+        var fixture = try TestPipe.init();
+        defer fixture.deinit();
+        fixture.bridge.chat_id = try std.testing.allocator.dupe(u8, "2");
+        const bases = (try std.json.parseFromSlice(std.json.Value, a, @embedFile("contracts.test.json"), .{})).value;
+        var snapshot = bases.object.get("bases").?.object.get("TuiSnapshot").?;
+        try snapshot.object.put(a, "chatId", .{ .string = "2" });
+        var page = (try std.json.parseFromSlice(std.json.Value, a,
+            \\{"chatId":"2","entryId":"7","offset":0,"totalBytes":3,"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","text":"abc"}
+        , .{})).value;
+        switch (case) {
+            .wrong_chat => try page.object.put(a, "chatId", .{ .string = "3" }),
+            .wrong_entry => try page.object.put(a, "entryId", .{ .string = "8" }),
+            .wrong_offset => try page.object.put(a, "offset", .{ .integer = 1 }),
+            .wrong_total => try page.object.put(a, "totalBytes", .{ .integer = 16777217 }),
+            .wrong_digest => try page.object.put(a, "sha256", .{ .string = "bad" }),
+            .sparse_next => try page.object.put(a, "next", .{ .integer = 4 }),
+            .navigation => try snapshot.object.put(a, "chatId", .{ .string = "3" }),
+            else => {},
+        }
+        if (case != .missing) try snapshot.object.put(a, "messageContent", page);
+        var response = (try std.json.parseFromSlice(std.json.Value, a, "{\"version\":1,\"id\":\"1\",\"ok\":true}", .{})).value;
+        try response.object.put(a, "snapshot", snapshot);
+        if (case == .stale) {
+            try std.testing.expect(try fixture.bridge.request(.poll, null, false));
+        } else try std.testing.expect(try fixture.bridge.messageContent(7, 0));
+        try fixture.reply(try std.json.Stringify.valueAlloc(a, response, .{}));
+        if (case == .valid) {
+            const reply = (try fixture.bridge.poll()).?;
+            defer reply.deinit();
+            try std.testing.expectEqualStrings("abc", reply.value.case0.snapshot.messageContent.?.text);
+            try std.testing.expect(fixture.bridge.pending == null);
+        } else {
+            try std.testing.expectError(error.InvalidFrame, fixture.bridge.poll());
+            try std.testing.expect(fixture.bridge.failed);
+        }
+        try std.testing.expectEqualStrings("2", fixture.bridge.chat_id.?);
+    }
+}
+
+test "task content reads preserve own and captured read-only selections" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_]bool{ false, true }) |captured| {
+        var fixture = try TestPipe.init();
+        defer fixture.deinit();
+        fixture.bridge.client_mode = .task;
+        fixture.bridge.chat_id = try std.testing.allocator.dupe(u8, "3");
+        if (captured) fixture.bridge.inspect_parent_id = try std.testing.allocator.dupe(u8, "2");
+        const bases = (try std.json.parseFromSlice(std.json.Value, a, @embedFile("contracts.test.json"), .{})).value;
+        var snapshot = bases.object.get("bases").?.object.get("TuiSnapshot").?;
+        try snapshot.object.put(a, "clientMode", .{ .string = "task" });
+        try snapshot.object.put(a, "chatId", .{ .string = "3" });
+        if (captured) {
+            try snapshot.object.put(a, "kind", .{ .string = "subagent" });
+            try snapshot.object.put(a, "inspectParentChatId", .{ .string = "2" });
+        }
+        const page = (try std.json.parseFromSlice(std.json.Value, a,
+            \\{"chatId":"3","entryId":"7","offset":0,"totalBytes":3,"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","text":"abc"}
+        , .{})).value;
+        try snapshot.object.put(a, "messageContent", page);
+        var response = (try std.json.parseFromSlice(std.json.Value, a, "{\"version\":1,\"id\":\"1\",\"ok\":true}", .{})).value;
+        try response.object.put(a, "snapshot", snapshot);
+        try std.testing.expect(try fixture.bridge.messageContent(7, 0));
+        try fixture.reply(try std.json.Stringify.valueAlloc(a, response, .{}));
+        const reply = (try fixture.bridge.poll()).?;
+        reply.deinit();
+        try std.testing.expectEqualStrings("3", fixture.bridge.chat_id.?);
+        try std.testing.expectEqual(captured, fixture.bridge.inspect_parent_id != null);
+        if (captured) try std.testing.expectEqualStrings("2", fixture.bridge.inspect_parent_id.?);
+        try std.testing.expectEqual(.task, fixture.bridge.client_mode);
+    }
+}
+
+test "forward request cursors are safe owned and replies are action scoped with monotonic continuation" {
+    const a = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const scratch = arena.allocator();
+    for ([_][]const u8{
+        "{\"version\":1,\"id\":\"1\",\"action\":\"newer\"}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"newer\",\"after\":\"0\"}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"newer\",\"after\":\"9007199254740992\"}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"poll\",\"after\":\"1\"}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"poll\",\"before\":\"1\"}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"newer\",\"after\":\"1\",\"hold\":true}",
+    }) |bytes| {
+        const raw = try std.json.parseFromSlice(std.json.Value, scratch, bytes, .{});
+        try std.testing.expect(!validRequest(raw.value));
+    }
+    var pipe = try TestPipe.init();
+    defer pipe.deinit();
+    try std.testing.expect(try pipe.bridge.newer(100));
+    try std.testing.expect(!try pipe.bridge.newer(999));
+    try std.testing.expectEqualStrings("100", pipe.bridge.pending.?.after.?);
+    var response = (try std.json.parseFromSlice(std.json.Value, scratch,
+        \\{"version":1,"id":"1","ok":true,"snapshot":{"clientMode":"hub","hubChatId":"1","hubId":"hub","chatId":"1","title":"Task","model":"mock","tools":"offline","activityKnown":false,"busy":false,"queued":0,"entries":[{"id":101,"role":"user","text":"new"}],"hasOlder":true,"historical":false,"preview":"","notice":"","draft":null,"newerAfter":"100","newerFound":true}}
+    , .{})).value;
+    const request_value = pipe.bridge.pending.?;
+    try std.testing.expect(validReplyAction(response, request_value, "hub", "1"));
+    try std.testing.expect(!validReply(response, "1", "hub", "1"));
+    const snapshot = response.object.getPtr("snapshot").?;
+    try snapshot.object.put(scratch, "newerAfter", .{ .string = "99" });
+    try std.testing.expect(!validReplyAction(response, request_value, "hub", "1"));
+    try snapshot.object.put(scratch, "newerAfter", .{ .string = "100" });
+    for ([_][]const u8{ "100", "99", "9007199254740992" }) |cursor| {
+        try snapshot.object.put(scratch, "newerNext", .{ .string = cursor });
+        try std.testing.expect(!validReplyAction(response, request_value, "hub", "1"));
+    }
+    try snapshot.object.put(scratch, "newerNext", .{ .string = "101" });
+    try std.testing.expect(validReplyAction(response, request_value, "hub", "1"));
+    // JSON integer spellings may be exponent/decimal numbers. Guard without
+    // accessing the wrong Value union tag before the typed parser runs.
+    const entry = &snapshot.object.getPtr("entries").?.array.items[0];
+    try entry.object.put(scratch, "id", .{ .float = 101.0 });
+    try std.testing.expect(validReplyAction(response, request_value, "hub", "1"));
+    try entry.object.put(scratch, "id", .{ .integer = 100 });
+    try std.testing.expect(!validReplyAction(response, request_value, "hub", "1"));
 }

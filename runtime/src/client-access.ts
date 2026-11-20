@@ -4,7 +4,7 @@
 // --resume --here attachment. Neither is granted by selecting a task.
 import type { TuiClientMode } from "./generated/contracts.js";
 export const inspectOnly = "Read-only task inspection. Open/reopen its Rex session to participate.";
-export const taskLocked = "This task client is locked to its task. Use the hub TUI to inspect or create other tasks.";
+export const taskLocked = "This task client is locked to its task. Use :new-child for a direct child; use the hub TUI for other tasks.";
 export function canParticipate(mode: TuiClientMode, chatId?: string, hubChatId?: string): boolean {
   return !!chatId && !!hubChatId && (mode === "task" ? chatId !== hubChatId : chatId === hubChatId);
 }
@@ -14,7 +14,8 @@ export function requireParticipation(mode: TuiClientMode, chatId?: string, hubCh
 export function requireNavigation(mode: TuiClientMode): void {
   if (mode === "task") throw new Error(taskLocked);
 }
-export function requireCreation(mode: TuiClientMode, chatId?: string, hubChatId?: string): void {
+export function requireCreation(mode: TuiClientMode, chatId?: string, hubChatId?: string, managedParentChatId?: string): void {
+  if (mode === "task" && managedParentChatId === chatId && canParticipate(mode, chatId, hubChatId)) return;
   requireNavigation(mode);
   if (chatId !== hubChatId) throw new Error("Return to the hub chat to create and open a Rex task.");
 }

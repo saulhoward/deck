@@ -6,15 +6,15 @@ import { agentStatus } from "./agent-status.js";
 import { validAgentName, validAgentRune, type SubagentSnapshot } from "./generated/contracts.js";
 import { sameSelection } from "./model-settings-contracts.js";
 import { validSetModelSettingsArgs, type ModelRef, type ModelSelection, type ModelSettingsSnapshot, type ModelSettingsAck, type SetModelSettingsArgs } from "./generated/contracts.js";
-import { AgentDoc, createRegistry, configure as configureAgent, defineDoc, defineDocFamily, Harness, LiveDoc, InboxDoc, type ConversationId, type Conversation, type AgentChange, type Cursor, type TaskId } from "@earendil-works/pi-durable";
+import { AgentDoc, createRegistry, configure as configureAgent, defineDoc, defineDocFamily, Harness, LiveDoc, InboxDoc, type ConversationId, type Conversation, type AgentChange, type Cursor, type TaskId, type Tx } from "@earendil-works/pi-durable";
 import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { instructionSnapshot, projectInstructionTask } from "./instructions-view.js";
 import { projectProgress } from "./progress.js";
 import { configurationIdle, importingInstructions, instructionHash, instructionImport, IMPORT_KIND, InstructionRequest, InstructionSourceDoc, type InstructionImportResult } from "./instruction-import.js";
 import { RexInspector } from "./rex-inspection.js";
 import { rexReconciliation, RexReconcileRequest, allocationRequest, type ReconcileResult } from "./rex-reconciliation.js";
-import { validOpenArgs, validAdoptArgs, validResolvedTarget } from "./rex-open-contracts.js";
-import { validRexAllocationPlan, validRexAllocationReceiptQuery, type RexOpenArgs, type RexOpenAck, type RexAdoptArgs, type RexAdoptAck, type RexStatusSnapshot, type ChatListPage, type ActivitySnapshot } from "./generated/contracts.js";
+import { validOpenManagedChildArgs, validOpenArgs, validAdoptArgs, validResolvedTarget } from "./rex-open-contracts.js";
+import { validRexAllocationPlan, validRexAllocationReceiptQuery, type OpenManagedChildArgs, type OpenManagedChildAck, type RexOpenArgs, type RexOpenAck, type RexAdoptArgs, type RexAdoptAck, type RexStatusSnapshot, type ChatListPage, type ActivitySnapshot } from "./generated/contracts.js";
 import { prefixUnits } from "./view-text.js";
 import { REX_KIND, rexAllocation, RexDoc, RexRequest, rexCoherent, rexTarget, rexUuid, rexBlock, rexStartup, type RexInput, type RexTarget, type RexResult } from "./rex-allocation.js";
 import { bindImplementation, checkCompatibility, defaultImplementation, stampImplementation } from "./compatibility.js";
@@ -36,7 +36,7 @@ import { validHosts } from "./host-inventory.js";
 import { briefFields, briefInstructions, validBriefBinding } from "./task-brief.js";
 import { validChain, type MessageChain } from "./message-causality.js";
 import { validMachineIdentity, type TaskBrief, type HostInventory } from "./generated/contracts.js";
-import { ManagedChildRequest, managedAgentSnapshot, independentDeckChat, assertManagedMessageRelation } from "./managed-child.js";
+import { ManagedChildRequest, ManagedChildOpenRequest, managedAgentSnapshot, independentDeckChat, assertManagedMessageRelation } from "./managed-child.js";
 import { assignAgentName, agentNameFields } from "./agent-names.js";
 // A reservation is not an ACK. A crash between this commit and submit is repaired by retrying
 // the same Pi request ID. Pi 1.4.0 has no public submit(tx, draft) API.
@@ -401,13 +401,14 @@ export class DeckRuntime {
   }
 
   createManagedChild(parentId: string, title: string, requestId: string, suppliedBrief: TaskBrief = {}, signal?: AbortSignal): Promise<Conversation> {
+    const guard = this.commandGuard.getStore();
     return this.serial(async () => {
       signal?.throwIfAborted();
       const parent = await this.chat(parentId);
       if (typeof requestId !== "string" || !requestId || requestId.length > 200 || !requestId.isWellFormed()) throw new DeckError("invalid", "Invalid managed child request ID");
       const binding = await this.harness.snapshot(ChatDoc, parent.id, context);
       const record = await this.harness.commit(tx => tx.conversation(parent.id), context);
-      if (!independentDeckChat(record, binding, this.main.id) || !binding || binding.managedParentChatId !== undefined) throw new DeckError("invalid", "Managed children require canonical main or an independent task parent, not another child");
+      if (!independentDeckChat(record, binding, this.main.id) || !binding) throw new DeckError("invalid", "Managed children require canonical main or an independent task parent, including a managed parent");
       this.requireWorkerAdmission(binding.machineId);
       if (typeof title !== "string" || !binding.machineId || !validBriefBinding(title, binding.cwd)) throw new DeckError("invalid", "Managed child needs a bounded title and coherent parent binding");
       const brief = briefFields(suppliedBrief);
@@ -423,6 +424,7 @@ export class DeckRuntime {
       const agent = await parent.agent(context);
       if (agent.cwd !== binding.cwd) throw new DeckError("invalid", "Parent agent cwd differs from its saved binding");
       const snapshot = managedAgentSnapshot(agent, saved ?? {}, title, brief, binding.cwd);
+      await guard?.();
       signal?.throwIfAborted();
       const createdId = await this.harness.commit(async tx => {
         // All table reads precede createConversation (Pi rejects read-after-write).
@@ -433,7 +435,7 @@ export class DeckRuntime {
         const receipt = await tx.doc(ManagedChildRequest, requestId, hash);
         if (receipt.hash !== hash) throw new DeckError("conflict", "Managed child request ID already used with different arguments");
         if (receipt.chatId) return receipt.chatId;
-        if (!independentDeckChat(currentRecord, currentBinding, this.main.id) || currentBinding.managedParentChatId !== undefined) throw new DeckError("invalid", "Managed child parent is not independent");
+        if (!independentDeckChat(currentRecord, currentBinding, this.main.id)) throw new DeckError("invalid", "Managed child parent is not independent");
         if (JSON.stringify(currentAgent) !== JSON.stringify(saved ?? {}) || currentBinding.machineId !== binding.machineId || currentBinding.cwd !== binding.cwd) throw new DeckError("settings_changed", "Parent settings changed during managed child creation; retry the same request");
         signal?.throwIfAborted();
         const created = await tx.createConversation({ ownership: { kind: "ownerless" } });
@@ -576,16 +578,25 @@ export class DeckRuntime {
         if (doc.taskId && !replacement) throw new DeckError("conflict", "This chat already has a Rex allocation attempt; use explicit open/reopen for a new attempt");
         if (replacement && doc.taskId !== replacement.priorTaskId) throw new DeckError("conflict", "Rex attempt changed; inspect before opening again");
         if (doc.taskId && (await tx.task(doc.taskId as TaskId))?.state.status !== "terminal") throw new DeckError("busy", "Rex creation is still pending; inspect status before another attempt");
-        const plan = { ...saved, chatId: id, hubId: this.hubId, label: `deck-${this.hubId.slice(0, 8)}-chat-${id}`, allocationId: randomUUID(), ...(replacement?.sessionId ? { sessionId: replacement.sessionId } : {}) };
-        if (Buffer.byteLength(JSON.stringify(plan)) > 16 * 1024) throw new DeckError("invalid", "Rex launch intent is too large");
         signal?.throwIfAborted();
-        const taskId = await tx.createTask(this.extensions.allocate, { binding: { machineId: current.machineId, cwd: current.cwd }, plan }, { ownership: { kind: "conversation" } });
-        if (doc.binding) doc.previousBinding = doc.binding;
-        delete doc.binding; delete doc.startup; delete doc.reconciliationTaskId;
-        doc.taskId = taskId; doc.allocationId = plan.allocationId; receipt.taskId = taskId;
+        const taskId = await this.createTerminalAllocation(tx, chat.id, current, saved, replacement?.sessionId);
+        receipt.taskId = taskId;
         return taskId;
       }, context);
     });
+  }
+
+  // Shared admission path: always a new Pi task/allocation for this conversation.
+  // Supplying a session is an exact Rex run intent, never a new-session fallback.
+  private async createTerminalAllocation(tx: Tx, id: ConversationId, binding: Binding, target: RexTarget, sessionId?: string): Promise<TaskId<RexResult>> {
+    const doc = await tx.doc(RexDoc, id);
+    const plan = { ...target, chatId: String(id), hubId: this.hubId, label: `deck-${this.hubId.slice(0, 8)}-chat-${id}`, allocationId: randomUUID(), ...(sessionId ? { sessionId } : {}) };
+    if (Buffer.byteLength(JSON.stringify(plan)) > 16 * 1024) throw new DeckError("invalid", "Rex launch intent is too large");
+    const taskId = await tx.createTask(this.extensions.allocate, { binding: { machineId: binding.machineId, cwd: binding.cwd }, plan }, { ownership: { kind: "conversation" } });
+    if (doc.binding) doc.previousBinding = doc.binding;
+    delete doc.binding; delete doc.startup; delete doc.reconciliationTaskId;
+    doc.taskId = taskId; doc.allocationId = plan.allocationId;
+    return taskId;
   }
 
   // First claim of an already-running, native-provenanced wizard block. The
@@ -643,6 +654,98 @@ export class DeckRuntime {
     }
     const taskId = await this.allocateTerminal(args.chatId, args.requestId, saved, undefined, undefined, { priorTaskId: doc?.taskId ?? 0, ...(sessionId ? { sessionId } : {}) });
     return ack(taskId, "admitted");
+  }
+
+  // Parent-scoped opening is not rex_open on a foreign chat. It derives the
+  // entire destination from confirmed parent provenance and never adopts context.
+  openManagedChild(args: OpenManagedChildArgs): Promise<OpenManagedChildAck> {
+    const guard = this.commandGuard.getStore();
+    return this.serial(async () => {
+      if (!validOpenManagedChildArgs(args)) throw new DeckError("invalid", "Invalid managed child open arguments");
+      const parent = await this.chat(args.chatId), child = await this.chat(args.childId);
+      if (parent.id === child.id) throw new DeckError("invalid", "Managed child open requires a direct child");
+      if (!this.rexClient || !this.localFiles) throw new DeckError("offline", "Same-session child opening requires a verified parent Rex binding and native launcher; no fallback");
+      const capture = async () => {
+        const records = await this.harness.commit(async tx => [await tx.conversation(parent.id), await tx.conversation(child.id)], context);
+        const parentBinding = await this.harness.snapshot(ChatDoc, parent.id, context);
+        const childBinding = await this.harness.snapshot(ChatDoc, child.id, context);
+        const parentAgent = await this.harness.snapshot(AgentDoc, parent.id, context);
+        const childAgent = await this.harness.snapshot(AgentDoc, child.id, context);
+        const parentRex = await this.harness.snapshot(RexDoc, parent.id, context);
+        const childRex = await this.harness.snapshot(RexDoc, child.id, context);
+        if (!independentDeckChat(records[0], parentBinding, this.main.id) || !independentDeckChat(records[1], childBinding, this.main.id)
+          || !parentBinding || !childBinding || childBinding.kind !== "task" || childBinding.managedParentChatId !== args.chatId
+          || childBinding.machineId !== parentBinding.machineId || childBinding.cwd !== parentBinding.cwd
+          || parentAgent?.cwd !== parentBinding.cwd || childAgent?.cwd !== childBinding.cwd) throw new DeckError("invalid", "Same-session open requires an independent parent and direct managed child with matching saved host/cwd");
+        const parentTask = parentRex?.taskId ? await this.harness.getTask(parentRex.taskId as TaskId, context) : undefined;
+        const original = parentTask?.input as RexInput | undefined, binding = parentRex?.binding;
+        if (!binding || !parentTask || parentTask.kind !== REX_KIND || parentTask.conversationId !== parent.id || !original || !validRexAllocationPlan(original.plan)
+          || original.plan.chatId !== args.chatId || original.plan.hubId !== this.hubId || original.plan.allocationId !== parentRex?.allocationId
+          || original.binding.machineId !== parentBinding.machineId || original.binding.cwd !== parentBinding.cwd
+          || binding.chatId !== args.chatId || binding.hubId !== this.hubId || binding.taskId !== String(parentTask.id)
+          || binding.machineId !== parentBinding.machineId || binding.cwd !== parentBinding.cwd
+          || binding.server !== original.plan.server || binding.hostId !== original.plan.hostId || binding.instanceId !== original.plan.instanceId) throw new DeckError("conflict", "Parent has no verified saved Rex binding; same-session child open refused (including --here without Rex); no new-session fallback");
+        this.requireWorkerAdmission(parentBinding.machineId);
+        return { parentBinding, childBinding, parentCwd: parentAgent.cwd, childCwd: childAgent.cwd, parentRex, childRex, original, binding };
+      };
+      const before = await capture(), { parentBinding, original, binding } = before;
+      const destination = { executable: original.plan.executable, server: binding.server, hostId: binding.hostId, instanceId: binding.instanceId, sessionId: binding.sessionId };
+      // Client executable/socket changes do not change an already admitted intent.
+      // Parent, child, saved host/cwd, target, session and caller port DO.
+      const hash = createHash("sha256").update(JSON.stringify(["deck.managed-child-open.v1", this.hubId, args.chatId, args.childId, args.port, parentBinding.machineId, parentBinding.cwd, destination])).digest("hex");
+      const ack = (taskId: number, status: RexOpenAck["status"]): OpenManagedChildAck => ({ parentChatId: args.chatId, childId: args.childId, ack: { version: 1, chatId: args.childId, requestId: args.requestId, taskId: String(taskId), status, completion: "not_waited", bestEffort: true } });
+      const receipt = await this.harness.snapshot(ManagedChildOpenRequest, args.requestId, context);
+      if (receipt) {
+        if (receipt.hash !== hash) throw new DeckError("conflict", "Managed child open ID already names another parent, child or Rex session");
+        if (receipt.taskId) return ack(receipt.taskId, receipt.status);
+      }
+      const sample = await this.inspectTerminal(args.chatId);
+      if (sample.status !== "sampled" || sample.taskId !== String(before.parentRex.taskId) || !sample.observation
+        || !["running", "exited", "missing_terminal"].includes(sample.observation.state)
+        || sample.observation.scope.sessionId !== binding.sessionId) throw new DeckError("conflict", "Parent Rex session is unavailable or unconfirmed; no child terminal requested");
+      let reuse = false;
+      if (before.childRex?.taskId) {
+        const task = await this.harness.getTask(before.childRex.taskId as TaskId, context), input = task?.input as RexInput | undefined;
+        if (!task || task.state.status !== "terminal") throw new DeckError("busy", "Child Rex creation is still pending; no new attempt requested");
+        // Never migrate a child's existing attempt from a different session,
+        // including an unconfirmed allocation which may already have run.
+        if (task.kind !== REX_KIND || task.conversationId !== child.id || !input || !validRexAllocationPlan(input.plan)
+          || input.plan.chatId !== args.childId || input.plan.hubId !== this.hubId || input.plan.allocationId !== before.childRex.allocationId || input.plan.sessionId !== binding.sessionId
+          || input.binding.machineId !== parentBinding.machineId || input.binding.cwd !== parentBinding.cwd
+          || (["executable", "server", "hostId", "instanceId"] as const).some(key => input.plan[key] !== destination[key])) throw new DeckError("conflict", "Child Rex attempt does not belong to the parent's saved session");
+        if (before.childRex.binding) {
+          const childSample = await this.inspectTerminal(args.childId);
+          if (childSample.status !== "sampled" || !childSample.observation || childSample.observation.scope.sessionId !== binding.sessionId
+            || !["running", "exited", "missing_terminal"].includes(childSample.observation.state)) throw new DeckError("conflict", "Child Rex state is unconfirmed; no new terminal requested");
+          reuse = childSample.observation.state === "running";
+        } else if (task.state.outcome.status !== "completed" || (task.state.outcome.result as RexResult)?.status !== "not_allocated") throw new DeckError("conflict", "Previous child Rex allocation is unconfirmed; inspect/reconcile before an explicit new attempt");
+      }
+      const remote = parentBinding.machineId === this.localMachineId ? undefined : this.config.host?.rexClientFor?.(parentBinding.machineId);
+      if (parentBinding.machineId !== this.localMachineId && !remote) throw new DeckError("offline", "Assigned worker lacks a current registered client; no local fallback");
+      const target = rexTarget({ ...destination, client: remote?.executable ?? this.rexClient, port: args.port,
+        ...(remote ? { workerSocket: remote.socket } : {}), ...(original.plan.clientState ? { clientState: original.plan.clientState } : {}) });
+      // Inspection is a sample, not an admission lease. Preserve the outer scope
+      // across serial's context exit and recheck it after all awaited native reads.
+      if (JSON.stringify(await capture()) !== JSON.stringify(before)) throw new DeckError("conflict", "Parent/child Rex binding changed before admission; no terminal requested");
+      await guard?.();
+      return child.commit(async tx => {
+        const parentRecord = await tx.conversation(parent.id), childRecord = await tx.conversation(child.id);
+        const currentParent = await tx.doc(ChatDoc, parent.id), currentChild = await tx.doc(ChatDoc, child.id);
+        const parentAgent = await tx.doc(AgentDoc, parent.id), childAgent = await tx.doc(AgentDoc, child.id);
+        const parentRex = await tx.doc(RexDoc, parent.id), childRex = await tx.doc(RexDoc, child.id);
+        if (!independentDeckChat(parentRecord, currentParent, this.main.id) || !independentDeckChat(childRecord, currentChild, this.main.id)
+          || JSON.stringify(currentParent) !== JSON.stringify(before.parentBinding) || JSON.stringify(currentChild) !== JSON.stringify(before.childBinding)
+          || parentAgent.cwd !== before.parentCwd || childAgent.cwd !== before.childCwd
+          || JSON.stringify(parentRex) !== JSON.stringify(before.parentRex) || JSON.stringify(childRex) !== JSON.stringify(before.childRex ?? { taskId: 0 })) throw new DeckError("conflict", "Parent/child relation or Rex target changed before allocation");
+        this.requireWorkerAdmission(parentBinding.machineId);
+        const receipt = await tx.doc(ManagedChildOpenRequest, args.requestId, hash);
+        if (receipt.hash !== hash) throw new DeckError("conflict", "Managed child open request identity changed");
+        if (receipt.taskId) return ack(receipt.taskId, receipt.status);
+        const taskId = reuse ? childRex.taskId : await this.createTerminalAllocation(tx, child.id, currentChild, target, binding.sessionId);
+        receipt.taskId = taskId; receipt.status = reuse ? "reused" : "admitted";
+        return ack(taskId, receipt.status);
+      }, context);
+    });
   }
 
   async terminalStatus(id: string): Promise<RexStatusSnapshot> {

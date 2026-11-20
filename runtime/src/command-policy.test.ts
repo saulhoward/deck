@@ -11,7 +11,7 @@ test("client failure policies agree with Zig, including unknown codes and comman
   for (const { command, code, source, outcome, action } of policies) {
     assert.deepEqual(failurePolicy(command, code, source), { outcome, action, preserveDrafts: true, automaticMutationRetry: false });
   }
-  for (const command of ["admit", "create_task", "import_instructions", "rex_open", "stop", "login_start", "login_reply", "login_cancel", "rex_startup", "future_command"]) {
+  for (const command of ["admit", "create_task", "import_instructions", "rex_open", "open_managed_child", "stop", "login_start", "login_reply", "login_cancel", "rex_startup", "future_command"]) {
     for (const code of ["invalid", "offline", "busy", "auth_required", "conflict", "too_large", "invalid_response", "runtime_failed", "settings_changed", "future_error"]) {
       const request = { command, args: {} };
       assert.throws(() => responseResult({ version: 1, id: "t", ok: false, error: { code, message: "uncertain" } }, "t", request), (error: unknown) => {

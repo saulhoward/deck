@@ -1,6 +1,7 @@
 // Client-only transport into the worker's private Unix socket. No store, model
 // runtime, credentials or retry loop. Network authority comes from the verified
 // worker link; the hub separately checks this exact saved allocation/task.
+import { taskRequestMatchesScope } from "./attachment-contracts.js";
 import { randomUUID } from "node:crypto";
 import { lstat } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
@@ -21,7 +22,7 @@ export async function taskCommand(path: string, scope: TaskClientScope, command:
   const id = randomUUID(); let request: unknown; let frame: Buffer;
   try {
     signal?.throwIfAborted(); taskScope(scope.hubId, scope.chatId, scope.allocationId, scope.blockId);
-    if (expectedHubId !== scope.hubId || args.chatId !== scope.chatId || !isAbsolute(path) || Buffer.byteLength(path) > 100 || /[\0\r\n]/.test(path)) throw new Error();
+    if (expectedHubId !== scope.hubId || !taskRequestMatchesScope(command, args, scope.chatId) || !isAbsolute(path) || Buffer.byteLength(path) > 100 || /[\0\r\n]/.test(path)) throw new Error();
     const body = encodeFrame({ version: 1, id, command, args, hubId: scope.hubId }).subarray(4).toString("utf8");
     request = JSON.parse(body); if (!validClientRequest(request)) throw new Error();
     frame = encodeFrame({ scope, body });

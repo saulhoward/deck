@@ -1,3 +1,4 @@
+import { validMessageContentPage } from "./message-content-contracts.js";
 import { validSubagentViewReply } from "./subagent-view-contracts.js";
 import { validAgentNameQuery } from "./generated/contracts.js";
 // Client-only adapter: shared HTTP validation and existing local drafts, no Pi
@@ -22,10 +23,17 @@ import { validTaskTarget } from "./task-target.js";
 import { validForm, validBrief, taskCreationCommand, taskCreationArgs } from "./task-brief.js";
 import { validHosts } from "./host-inventory.js";
 
+// Client-local proof: no mutation draft was reserved or command submitted.
+// Never use a remote error code or missing receipt to infer this outcome.
+export class TuiRequestNotSent extends Error {}
+
 export function validRequest(value: unknown): value is TuiRequest {
   if (!validTuiRequest(value)) return false;
-  if (value.action === "select" ? !validSafePiId(value.chatId) : value.chatId !== undefined) return false;
-  if (value.after !== undefined && (value.action !== "tasks" || !validSafePiId(value.after))) return false;
+  if (["select", "childOpen"].includes(value.action) ? !validSafePiId(value.chatId) : value.chatId !== undefined) return false;
+  if (value.action === "messageContent" ? !validSafePiId(value.entryId) || value.offset === undefined : value.entryId !== undefined || value.offset !== undefined) return false;
+  if (value.after !== undefined && (!["tasks", "newer"].includes(value.action) || !validSafePiId(value.after))) return false;
+  if (value.action === "newer" && value.after === undefined) return false;
+  if (value.before !== undefined && (value.action !== "older" || !validSafePiId(value.before))) return false;
   if (value.hold !== undefined && value.action !== "poll") return false;
   if (value.action === "configure" ? value.configuration === undefined : value.configuration !== undefined) return false;
   if (value.taskForm !== undefined) return value.action === "create" && value.text === undefined && value.taskTarget === undefined && validForm(value.taskForm);
@@ -34,21 +42,29 @@ export function validRequest(value: unknown): value is TuiRequest {
   if (value.action === "send" || value.action === "create") return typeof value.text === "string" && value.text.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "").length > 0 && Buffer.byteLength(value.text) <= (value.action === "send" ? 16384 : 200);
   return value.text === undefined;
 }
-export function validReply(value: unknown, id: string, hubId?: string, chatId?: string, action?: TuiRequest["action"], target?: string, after?: string, mode?: TuiClientMode, hubChatId?: string, inspectParentChatId?: string): value is TuiResponse {
+export function validReply(value: unknown, id: string, hubId?: string, chatId?: string, action?: TuiRequest["action"], target?: string, after?: string, mode?: TuiClientMode, hubChatId?: string, inspectParentChatId?: string, entryId?: string, offset?: number): value is TuiResponse {
   if (!validTuiResponse(value) || value.id !== id || Buffer.byteLength(JSON.stringify(value)) >= 1024 * 1024) return false;
   if (!value.ok) return true;
   const s = value.snapshot;
+  if (action === "newer") {
+    if (!validSafePiId(after) || s.newerAfter !== after || typeof s.newerFound !== "boolean") return false;
+    if (s.newerNext !== undefined && (!validSafePiId(s.newerNext) || Number(s.newerNext) <= Number(after))) return false;
+    if (s.newerFound && (!s.entries.some(isMessage) || s.entries.some(e => e.id <= Number(after)) ||
+      (s.newerNext !== undefined && Number(s.newerNext) < s.entries.at(-1)!.id))) return false;
+  } else if (s.newerAfter !== undefined || s.newerFound !== undefined || s.newerNext !== undefined) return false;
   if (!validManagedParent(s.chatId, s)) return false;
+  if (action === "messageContent" ? !validMessageContentPage(s.messageContent, { chatId: s.chatId, entryId, offset }) : s.messageContent !== undefined) return false;
   if ((action === "models" || action === "configure") && !s.modelSettings) return false;
   const expectedChat = action === "select" ? target : action === "parent" ? inspectParentChatId : action === "subagent" ? undefined : chatId;
   if (action === "parent" && (!inspectParentChatId || s.inspectParentChatId !== undefined)) return false;
   if (action === "subagent" && s.inspectParentChatId !== (inspectParentChatId ?? chatId)) return false;
   if (action !== undefined && !["subagent", "parent", "select"].includes(action) && s.inspectParentChatId !== inspectParentChatId) return false;
   if (s.inspectParentChatId !== undefined && (!validSafePiId(s.inspectParentChatId) || Number(s.inspectParentChatId) >= Number(s.chatId) || s.kind !== "subagent" || s.draft !== null || s.tasks !== undefined || s.hosts !== undefined || s.rex !== undefined || (s.clientMode === "task" && s.inspectParentChatId === s.hubChatId))) return false;
+  if (action === "childOpen" && (!validSafePiId(target) || Number(target) <= Number(s.chatId) || s.inspectParentChatId !== undefined || s.kind === "subagent" || !canParticipate(s.clientMode, s.chatId, s.hubChatId))) return false;
   if (action === "select" && (!validSafePiId(target) || s.inspectParentChatId !== undefined)) return false;
   if (!validSafePiId(s.chatId) || (hubId !== undefined && hubId !== s.hubId) || (expectedChat !== undefined && expectedChat !== s.chatId)) return false;
   if (!validSafePiId(s.hubChatId) || (mode !== undefined && s.clientMode !== mode) || (hubChatId !== undefined && s.hubChatId !== hubChatId)) return false;
-  if (s.clientMode === "task" && (s.chatId === s.hubChatId || s.tasks !== undefined || s.hosts !== undefined || action === "hosts" || action === "select" || action === "tasks" || action === "create")) return false;
+  if (s.clientMode === "task" && (s.chatId === s.hubChatId || s.tasks !== undefined || s.hosts !== undefined || action === "hosts" || action === "select" || action === "tasks")) return false;
   if (!canParticipate(s.clientMode, s.chatId, s.hubChatId) && s.draft !== null) return false;
   if (s.hosts !== undefined && !validHosts(s.hosts) || action === "hosts" && !s.hosts) return false;
   if (s.brief !== undefined && !validBrief(s.brief)) return false;
@@ -75,7 +91,7 @@ export function validReply(value: unknown, id: string, hubId?: string, chatId?: 
 }
 type Command = (name: string, args: Record<string, unknown>, hubId?: string) => Promise<any>;
 const inputAdmittedNotice = "Input admitted; completion not yet confirmed";
-const isMessage = (entry: TuiEntry) => entry.parts?.some(part => part.kind === "text" && part.text.length > 0);
+const isMessage = (entry: TuiEntry) => entry.role !== "tool" && (entry.parts ? entry.parts.some(part => part.kind === "text" && part.text.length > 0) : entry.role !== "note" && entry.text.length > 0);
 export class TuiSession {
   private hubId?: string;
   private chatId?: string;
@@ -89,12 +105,13 @@ export class TuiSession {
   private admittedInputs: { chatId: string, requestId: string, text: string }[] = [];
   private observedInput: { chatId: string, requestId: string } | undefined; // A saved input may appear before explicit ACK recovery.
   private liveHead: number | undefined; // Anchor from a live read, never a historical page.
-  private pageLimits = { latest: 80, older: 80 };
+  private pageLimits = { latest: 80, older: 80, newer: 80 };
   private supportsSettings = false;
   private supportsRex = false;
   private supportsStartup = false;
   private supportsBrief = false;
   private supportsManaged = false;
+  private supportsManagedOpen = false;
   private supportsHosts = false;
   private startupBlocked = false;
   private attachmentMachine?: string;
@@ -152,12 +169,13 @@ export class TuiSession {
     this.inspectParentChatId = inspectParent;
     this.hubId = status.hubId; this.chatId = status.chatId; this.hubChatId = status.mainChatId; this.store = store;
     this.active = active; this.activeSaved = !!active; this.before = undefined; this.liveHead = undefined; this.userImport = undefined;
-    this.pageLimits = { latest: 80, older: 80 };
+    this.pageLimits = { latest: 80, older: 80, newer: 80 };
     this.binding = status.binding && { machineId: status.binding.machineId, cwd: status.binding.cwd };
     this.localWorkspace = !inspectParent && status.binding?.cwd === process.cwd() && (this.mode === "task" || status.machineId === status.binding?.machineId);
     this.gitSampleAt = 0;
     this.supportsRex = !inspectParent && status.rexOpen === 1;
     this.supportsManaged = !inspectParent && status.managedChildren === 1;
+    this.supportsManagedOpen = !inspectParent && status.managedChildOpen === 1;
     this.supportsBrief = status.taskBrief === 1; this.supportsHosts = status.hostInventory === 1;
     this.supportsStartup = status.rexStartup === 1;
     this.supportsSettings = status.modelSettings === 1; this.settingsUncertain = !inspectParent && this.supportsSettings;
@@ -219,12 +237,12 @@ export class TuiSession {
     this.state!.model = displayText(`${settings.selection.provider}/${settings.selection.modelId}`, 160);
     this.settingsUncertain = false;
   }
-  private async history(before?: string) {
-    const direction = before === undefined ? "latest" : "older";
+  private async history(before?: string, after?: string) {
+    const direction = after !== undefined ? "newer" : before === undefined ? "latest" : "older";
     let limit = this.pageLimits[direction];
     for (;;) {
       try {
-        const page = await this.readView("history", { chatId: this.chatId, limit, ...(before ? { before } : {}), includeActivity: true, includeAgentStatus: true, includeSubagents: true, includeProgress: true });
+        const page = await this.readView("history", { chatId: this.chatId, limit, ...(before ? { before } : {}), ...(after ? { after } : {}), includeActivity: true, includeAgentStatus: true, includeSubagents: true, includeProgress: true });
         this.pageLimits[direction] = limit;
         return page;
       }
@@ -267,6 +285,26 @@ export class TuiSession {
     for (const entry of carry) if (!append(entry)) return full();
     return { entries: entries.reverse(), next: carry.length ? this.before : page.next };
   }
+  // Forward history is ascending: consume its oldest prefix, never reverse or
+  // keep a latest suffix. This read is intentionally nonmutating so a native
+  // Esc/click/reversal during transport can discard it without moving the view.
+  private async newer(after: string): Promise<TuiSnapshot> {
+    const page: HistoryPage = await this.history(undefined, after);
+    const entries: TuiEntry[] = [];
+    let budget = 128 * 1024, wireBudget = 512 * 1024, next = page.next;
+    for (const raw of page.items) {
+      const projected = projectEntry(raw);
+      const entry: TuiEntry = isMessage(projected) ? projected : { id: raw.id, role: "note", parts: [], text: "" };
+      const bytes = Buffer.byteLength(entry.text), wireBytes = Buffer.byteLength(JSON.stringify(entry)) + 1;
+      if (entries.length === 80 || bytes > budget || wireBytes > wireBudget) {
+        next = String(entries.at(-1)!.id); break;
+      }
+      entries.push(entry); budget -= bytes; wireBudget -= wireBytes;
+    }
+    const found = entries.some(isMessage);
+    return { ...structuredClone(this.state!), ...(found ? { entries, hasOlder: true, historical: !!next } : {}),
+      newerAfter: after, newerFound: found, ...(next ? { newerNext: next } : {}) };
+  }
   private sample(page: Pick<HistoryPage, "activity" | "progress">) {
     // Absence is unknown, never a fresh replay of an old completion/idle sample.
     delete this.state!.agentStatus;
@@ -286,9 +324,9 @@ export class TuiSession {
     if (!this.active) throw new Error("No pending draft to retry");
     if (this.active.kind === "instructions" && this.active.source !== "user") throw new Error("Use --no-tui to retry workspace instruction requests");
     if (this.active.kind === "task") {
-      requireCreation(this.mode, this.chatId, this.hubChatId);
+      requireCreation(this.mode, this.chatId, this.hubChatId, this.active.managedParentChatId);
       if (this.active.managedParentChatId !== undefined) {
-        if (!this.supportsManaged) throw new Error("Hub lacks managed children; no request sent");
+        if (!this.supportsManaged || (this.mode === "task" && !this.supportsManagedOpen)) throw new Error("Hub lacks scoped managed children; no request sent");
       } else if (!this.supportsRex) throw new Error("Rex support is required to create a task; no request sent");
     }
     if (this.active.kind === "task" && !this.supportsBrief && (this.active.problem !== undefined || this.active.description !== undefined)) throw new Error("Hub lacks task briefs; no request sent");
@@ -315,6 +353,15 @@ export class TuiSession {
       this.state!.notice = inputAdmittedNotice;
     }
     else {
+      if (managed && this.mode === "task") {
+        try {
+          const opened = await this.openChild(String(ack.chatId));
+          this.state!.notice = `Child ${ack.chatId} created. ${opened.ack.status === "reused" ? "Child TUI reused" : "Child TUI opening"} in the parent's Rex session and saved directory. No model input submitted.`;
+        } catch {
+          this.state!.notice = `Child ${ack.chatId} created; same-session Rex open unconfirmed. Inspect Rex, then :child-open ${ack.chatId} for an explicit attempt. Creation will not replay.`;
+        }
+        return;
+      }
       if (managed && !this.supportsRex) {
         this.state!.notice = `Managed child ${ack.chatId} created; no input submitted. :tasks shows its name; attach on its assigned host with deck agent --resume NAME --here.`;
         return;
@@ -327,6 +374,18 @@ export class TuiSession {
         this.state!.notice = `Task ${ack.chatId} created. ${opened.status === "reused" ? "Rex client reused" : "Rex attempt admitted, not yet ready"}. :select ${ack.chatId} inspects only; participate in Rex.`;
       } catch { this.state!.notice = `Task ${ack.chatId} created; Rex open unconfirmed. :select ${ack.chatId}, inspect Rex, then explicitly open/reopen if needed. No automatic retry.`; }
     }
+  }
+  private async openChild(childId: string) {
+    requireParticipation(this.mode, this.chatId, this.hubChatId);
+    if (!this.supportsManagedOpen || !validSafePiId(childId) || Number(childId) <= Number(this.chatId)) throw new Error("Same-session managed child opening unavailable; no request sent");
+    return this.command("open_managed_child", { chatId: this.chatId, childId, requestId: randomUUID(), port: this.port }, this.hubId);
+  }
+  private async requireParentTerminal() {
+    // Read-only preflight for NEW forms, never a permission lease or a reason to
+    // abandon an already saved creation identity. The runtime rechecks at open.
+    if (!this.supportsManagedOpen) throw new Error("Hub lacks same-session child opening; no child requested");
+    const status = await this.command("rex_status", { chatId: this.chatId }, this.hubId);
+    if (status.status !== "allocated" || !status.binding || status.binding.chatId !== this.chatId || status.binding.machineId !== this.binding?.machineId || status.binding.cwd !== this.binding?.cwd) throw new Error("Parent has no confirmed Rex allocation; open the parent in Rex first. No child created and no new-session fallback.");
   }
   private async observeUserImport() {
     if (!this.userImport) return;
@@ -365,11 +424,20 @@ export class TuiSession {
     if (this.startupBlocked) throw new Error("Rex startup unconfirmed; no input enabled");
     await this.initialize();
     let state = this.state!;
-    if (this.inspectParentChatId && !["poll", "older", "latest", "models", "subagent", "parent", ...(this.mode === "hub" ? ["select"] : [])].includes(request.action)) throw new Error("Read-only subagent inspection; :parent to return");
+    if (this.inspectParentChatId && !["poll", "older", "newer", "latest", "models", "subagent", "parent", "messageContent", ...(this.mode === "hub" ? ["select"] : [])].includes(request.action)) throw new Error("Read-only subagent inspection; :parent to return");
     if (request.action === "select" || request.action === "tasks" || request.action === "hosts") requireNavigation(this.mode);
-    if (request.action === "create") requireCreation(this.mode, this.chatId, this.hubChatId);
-    if (["send", "retry", "discard", "stop", "configure", "agentsmd"].includes(request.action)) requireParticipation(this.mode, this.chatId, this.hubChatId);
+    if (request.action === "create") requireCreation(this.mode, this.chatId, this.hubChatId, request.taskForm?.managedParentChatId);
+    if (["send", "retry", "discard", "stop", "configure", "agentsmd", "childOpen"].includes(request.action)) requireParticipation(this.mode, this.chatId, this.hubChatId);
     switch (request.action) {
+      case "newer": return this.newer(request.after!);
+      case "messageContent": {
+        const args = { chatId: this.chatId!, entryId: request.entryId!, offset: request.offset! };
+        const page = await this.readView("message_content", args);
+        if (!validMessageContentPage(page, args)) throw new Error("Invalid full-message content; export refused");
+        // A read of one immutable entry never replaces the viewport, cursor,
+        // draft or live samples. Export data exists only in this correlated reply.
+        return { ...structuredClone(state), messageContent: page };
+      }
       case "subagent":
         await this.selectSubagent(request.text!); await this.firstInspectionPage(); state = this.state!; break;
       case "parent":
@@ -388,20 +456,36 @@ export class TuiSession {
       }
       case "create": {
         const managed = request.taskForm?.managedParentChatId !== undefined;
-        if (managed ? !this.supportsManaged : !this.supportsRex) throw new Error(managed ? "Hub lacks managed children; no request sent" : "Rex support is required to create a task; no request sent");
-        if (this.active || this.settingsUncertain) throw new Error("Resolve saved requests/settings before creating a task");
         const form = request.taskForm ?? request.taskTarget;
-        if (!form?.machineId && !this.binding) throw new Error("Saved workspace binding unavailable; no task requested");
-        // New form selection uses registered hosts. Legacy :task-at retains its
-        // exact arbitrary/offline binding contract and drafts are never retargeted.
-        if (request.taskForm?.machineId) {
-          if (!this.supportsHosts) throw new Error("Hub lacks registered-host inventory");
-          const hosts = await this.command("list_hosts", {}, this.hubId);
-          if (!hosts.items.some((h: any) => h.machineId === request.taskForm!.machineId)) throw new Error("Selected host is not registered; no task requested");
+        try {
+          if (managed ? !this.supportsManaged : !this.supportsRex) throw new Error(managed ? "Hub lacks managed children; no request sent" : "Rex support is required to create a task; no request sent");
+          if (this.active || this.settingsUncertain) throw new Error("Resolve saved requests/settings before creating a task");
+          if (managed && this.mode === "task") await this.requireParentTerminal();
+          if (!form?.machineId && !this.binding) throw new Error("Saved workspace binding unavailable; no task requested");
+          // New form selection uses registered hosts. Legacy :task-at retains its
+          // exact arbitrary/offline binding contract and drafts are never retargeted.
+          if (request.taskForm?.machineId) {
+            if (!this.supportsHosts) throw new Error("Hub lacks registered-host inventory");
+            const hosts = await this.command("list_hosts", {}, this.hubId);
+            if (!hosts.items.some((h: any) => h.machineId === request.taskForm!.machineId)) throw new Error("Selected host is not registered; no task requested");
+          }
+          if (!this.supportsBrief && (form?.problem !== undefined || form?.description !== undefined)) throw new Error("Hub lacks task briefs; no request sent");
+        } catch (error) {
+          if (this.active) throw error; // A refusal cannot clear an older unresolved draft.
+          throw new TuiRequestNotSent(error instanceof Error ? error.message : "Creation preflight failed; no child requested");
         }
-        if (!this.supportsBrief && (form?.problem !== undefined || form?.description !== undefined)) throw new Error("Hub lacks task briefs; no request sent");
         this.active = { kind: "task", chatId: this.chatId!, requestId: randomUUID(), title: request.text!, ...(managed ? {} : this.binding!), ...form }; this.activeSaved = false;
         await this.deliver(); break;
+      }
+      case "childOpen": {
+        if (this.active || this.userImport || this.settingsUncertain) throw new Error("Resolve pending requests/settings before opening a child");
+        try {
+          const opened = await this.openChild(request.chatId!);
+          state.notice = `Child ${request.chatId} TUI ${opened.ack.status === "reused" ? "reused" : "opening"} in the parent's Rex session and saved directory. No model input submitted.`;
+        } catch (error) {
+          throw new Error(`Child Rex open unconfirmed; inspect Rex before another explicit :child-open ${request.chatId}. No automatic retry. ${error instanceof Error ? error.message : ""}`);
+        }
+        break;
       }
       case "rexStatus":
       case "rexInspect": {
@@ -454,8 +538,9 @@ export class TuiSession {
         await this.command("stop", { chatId: this.chatId }, this.hubId);
         state.notice = "Stop requested, not a drained/completed receipt"; break;
       case "older": {
-        if (!this.before) { state.notice = "No older history in this view"; break; }
-        const page = this.renderHistory(await this.history(this.before), "older");
+        const before = request.before ?? this.before;
+        if (!before) { state.notice = "No older history in this view"; break; }
+        const page = this.renderHistory(await this.history(before), "older");
         const entries = page.entries;
         this.before = page.next; state.hasOlder = !!page.next;
         if (entries.length === 0) { state.notice = "No older retained history; current view unchanged"; break; }

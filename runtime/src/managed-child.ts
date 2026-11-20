@@ -10,15 +10,22 @@ export const ManagedChildRequest = defineDocFamily<{ hash: string; chatId: numbe
   initial: hash => ({ hash, chatId: 0 }), checkpointWhen: () => true,
 });
 
+// Session-wide namespace pins each open ID to its original parent/child/session.
+// The receipt and child's allocation task commit atomically, including reuse.
+export const ManagedChildOpenRequest = defineDocFamily<{ hash: string; taskId: number; status: "admitted" | "reused" }, string>({
+  kind: "deck.managed-child-open-request", version: 1, scope: "session", family: true,
+  initial: hash => ({ hash, taskId: 0, status: "admitted" }), checkpointWhen: () => true,
+});
+
 type Relation = { kind: "main" | "task" | "subagent"; managedParentChatId?: string };
 export function independentDeckChat(record: ConversationRecord | undefined, metadata: Relation | undefined, mainId: number): boolean {
   return !!record && !record.owner && !!metadata && (metadata.kind === "task" || (metadata.kind === "main" && record.id === mainId));
 }
 
 export function assertManagedMessageRelation(sourceId: string, source: Relation, targetId: string, target: Relation): void {
-  if ((source.managedParentChatId !== undefined && source.managedParentChatId !== targetId)
-    || (target.managedParentChatId !== undefined && target.managedParentChatId !== sourceId)) {
-    throw new DeckError("invalid", "Managed children may exchange agent messages only with their parent");
+  if ((source.managedParentChatId !== undefined || target.managedParentChatId !== undefined)
+    && source.managedParentChatId !== targetId && target.managedParentChatId !== sourceId) {
+    throw new DeckError("invalid", "Managed children may exchange agent messages only with their parent or direct managed children");
   }
 }
 

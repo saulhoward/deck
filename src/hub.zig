@@ -6,6 +6,7 @@ const model_settings = @import("model_settings.zig");
 const status_login = @import("status_login.zig");
 const rex_open = @import("rex_open.zig");
 const managed_child = @import("managed_child.zig");
+const message_content = @import("message_content.zig");
 const max_frame = 1024 * 1024;
 
 // This thread is the sole child waiter until serve returns. Clearing the reaped
@@ -100,6 +101,7 @@ pub fn validCommandArgs(command: []const u8, raw: std.json.Value) bool {
     if (!contracts.validHubCommand(.{ .string = command })) return false;
     const args: std.json.Value = if (raw == .null) .{ .object = .empty } else raw;
     if (!@import("mcp_api.zig").validArgs(command, args) or !model_settings.validArgs(command, args) or !status_login.validArgs(command, args) or !rex_open.validArgs(command, args) or !views.validArgs(command, args)) return false;
+    if (std.mem.eql(u8, command, "message_content")) return message_content.validArgs(args);
     if (std.mem.eql(u8, command, "subagent_view")) return validSubagentViewArgs(args);
     if (std.mem.eql(u8, command, "list_hosts")) return args == .object and args.object.count() == 0;
     if (std.mem.eql(u8, command, "list_chats")) {
@@ -137,6 +139,7 @@ pub fn validClientRequest(request: std.json.Value) bool {
     if (!contracts.validRequestEnvelope(request)) return false;
     const command = request.object.get("command").?.string;
     if ((std.mem.eql(u8, command, "create_managed_child") or std.mem.eql(u8, command, "subagent_view") or std.mem.eql(u8, command, "rex_adopt") or std.mem.eql(u8, command, "mcp_catalog") or std.mem.eql(u8, command, "tool_profiles") or std.mem.eql(u8, command, "set_tool_profiles") or std.mem.eql(u8, command, "model_settings") or std.mem.eql(u8, command, "set_model_settings")) and !request.object.contains("hubId")) return false;
+    if (std.mem.eql(u8, command, "open_managed_child") and !contracts.validRexUuid(request.object.get("hubId") orelse .null)) return false;
     if (request.object.get("hubId")) |hub_id| if (!contracts.validTransportId(hub_id) or !units(hub_id, 200)) return false;
     return validCommandArgs(request.object.get("command").?.string, request.object.get("args") orelse .null);
 }
@@ -166,6 +169,8 @@ fn validSubagentViewArgs(args: std.json.Value) bool {
     const operation = args.object.get("operation").?.string;
     const keys: []const []const u8 = if (std.mem.eql(u8, operation, "history"))
         &.{ "limit", "before", "after", "includeActivity", "includeAgentStatus", "includeSubagents", "includeProgress", "includeInstructions" }
+    else if (std.mem.eql(u8, operation, "message_content"))
+        &.{ "entryId", "offset" }
     else if (std.mem.eql(u8, operation, "activity"))
         &.{ "includeAgentStatus", "includeSubagents" }
     else
@@ -217,12 +222,14 @@ fn validSubagentViewReply(args: std.json.Value, expected_hub: ?std.json.Value, v
         const parent = binding.object.get("parentChatId") orelse return false;
         if (!std.mem.eql(u8, parent.string, args.object.get("chatId").?.string) or !safePiId(binding.object.get("ownerTaskId") orelse return false)) return false;
     }
-    return (!std.mem.eql(u8, operation, "history") or validHistoryReply(nested, result)) and
+    return (!std.mem.eql(u8, operation, "message_content") or message_content.validPage(nested, result)) and
+        (!std.mem.eql(u8, operation, "history") or validHistoryReply(nested, result)) and
         status_login.validReply(operation, nested, hub, result) and
         views.validReply(operation, nested, result) and
         model_settings.validReply(operation, nested, hub, result);
 }
 test {
+    _ = @import("message_content_test.zig");
     _ = @import("subagent_view_test.zig");
     _ = @import("managed_children_test.zig");
 }
@@ -391,6 +398,7 @@ pub fn validReply(request: std.json.Value, reply: std.json.Value) bool {
     if (!views.validReply(command, args, result) or !rex_open.validReply(command, args, request.object.get("hubId") orelse .null, result)) return false;
     if (std.mem.eql(u8, command, "list_hosts")) return validHosts(result);
     if (std.mem.eql(u8, command, "list_chats")) return validDiscoveryReply(args, result);
+    if (std.mem.eql(u8, command, "message_content")) return message_content.validPage(args, result);
     if (std.mem.eql(u8, command, "history")) return validHistoryReply(args, result);
     if (std.mem.eql(u8, command, "admit")) return contracts.validAdmitArgs(args) and safePiId(args.object.get("chatId").?) and contracts.validAdmitAck(result) and safePiId(result.object.get("submissionId").?);
     if (std.mem.eql(u8, command, "create_managed_child")) return validManagedChildAck(args, result);
@@ -463,11 +471,15 @@ fn handle(io: std.Io, allocator: std.mem.Allocator, connection: std.Io.net.Strea
         try request.respond("Invalid command envelope", .{ .status = .bad_request, .keep_alive = false });
         return;
     }
-    // Derived reads require their explicit hub/parent scope and closed read-only
-    // operation before reaching the private runtime. Preserve correlated command
-    // errors (rather than turning invalid args into fatal transport failures).
-    if (std.mem.eql(u8, parsed.value.object.get("command").?.string, "subagent_view") and !validClientRequest(parsed.value)) {
-        const invalid = try std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = parsed.value.object.get("id").?.string, .ok = false, .@"error" = .{ .code = "invalid", .message = "Invalid subagent view request" } }, .{});
+    // Parent-scoped adapters require explicit identity and closed arguments
+    // before reaching the private runtime. Preserve correlated command errors
+    // (rather than turning invalid args into fatal transport failures).
+    const command = parsed.value.object.get("command").?.string;
+    const derived_read = std.mem.eql(u8, command, "subagent_view");
+    const content_read = std.mem.eql(u8, command, "message_content");
+    const managed_child_command = std.mem.eql(u8, command, "create_managed_child") or std.mem.eql(u8, command, "open_managed_child");
+    if ((derived_read or content_read or managed_child_command) and !validClientRequest(parsed.value)) {
+        const invalid = try std.json.Stringify.valueAlloc(allocator, .{ .version = 1, .id = parsed.value.object.get("id").?.string, .ok = false, .@"error" = .{ .code = "invalid", .message = if (derived_read) "Invalid subagent view request" else if (content_read) "Invalid message content request" else "Invalid managed child request" } }, .{});
         defer allocator.free(invalid);
         try request.respond(invalid, .{ .keep_alive = false, .extra_headers = &.{.{ .name = "content-type", .value = "application/json" }} });
         return;
@@ -510,17 +522,37 @@ pub fn serve(io: std.Io, allocator: std.mem.Allocator, child: *std.process.Child
     }
 }
 
+test "HTTP message content reads validate exact scope before forwarding and fence corrupt pages" {
+    try testHttpFixtures(@embedFile("message_content.test.json"), &.{
+        "complete digest verified",             "nested complete exact child",   "reject page chatId 2",             "reject page entryId 8",
+        "reject page offset 1",                 "reject page totalBytes 4",      "reject page totalBytes 6",         "reject page next 5",
+        "reject args entryId 9007199254740992", "reject args offset -1",         "args require entryId",             "args require offset",
+        "nested rejects wrong digest",          "nested cannot override chatId", "nested result cannot cross child",
+    });
+}
+
 test "HTTP subagent reads validate scope before forwarding and fence corrupt nested replies" {
-    const io = std.testing.io;
-    const a = std.testing.allocator;
-    const fixtures = try std.json.parseFromSlice(std.json.Value, a, @embedFile("subagent_view.test.json"), .{});
-    defer fixtures.deinit();
-    const names = [_][]const u8{
+    try testHttpFixtures(@embedFile("subagent_view.test.json"), &.{
         "status reply",                          "history reply",                           "activity reply",                     "progress reply",                                "model_settings reply",
         "status query preserves exact spelling", "status name must echo exact query",       "status binding ownerTaskId",         "status binding requires kind",                  "nested history duplicate entry",
         "activity nested agentStatus",           "progress generation requires run",        "nested models duplicate model keys", "wrong child history activity",                  "explicit hub required",
         "not a read operation stop",             "not a read operation set_model_settings", "not a read operation subagent_view", "status forbidden options {\"chatId\": \"11\"}",
-    };
+    });
+}
+
+test "HTTP managed child mutations validate scope before forwarding and fence corrupt ACKs" {
+    try testHttpFixtures(@embedFile("managed_children.test.json"), &.{
+        "child open exact ACK",                                            "child open reused ACK",                                   "child open missing hub",                          "child open invalid hub \"hub\"",
+        "child open refuses {\"machineId\":\"override\"}",                 "child open refuses {\"childId\":\"9007199254740992\"}",   "child open ACK rejects {\"parentChatId\":\"1\"}", "child open nested ACK rejects {\"chatId\":\"2\"}",
+        "child open nested ACK rejects {\"taskId\":\"9007199254740992\"}", "child open nested ACK rejects {\"private\":\"PRIVATE\"}",
+    });
+}
+
+fn testHttpFixtures(fixture_bytes: []const u8, names: []const []const u8) !void {
+    const io = std.testing.io;
+    const a = std.testing.allocator;
+    const fixtures = try std.json.parseFromSlice(std.json.Value, a, fixture_bytes, .{});
+    defer fixtures.deinit();
     var checked: usize = 0;
     for (fixtures.value.array.items) |fixture| {
         const name = fixture.object.get("name").?.string;

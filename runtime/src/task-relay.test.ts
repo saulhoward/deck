@@ -215,7 +215,7 @@ test("managed child Rex participation changes only its own settings and cannot u
     const sibling = await f.runtime.createManagedChild(parentId, "Sibling", randomUUID()), siblingId = String(sibling.id);
     const status = await f.direct("status", { chatId: f.chatId }); assert.ok(status.ok);
     assert.equal(status.result.binding.kind, "task"); assert.equal(status.result.binding.managedParentChatId, parentId);
-    assert.equal(status.result.managedChildren, undefined); assert.equal(status.result.activity, undefined);
+    assert.equal(status.result.managedChildren, 1); assert.equal(status.result.managedChildOpen, 1); assert.equal(status.result.activity, undefined);
     const initial = (await f.runtime.modelSettings(f.chatId)).selection;
     const settings = { chatId: f.chatId, expected: initial, selection: { ...initial, thinkingLevel: "high" } };
     assert.notDeepEqual(settings.selection, initial);
@@ -277,4 +277,64 @@ test("forged managed relationship cannot grant Rex authority when Pi canonical o
     assert.equal((await f.direct("rex_startup", { chatId: captured.chatId, allocationId: forgedScope.allocationId, blockId: forgedScope.blockId }, forgedScope)).ok, false);
     assert.equal((await f.runtime.history(captured.chatId)).items.filter(item => item.kind === "deck.input").length, 0);
   } finally { await f.close(); }
+});
+
+test("parent-pinned real task socket creates/opens a managed child in the same session; lost open ACK never retries implicitly or duplicates", async () => {
+  const f = await fixture(), peers = new Set<Socket>(), requests: any[] = []; let drop = true;
+  const server = createServer(socket => {
+    peers.add(socket); socket.on("error", () => {}); socket.on("close", () => peers.delete(socket));
+    socket.pipe(new FrameDecoder()).on("data", (frame: any) => {
+      const request = JSON.parse(frame.body); requests.push(request);
+      void taskClientResponse(f.runtime, machine, f.client, { ...frame, connectionId: "a".repeat(64), id: "b".repeat(64) }).then(body => {
+        if (request.command === "open_managed_child" && drop) { drop = false; socket.destroy(); return; }
+        socket.end(encodeFrame(JSON.parse(body)));
+      }).catch(() => socket.destroy());
+    }).on("error", () => socket.destroy());
+  });
+  await new Promise<void>(resolve => server.listen(f.client.socket, resolve)); await chmod(f.client.socket, 0o600);
+  const call = (command: string, args: Record<string, unknown>) => taskCommand(f.client.socket, f.scope, command, args, f.runtime.hubId);
+  try {
+    const parentRex = await f.runtime.harness.snapshot(RexDoc, f.chat.id, context);
+    const args = { parentChatId: f.chatId, title: "Socket child", requestId: randomUUID() };
+    assert.equal((await f.direct("create_managed_child", args)).ok, false, "startup still required");
+    await call("rex_startup", { chatId: f.chatId, allocationId: f.scope.allocationId, blockId: f.scope.blockId });
+    const child = await call("create_managed_child", args) as { chatId: string; parentChatId: string };
+    assert.equal(child.parentChatId, f.chatId);
+    assert.deepEqual(await call("create_managed_child", args), { ...child, brief: {} });
+    await assert.rejects(call("create_managed_child", { ...args, parentChatId: String(f.runtime.main.id) }), /not sent/);
+    assert.equal((await f.direct("create_managed_child", { ...args, parentChatId: String(f.runtime.main.id) })).ok, false);
+    const open = { chatId: f.chatId, childId: child.chatId, requestId: randomUUID(), port: 52800 };
+    await assert.rejects(call("open_managed_child", open), /unconfirmed/);
+    await call("status", { chatId: f.chatId });
+    assert.equal(requests.filter(r => r.command === "open_managed_child").length, 1);
+    const recovered = await call("open_managed_child", open) as { ack: { taskId: string; chatId: string } };
+    await f.runtime.harness.waitForTask(Number(recovered.ack.taskId) as TaskId, context);
+    assert.equal(recovered.ack.chatId, child.chatId); assert.equal(f.plans.length, 2);
+    assert.equal(f.plans[1]!.sessionId, parentRex!.binding!.sessionId); assert.notEqual(f.plans[1]!.allocationId, parentRex!.allocationId);
+    assert.equal((await f.runtime.terminalStatus(f.chatId)).binding!.taskId, parentRex!.binding!.taskId);
+    assert.deepEqual((await f.runtime.history(child.chatId)).items, []); assert.deepEqual((await f.runtime.history(f.chatId)).items, []);
+    // A relationship never grants ordinary foreign-target task operations.
+    assert.equal((await f.direct("history", { chatId: child.chatId })).ok, false);
+    assert.equal((await f.direct("rex_open", { chatId: child.chatId, requestId: randomUUID(), port: 52800 })).ok, false);
+  } finally { for (const peer of peers) peer.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); await f.close(); }
+});
+
+test("revoked parent allocation fences queued managed creation/opening before a child task or allocation is admitted", async () => {
+  for (const command of ["create_managed_child", "open_managed_child"] as const) {
+    const f = await fixture(), release = gate(), entered = gate();
+    try {
+      await f.direct("rex_startup", { chatId: f.chatId, allocationId: f.scope.allocationId, blockId: f.scope.blockId });
+      const child = await f.runtime.createManagedChild(f.chatId, "Waiting", randomUUID());
+      f.blockAdmission(release.promise);
+      const occupying = f.runtime.admit(String(f.runtime.main.id), { requestId: randomUUID(), text: "blocking", mode: "steer" });
+      const guarded = f.runtime.guardedCommand.bind(f.runtime);
+      f.runtime.guardedCommand = (guard, fn) => guarded(async () => { await guard(); entered.release(); }, fn);
+      const args = command === "create_managed_child" ? { parentChatId: f.chatId, title: "Denied", requestId: randomUUID() } : { chatId: f.chatId, childId: String(child.id), requestId: randomUUID(), port: 52800 };
+      const pending = f.direct(command, args); await within(entered.promise);
+      await f.chat.commit(async tx => { (await tx.doc(RexDoc, f.chat.id)).allocationId = randomUUID(); }, context);
+      release.release(); await occupying;
+      assert.equal((await pending).ok, false); assert.equal(f.plans.length, 1);
+      assert.equal((await f.runtime.listChats()).items.length, 3); assert.equal((await f.runtime.terminalStatus(String(child.id))).status, "unallocated");
+    } finally { release.release(); await f.close(); }
+  }
 });

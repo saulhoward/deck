@@ -58,7 +58,7 @@ export function taskControl(runtime: () => DeckRuntime) {
     }),
     defineTool({
       name: "task_message", replay: "safe", callers: ["model"], outputLimits,
-      description: `Admit text to another existing independent task; returns admission, NOT an answer. Rejects main, captured children and self. Managed children may exchange agent messages only with their parent. Defaults to followUp; steer joins at a tool boundary. Preserves target host/model and authoritative sender/reply provenance. Agent chains stop at ${MAX_MESSAGE_HOPS} hops; another tool call does not reset them. Never automatically relay ACKs. Same Pi tool-task replay deduplicates; a NEW call is a NEW message. Caller stop does not cancel admitted target work.`,
+      description: `Admit text to another existing independent task; returns admission, NOT an answer. Rejects main, captured children and self. When either endpoint is managed, messages require a direct parent-child edge (up or down); no siblings, grandparents or unrelated agents. Defaults to followUp; steer joins at a tool boundary. Preserves target host/model and authoritative sender/reply provenance. Agent chains stop at ${MAX_MESSAGE_HOPS} hops; another tool call does not reset them. Never automatically relay ACKs. Same Pi tool-task replay deduplicates; a NEW call is a NEW message. Caller stop does not cancel admitted target work.`,
       parameters: Type.Object({ chatId: Type.String({ pattern: "^[1-9][0-9]*$", maxLength: 16 }), text: Type.String({ minLength: 1, maxLength: 8192 }), mode: Type.Optional(Type.Union([Type.Literal("followUp"), Type.Literal("steer")])) }),
       execute: (args, api, context) => message(args, api, context, "task"),
     }),

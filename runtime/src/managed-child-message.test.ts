@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -143,5 +144,26 @@ test("managed child retains foreground delegation; captured descendant still fil
     assert.ok(!agent.extensions.some(e => e.name === "deck.task-control"));
     for (const name of ["parent_message", "task_message", "hub_message", "task_create", "subagent"]) assert.ok(!agent.tools.some(t => t.name === name));
     await assert.rejects(runtime.admit(row.chatId, { requestId: "external", text: "no", mode: "followUp" }), /owning tool/);
+  } finally { await runtime.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("nested managed hierarchy permits only direct up/down edges, never siblings, grandparents or unrelated agents", async () => {
+  const root = await mkdtemp(join(tmpdir(), "deck-managed-edges-")); const f = setup(); const runtime = await f.open(join(root, "pi.sqlite"));
+  try {
+    const parent = await runtime.createTask("Parent", f.options.binding), parentId = String(parent.id);
+    const child = await runtime.createManagedChild(parentId, "Child", randomUUID()), childId = String(child.id);
+    const nested = await runtime.createManagedChild(childId, "Nested", randomUUID()), nestedId = String(nested.id);
+    const sibling = await runtime.createManagedChild(childId, "Nested sibling", randomUUID()), siblingId = String(sibling.id);
+    const other = await runtime.createTask("Other", f.options.binding), otherId = String(other.id);
+    const input = (source: string): Input => ({ requestId: randomUUID(), text: "edge message", mode: "followUp", origin: { kind: "task-tool", chatId: source, taskId: "100" } });
+    for (const [source, target] of [[parentId, childId], [childId, parentId], [childId, nestedId], [nestedId, childId]]) {
+      f.faux.setResponses([fauxAssistantMessage("Accepted direct edge")]);
+      await (await runtime.admit(target!, input(source!))).wait(context);
+    }
+    for (const [source, target] of [[parentId, nestedId], [nestedId, parentId], [nestedId, siblingId], [siblingId, nestedId], [otherId, nestedId], [nestedId, otherId]]) await assert.rejects(runtime.admit(target!, input(source!)), /direct managed children/);
+    f.faux.setResponses([fauxAssistantMessage(fauxToolCall("parent_message", { text: "Nested report" }), { stopReason: "toolUse" }), fauxAssistantMessage("Report"), fauxAssistantMessage("Done")]);
+    await (await runtime.admit(nestedId, { requestId: randomUUID(), text: "Report upward", mode: "followUp" })).wait(context); await child.waitForIdle(context);
+    assert.ok((await inputs(runtime, childId)).some(i => i.text === "Nested report"));
+    assert.ok(!(await inputs(runtime, parentId)).some(i => i.text === "Nested report"));
   } finally { await runtime.close(); await rm(root, { recursive: true, force: true }); }
 });

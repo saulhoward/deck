@@ -459,6 +459,15 @@ pub fn main(init: std.process.Init) void {
     const allocator = init.gpa;
     const native: Native = .{ .io = init.io, .environ = init.minimal.environ };
     var args = init.minimal.args.toSlice(init.arena.allocator()) catch std.process.exit(1);
+    if (args.len > 1 and std.mem.eql(u8, args[1], @import("tui_message_viewer.zig").helper_command)) {
+        if (args.len != 3) std.process.exit(2);
+        @import("tui_message_viewer.zig").runHelper(native, allocator, args[2]) catch {
+            // Never echo control contents, viewer arguments, or raw errors.
+            std.Io.File.stderr().writeStreamingAll(init.io, "deck: message viewer failed; check the viewer and private export permissions. Leftover exports may be removed after the viewer exits.\n") catch {};
+            std.process.exit(1);
+        };
+        return;
+    }
     if (args.len > 1 and std.mem.eql(u8, args[1], "hub")) {
         if (@import("hub_session.zig").managed(args[2..])) {
             @import("hub_session.zig").run(native, allocator, args[2..]) catch |err| {
@@ -662,6 +671,7 @@ test {
     _ = tui;
     _ = @import("tui_editor.zig");
     _ = @import("tui_external_editor.zig");
+    _ = @import("tui_message_viewer.zig");
     _ = @import("tui_bridge.zig");
     _ = @import("remote_test.zig");
     _ = @import("remote_transport_test.zig");

@@ -1,5 +1,6 @@
 // Hub-only worker-link endpoint. Uses the existing Harness/dispatch and durable
 // admission identities; never a second command store, executor or retry queue.
+import { taskRequestMatchesScope } from "./attachment-contracts.js";
 import { Socket } from "node:net";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { AgentDoc, type TaskId } from "@earendil-works/pi-durable";
@@ -16,7 +17,7 @@ import { validSafePiId } from "./mutation-contracts.js";
 import { validRexAllocationPlan, type TaskRelayFrame, type WorkerRexClient, type ResponseEnvelope } from "./generated/contracts.js";
 import { FrameDecoder, encodeFrame } from "./protocol.js";
 import { responseFrame } from "./responses.js";
-const allowed = new Set(["subagent_view", "status", "history", "activity", "progress", "instruction_status", "model_settings", "set_model_settings", "rex_status", "rex_inspect", "rex_startup", "admit", "stop", "import_instructions"]);
+const allowed = new Set(["create_managed_child", "open_managed_child", "subagent_view", "message_content", "status", "history", "activity", "progress", "instruction_status", "model_settings", "set_model_settings", "rex_status", "rex_inspect", "rex_startup", "admit", "stop", "import_instructions"]);
 // rex_open is deliberately hub-controlled: replacement revokes the old client's
 // allocation. A terminal cannot manufacture another terminal's authority.
 export async function taskClientResponse(runtime: DeckRuntime, machineId: string, client: WorkerRexClient, frame: TaskRelayFrame, previousClients: readonly WorkerRexClient[] = []): Promise<string> {
@@ -27,7 +28,7 @@ export async function taskClientResponse(runtime: DeckRuntime, machineId: string
   const guard = async () => {
     const refuse = () => { throw new DeckError("conflict", "Remote task scope unavailable; earlier requests may have applied"); };
     try {
-      if (!allowed.has(request.command) || scope.hubId !== runtime.hubId || request.hubId !== scope.hubId || args?.chatId !== scope.chatId || !validSafePiId(scope.chatId) || scope.chatId === String(runtime.main.id)) refuse();
+      if (!allowed.has(request.command) || scope.hubId !== runtime.hubId || request.hubId !== scope.hubId || !taskRequestMatchesScope(request.command, args, scope.chatId) || !validSafePiId(scope.chatId) || scope.chatId === String(runtime.main.id)) refuse();
       const chat = await runtime.chat(scope.chatId);
       const record = await runtime.harness.commit(tx => tx.conversation(chat.id), context);
       const [binding, agent, doc] = await Promise.all([runtime.harness.snapshot(ChatDoc, chat.id, context), runtime.harness.snapshot(AgentDoc, chat.id, context), runtime.harness.snapshot(RexDoc, chat.id, context)]);
@@ -44,7 +45,7 @@ export async function taskClientResponse(runtime: DeckRuntime, machineId: string
     } catch { refuse(); } // No cross-task existence/ownership oracle or private lookup diagnostics.
   };
   let response: ResponseEnvelope;
-  try { response = { version: 1, id: request.id, ok: true, result: await runtime.guardedCommand(guard, () => dispatch(runtime, request, undefined, true)) }; }
+  try { response = { version: 1, id: request.id, ok: true, result: await runtime.guardedCommand(guard, () => dispatch(runtime, request, undefined, true, scope.chatId)) }; }
   catch (error) { response = { version: 1, id: request.id, ok: false, error: { code: error instanceof DeckError ? error.code : "runtime_failed", message: error instanceof DeckError ? error.message : "Task command failed; outcome unconfirmed" } }; }
   return responseFrame(response, request).subarray(4).toString("utf8");
 }

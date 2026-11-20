@@ -1,3 +1,4 @@
+import { validMessageContentPage } from "./message-content-contracts.js";
 import { validSubagentViewReply } from "./subagent-view-contracts.js";
 import { validMcpReply } from "./mcp-api.js";
 import { validHostReply } from "./host-inventory.js";
@@ -25,6 +26,7 @@ export function responseResult(value: unknown, expectedId: string, request?: Rep
   if (request && !validMcpReply(request,value.result)) throw new Error("Invalid MCP configuration response; outcome unconfirmed");
   if (request && !validHostReply(request.command, value.result)) throw new Error("Invalid host inventory; selection unchanged");
   if (request?.command === "list_chats" && !validDiscoveryPage(value.result, request.args)) throw new Error("Invalid chat discovery response; cursor unchanged");
+  if (request?.command === "message_content" && !validMessageContentPage(value.result, request.args)) throw new Error("Invalid message content response; export unchanged");
   if (request?.command === "history" && !validHistoryPage(value.result, request.args)) throw new Error("Invalid history response; cursor unchanged");
   if (request && !validModelSettingsReply(request, value.result)) throw new Error("Invalid model settings response; selection unconfirmed");
   if (request && !validStatusLoginReply(request, value.result)) throw new Error("Invalid status/login response; identity or outcome unconfirmed");
@@ -43,7 +45,7 @@ export function responseFrame(value: ResponseEnvelope, request?: ReplyContext): 
   try {
     const frame = encodeFrame(value);
     const encoded: unknown = JSON.parse(frame.subarray(4).toString("utf8"));
-    if (validResponseEnvelope(encoded) && encoded.id === id && (!encoded.ok || !request || (validReplyContext(request) && validSubagentViewReply(request, encoded.result) && validMcpReply(request,encoded.result) && validHostReply(request.command, encoded.result) && validModelSettingsReply(request, encoded.result) && validStatusLoginReply(request, encoded.result) && validRexReply(request, encoded.result) && validMutationAck(request, encoded.result) && validViewReply(request.command, encoded.result, request.args) && (request.command !== "list_chats" || validDiscoveryPage(encoded.result, request.args)) && (request.command !== "history" || validHistoryPage(encoded.result, request.args))))) return frame;
+    if (validResponseEnvelope(encoded) && encoded.id === id && (!encoded.ok || !request || (validReplyContext(request) && (request.command !== "message_content" || validMessageContentPage(encoded.result, request.args)) && validSubagentViewReply(request, encoded.result) && validMcpReply(request,encoded.result) && validHostReply(request.command, encoded.result) && validModelSettingsReply(request, encoded.result) && validStatusLoginReply(request, encoded.result) && validRexReply(request, encoded.result) && validMutationAck(request, encoded.result) && validViewReply(request.command, encoded.result, request.args) && (request.command !== "list_chats" || validDiscoveryPage(encoded.result, request.args)) && (request.command !== "history" || validHistoryPage(encoded.result, request.args))))) return frame;
   } catch (error) {
     if (error instanceof FrameSizeError) { code = "too_large"; message = "Response exceeds IPC limit"; }
   }

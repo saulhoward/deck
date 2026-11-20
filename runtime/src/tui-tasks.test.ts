@@ -15,7 +15,7 @@ import type { TuiRequest, ChatListItem } from "./generated/contracts.js";
 const hub = "12345678-1234-4234-8234-123456789abc";
 async function fixture() {
   const local = await clientEnv(); const requests: any[] = [];
-  const flags = { managed: false, badManagedAck: false, phase1: false, badBriefAck: false, legacyBriefHub: false, loseCreateOnce: false, offlineReadsAfterCreate: false, noRex: false, loseCreate: false, loseOpen: false, badSelect: false, badList: false, sparse: false, badRex: false };
+  const flags = { loseManagedOpenOnce: false, managedOpen: false, parentRex: false, badParentMachine: false, badParentCwd: false, badOpenAck: false, managed: false, badManagedAck: false, phase1: false, badBriefAck: false, legacyBriefHub: false, loseCreateOnce: false, offlineReadsAfterCreate: false, noRex: false, loseCreate: false, loseOpen: false, badSelect: false, badList: false, sparse: false, badRex: false };
   const chats: ChatListItem[] = [
     { chatId: "1", kind: "main", title: "Main", machineId: "saved-worker", cwd: "/saved/main" },
     { chatId: "2", kind: "task", title: "Existing task", machineId: "other-worker", cwd: "/saved/task" },
@@ -28,7 +28,7 @@ async function fixture() {
     // Keep the lost-ACK case stale until its explicit retry. A fast successful
     // background read must not hide the disconnected rendering path.
     if (flags.offlineReadsAfterCreate && chats.some(c => c.chatId === "3") && (command === "status" || command === "history")) { response.destroy(); return; }
-    if (command === "status") result = { hubId: hub, hubGuard: 1, ...(flags.managed ? { managedChildren: 1 } : {}), ...(flags.phase1 ? { taskBrief: 1, hostInventory: 1 } : {}), ...(flags.noRex ? {} : { rexOpen: 1 }), rexStartup: 1, mainChatId: "1", chatId: flags.badSelect ? "1" : chat.chatId, binding: chat, tools: "offline", activity: { scheduling: "running", tasks: [{ record: { otherTaskText: "OTHER_TASK_CONTENT" }, state: {} }], submissions: [] } };
+    if (command === "status") result = { hubId: hub, hubGuard: 1, ...(flags.managed ? { managedChildren: 1 } : {}), ...(flags.managedOpen ? { managedChildOpen: 1 } : {}), ...(flags.phase1 ? { taskBrief: 1, hostInventory: 1 } : {}), ...(flags.noRex ? {} : { rexOpen: 1 }), rexStartup: 1, mainChatId: "1", chatId: flags.badSelect ? "1" : chat.chatId, binding: chat, tools: "offline", activity: { scheduling: "running", tasks: [{ record: { otherTaskText: "OTHER_TASK_CONTENT" }, state: {} }], submissions: [] } };
     else if (command === "history") result = { items: [{ id: Number(chat.chatId) * 100, kind: "deck.input", data: { text: `history for ${chat.chatId}` } }], next: String(Number(chat.chatId) * 100) };
     else if (command === "list_hosts") result = { sampledAtMs: 1, items: [{ machineId: "a".repeat(32), kind: "local", rex: true, connection: "local" }, { machineId: "b".repeat(32), kind: "worker", rex: true, connection: "offline" }] };
     else if (command === "list_chats") result = flags.badList ? { items: [chats[1], chats[0]] } : flags.sparse && !args.after ? { items: [], next: "1" } : { items: chats.filter((c) => Number(c.chatId) > Number(args.after ?? 0)) };
@@ -46,7 +46,16 @@ async function fixture() {
       if (flags.loseCreate || flags.loseCreateOnce) { flags.loseCreateOnce = false; response.destroy(); return; }
       flags.offlineReadsAfterCreate = false;
       result = { chatId: "3", ...(command === "create_task_brief" ? { brief: flags.badBriefAck ? {} : chats.find(c => c.chatId === "3")!.brief } : {}) };
-    } else if (command === "rex_status") result = { version: 1, hubId: hub, chatId: flags.badRex ? "1" : args.chatId, taskId: null, status: "unallocated", binding: null, previousBinding: null, bestEffort: true };
+    } else if (command === "rex_status") result = { version: 1, hubId: hub, chatId: flags.badRex ? "1" : args.chatId,
+      taskId: flags.parentRex ? "8" : null, status: flags.parentRex ? "allocated" : "unallocated",
+      binding: flags.parentRex ? { machineId: flags.badParentMachine ? "wrong-worker" : chat.machineId, cwd: flags.badParentCwd ? "/wrong" : chat.cwd,
+        server: "unix:///tmp/rex.sock", hostId: hub, instanceId: hub, sessionId: `session:${hub}`, windowId: `window:${hub}`, blockId: `block:${hub}`,
+        hubId: hub, chatId: args.chatId, taskId: "8", readiness: "not_checked" } : null, previousBinding: null, bestEffort: true };
+    else if (command === "open_managed_child") {
+      if (flags.loseOpen || flags.loseManagedOpenOnce) { flags.loseManagedOpenOnce = false; response.destroy(); return; }
+      result = { parentChatId: flags.badOpenAck ? "1" : args.chatId, childId: args.childId,
+        ack: { version: 1, chatId: args.childId, requestId: args.requestId, taskId: "9", status: "admitted", completion: "not_waited", bestEffort: true } };
+    }
     else if (command === "rex_inspect") result = { version: 1, hubId: hub, chatId: args.chatId, requestId: hub, taskId: null, startedAtMs: 1, finishedAtMs: 2, status: "unbound", observation: null };
     else if (command === "rex_open") {
       if (flags.loseOpen) { response.destroy(); return; }
@@ -56,7 +65,7 @@ async function fixture() {
     else if (command === "admit") result = { submissionId: "9" };
     else assert.fail(`Unexpected command ${command}`);
     // Binding projections do not contain their enclosing chat identity.
-    if (result?.binding) { result.binding = { ...result.binding }; delete result.binding.chatId; }
+    if (command === "status" && result?.binding) { result.binding = { ...result.binding }; delete result.binding.chatId; }
     response.end(JSON.stringify({ version: 1, id, ok: true, result }));
   });
   server.listen(0, "127.0.0.1"); await once(server, "listening"); const address = server.address(); assert.ok(address && typeof address !== "string");
@@ -442,5 +451,188 @@ test("real PTY: managed composer preserves unsubmitted form and displays persist
     const creates = f.requests.filter(r => r.command === "create_managed_child"); assert.equal(creates.length, 1);
     assert.deepEqual(creates[0].args, { requestId: creates[0].args.requestId, title: form.title, parentChatId: "2", problem: form.problem, description: form.description });
     assert.ok(!f.requests.some(r => ["admit", "rex_open", "create_task", "create_task_brief"].includes(r.command)));
+  } finally { await f.close(); }
+});
+
+for (const managed of [false, true]) test(`registered ${managed ? "managed" : "ordinary"} task TUI creates its own child, clears the exact draft before scoped open and remains in the parent`, async () => {
+  const f = await fixture(); Object.assign(f.flags, { managed: true, managedOpen: true, parentRex: true, phase1: true });
+  if (managed) f.chats[1]!.managedParentChatId = "1";
+  try {
+    const task = f.taskSession(); await task.registerStartup(hub, `block:${hub}`);
+    const form = { title: "Own child", managedParentChatId: "2", problem: " exact 日本語\n", description: "preserve trailing spaces  " };
+    const created = await task.handle({ version: 1, id: "create", action: "create", taskForm: form });
+    assert.equal(created.chatId, "2"); assert.equal(created.clientMode, "task"); assert.equal(created.draft, null);
+    assert.match(created.notice, /Child 3 created\. Child TUI opening/);
+    const calls = f.requests.filter(r => ["rex_status", "create_managed_child", "open_managed_child"].includes(r.command));
+    assert.deepEqual(calls.map(r => r.command), ["rex_status", "create_managed_child", "open_managed_child"]);
+    const { managedParentChatId, ...brief } = form;
+    assert.deepEqual(calls[1].args, { requestId: calls[1].args.requestId, parentChatId: managedParentChatId, ...brief });
+    assert.deepEqual(calls[2].args, { chatId: "2", childId: "3", requestId: calls[2].args.requestId, port: f.port });
+    assert.match(calls[2].args.requestId, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    assert.notEqual(calls[1].args.requestId, calls[2].args.requestId);
+    assert.ok(calls.every(r => r.hubId === hub));
+    for (let i = 0; i < 3; i++) assert.equal((await task.handle({ version: 1, id: `poll${i}`, action: "poll" })).chatId, "2");
+    await assert.rejects(task.handle({ version: 1, id: "retry", action: "retry" }), /No pending draft/);
+    assert.equal(f.requests.filter(r => r.command === "create_managed_child").length, 1);
+    assert.equal(f.requests.filter(r => r.command === "open_managed_child").length, 1);
+    assert.ok(!f.requests.some(r => ["rex_open", "create_task", "create_task_brief", "admit"].includes(r.command)));
+    assert.deepEqual(await new DraftStore(hub, f.local.env.DECK_CLIENT_STATE_DIRECTORY).list(), []);
+  } finally { await f.close(); }
+});
+
+for (const reason of ["capability", "unallocated", "machine", "cwd", "chat"] as const) test(`task child composer refuses ${reason} preflight before reserving a draft or creating anything`, async () => {
+  const f = await fixture(); Object.assign(f.flags, { managed: true, managedOpen: reason !== "capability", parentRex: reason !== "unallocated", phase1: true });
+  f.flags.badParentMachine = reason === "machine"; f.flags.badParentCwd = reason === "cwd"; f.flags.badRex = reason === "chat";
+  try {
+    const task = f.taskSession(); await task.registerStartup(hub, `block:${hub}`);
+    await assert.rejects(task.handle({ version: 1, id: "create", action: "create", taskForm: { title: "Must stay unsent", managedParentChatId: "2" } }));
+    assert.equal((await task.handle({ version: 1, id: "poll", action: "poll" })).draft, null);
+    assert.equal(f.requests.filter(r => r.command === "rex_status").length, reason === "capability" ? 0 : 1);
+    assert.ok(!f.requests.some(r => r.command.startsWith("create_") || ["open_managed_child", "rex_open", "admit"].includes(r.command)));
+    assert.deepEqual(await new DraftStore(hub, f.local.env.DECK_CLIENT_STATE_DIRECTORY).list(), []);
+    // A refused new form does not leave an in-memory reservation either.
+    Object.assign(f.flags, { managedOpen: true, parentRex: true, badParentMachine: false, badParentCwd: false, badRex: false });
+    await task.handle({ version: 1, id: "refresh", action: "poll" });
+    await assert.rejects(task.handle({ version: 1, id: "retry", action: "retry" }), /No pending draft/);
+    if (reason !== "capability") assert.equal((await task.handle({ version: 1, id: "create2", action: "create", taskForm: { title: "Now allowed", managedParentChatId: "2" } })).draft, null);
+  } finally { await f.close(); }
+});
+
+for (const badAck of [false, true]) test(`task own-child ${badAck ? "malformed" : "lost"} creation ACK retains exact saved request across polls/restart; explicit retry opens only after acknowledgement`, async () => {
+  const f = await fixture(); Object.assign(f.flags, { managed: true, managedOpen: true, parentRex: true, phase1: true, badManagedAck: badAck, loseCreateOnce: !badAck });
+  try {
+    const task = f.taskSession(); await task.registerStartup(hub, `block:${hub}`);
+    const form = { title: "Exact own child", managedParentChatId: "2", problem: "  exact\n日本語", description: "Own child brief" };
+    await assert.rejects(task.handle({ version: 1, id: "create", action: "create", taskForm: form }));
+    const store = new DraftStore(hub, f.local.env.DECK_CLIENT_STATE_DIRECTORY), saved = (await store.list())[0]!;
+    const path = join(store.directory, `${saved.requestId}.json`), bytes = await readFile(path);
+    assert.deepEqual((await store.load(saved.requestId)).request, { kind: "task", chatId: "2", requestId: saved.requestId, ...form });
+    for (let i = 0; i < 3; i++) await task.handle({ version: 1, id: `poll${i}`, action: "poll" });
+    await assert.rejects(task.handle({ version: 1, id: "replace", action: "create", taskForm: { ...form, title: "must not replace" } }), /Resolve saved/);
+    await assert.rejects(task.handle({ version: 1, id: "open", action: "childOpen", chatId: "3" }), /Resolve pending/);
+    assert.deepEqual(await readFile(path), bytes);
+    assert.equal(f.requests.filter(r => r.command === "create_managed_child").length, 1);
+    assert.equal(f.requests.filter(r => r.command === "open_managed_child").length, 0);
+    f.flags.badManagedAck = false; f.flags.parentRex = false; // Never re-preflight a saved creation identity.
+    const recovered = f.taskSession(); await recovered.registerStartup(hub, `block:${hub}`);
+    assert.equal((await recovered.handle({ version: 1, id: "poll", action: "poll" })).draft!.requestId, saved.requestId);
+    const done = await recovered.handle({ version: 1, id: "retry", action: "retry" });
+    assert.equal(done.chatId, "2"); assert.equal(done.draft, null); assert.match(done.notice, /Child 3 created/);
+    const creates = f.requests.filter(r => r.command === "create_managed_child"); assert.equal(creates.length, 2); assert.deepEqual(creates[0].args, creates[1].args);
+    assert.equal(f.requests.filter(r => r.command === "rex_status").length, 1);
+    assert.equal(f.requests.filter(r => r.command === "open_managed_child").length, 1);
+    assert.equal(f.chats.filter(c => c.chatId === "3").length, 1);
+    assert.deepEqual(await store.list(), []);
+  } finally { await f.close(); }
+});
+
+for (const badAck of [false, true]) test(`task child ${badAck ? "malformed open ACK" : "lost open ACK"} never recreates or reopens implicitly; childOpen retains parent snapshot`, async () => {
+  const f = await fixture(); Object.assign(f.flags, { managed: true, managedOpen: true, parentRex: true, phase1: true, loseOpen: !badAck, badOpenAck: badAck });
+  try {
+    const task = f.taskSession(); await task.registerStartup(hub, `block:${hub}`);
+    const created = await task.handle({ version: 1, id: "create", action: "create", taskForm: { title: "Created exactly once", managedParentChatId: "2" } });
+    assert.match(created.notice, /Child 3 created; same-session Rex open unconfirmed/); assert.match(created.notice, /:child-open 3/); assert.equal(created.draft, null);
+    const store = new DraftStore(hub, f.local.env.DECK_CLIENT_STATE_DIRECTORY); assert.deepEqual(await store.list(), []);
+    for (let i = 0; i < 3; i++) await task.handle({ version: 1, id: `poll${i}`, action: "poll" });
+    await assert.rejects(task.handle({ version: 1, id: "retry", action: "retry" }), /No pending draft/);
+    assert.equal(f.requests.filter(r => r.command === "open_managed_child").length, 1);
+    f.flags.loseOpen = false; f.flags.badOpenAck = false;
+    const opened = await task.handle({ version: 1, id: "open", action: "childOpen", chatId: "3" });
+    assert.match(opened.notice, /Child 3 TUI opening/); assert.equal(opened.chatId, "2"); assert.equal(opened.clientMode, "task");
+    const opens = f.requests.filter(r => r.command === "open_managed_child"); assert.equal(opens.length, 2);
+    assert.notEqual(opens[0].args.requestId, opens[1].args.requestId);
+    assert.deepEqual(opens[1].args, { ...opens[0].args, requestId: opens[1].args.requestId });
+    assert.equal(f.requests.filter(r => r.command === "create_managed_child").length, 1);
+    assert.equal(f.requests.filter(r => r.command === "rex_open").length, 0);
+    const reply = { version: 1, id: "open", ok: true, snapshot: opened };
+    assert.ok(validRequest({ version: 1, id: "open", action: "childOpen", chatId: "3" }));
+    assert.ok(validReply(reply, "open", hub, "2", "childOpen", "3", undefined, "task", "1"));
+    for (const patch of [{ chatId: "3", managedParentChatId: "2" }, { hubId: "11111111-1111-4111-8111-111111111111" }, { clientMode: "hub" }, { hubChatId: "3" }, { kind: "subagent", parentChatId: "1", inspectParentChatId: "1" }]) {
+      assert.equal(validReply({ ...reply, snapshot: { ...opened, ...patch } }, "open", hub, "2", "childOpen", "3", undefined, "task", "1"), false);
+    }
+    for (const target of [undefined, "1", "2", "9007199254740992"]) assert.equal(validReply(reply, "open", hub, "2", "childOpen", target), false);
+    for (const patch of [{ chatId: undefined }, { chatId: "0" }, { chatId: "9007199254740992" }, { text: "no" }, { taskForm: { title: "No", managedParentChatId: "2" } }, { after: "1" }]) assert.equal(validRequest({ version: 1, id: "open", action: "childOpen", chatId: "3", ...patch }), false);
+  } finally { await f.close(); }
+});
+
+test("own-parent creation and childOpen do not grant read-only inspectors or forged forms participation", async () => {
+  const f = await fixture(); Object.assign(f.flags, { managed: true, managedOpen: true, parentRex: true, phase1: true });
+  try {
+    const task = f.taskSession(); await task.registerStartup(hub, `block:${hub}`);
+    const readonly = f.taskSession(); await readonly.handle({ version: 1, id: "poll", action: "poll" });
+    const before = f.requests.length;
+    for (const parent of ["1", "3"]) await assert.rejects(task.handle({ version: 1, id: "forge", action: "create", taskForm: { title: "forged", managedParentChatId: parent } }), /locked/);
+    for (const request of [{ action: "create", taskForm: { title: "read only", managedParentChatId: "2" } }, { action: "childOpen", chatId: "3" }] as const) await assert.rejects(readonly.handle({ version: 1, id: "readonly", ...request }), /Read-only|Return to the hub/);
+    assert.equal(f.requests.length, before);
+    assert.deepEqual(await new DraftStore(hub, f.local.env.DECK_CLIENT_STATE_DIRECTORY).list(), []);
+  } finally { await f.close(); }
+});
+
+for (const loseOpen of [false, true]) test(`real PTY: registered parent :new-child defaults to self, refuses spoofed parent and ${loseOpen ? "recovers lost open explicitly" : "opens scoped child"} without switching chats`, { skip: !binary, timeout: 30_000 }, async () => {
+  const f = await fixture(); Object.assign(f.flags, { managed: true, managedOpen: true, parentRex: true, phase1: true, loseManagedOpenOnce: loseOpen });
+  try {
+    const form = { title: "PTYChild", managedParentChatId: "2", problem: "KEEP_PROBLEM", description: "KEEP_DESCRIPTION" };
+    const command = (text: string) => [{ keys: text }, { wait: "client idle" }, { keys: "\r" }];
+    const steps: object[] = [
+      { wait: "history for 2" }, { wait: "Rex startup registered" }, { keys: "\x1b" },
+      ...command(":new-child 1"), { wait: ":new-child can only use this agent as parent" },
+      ...command(":new-child"), { wait: "TASK BRIEF" }, { wait: '"managedParentChatId":"2"' },
+      { keys: "\x1b" }, { keys: "cc" }, { keys: "\x1b[200~" + JSON.stringify({ ...form, managedParentChatId: "1" }) + "\x1b[201~" }, { wait: "KEEP_DESCRIPTION" }, { keys: "\x1b" },
+      ...command(":send"), { wait: "form must create a managed child of this agent" }, { capture: "spoof" },
+      { keys: "cc" }, { keys: "\x1b[200~" + JSON.stringify(form) + "\x1b[201~" }, { wait: "KEEP_DESCRIPTION" }, { keys: "\x1b" },
+      ...command(":new-child"), { wait: "Resolve the current task form" }, { capture: "preserved" },
+      ...command(":send"), { wait: "Child 3 created" },
+    ];
+    if (loseOpen) steps.push({ wait: "same-session Rex open unconfirmed" }, ...command(":retry"), { wait: "No pending draft to retry" }, ...command(":child-open 3"), { wait: "Child 3 TUI opening" });
+    else steps.push({ wait: "Child TUI opening" });
+    steps.push({ wait: "history for 2" }, { keys: ":q\r" });
+    const child = spawn("python3", [resolve("scripts/tui-pty-test.py"), binary!, "agent", "--tui", "--port", String(f.port), "--task", "2", "--hub-id", hub, "--rex-allocation", hub], { env: { ...f.local.env, DECK_NODE: process.execPath, REX_BLOCK: `block:${hub}` } });
+    const closed = once(child, "close"); let out = "", errors = "";
+    child.stdout.on("data", c => out += String(c)); child.stderr.on("data", c => errors += String(c)); child.stdin.end(JSON.stringify(steps));
+    assert.equal((await closed)[0], 0, errors + out);
+    const screens = JSON.parse(out).screens;
+    for (const screen of [screens.spoof, screens.preserved]) { assert.match(screen, /KEEP_PROBLEM/); assert.match(screen, /KEEP_DESCRIPTION/); }
+    const creates = f.requests.filter(r => r.command === "create_managed_child"); assert.equal(creates.length, 1);
+    assert.deepEqual(creates[0].args, { requestId: creates[0].args.requestId, parentChatId: "2", title: form.title, problem: form.problem, description: form.description });
+    const opens = f.requests.filter(r => r.command === "open_managed_child"); assert.equal(opens.length, loseOpen ? 2 : 1);
+    assert.ok(opens.every(r => r.args.chatId === "2" && r.args.childId === "3" && r.args.port === f.port));
+    if (loseOpen) assert.notEqual(opens[0].args.requestId, opens[1].args.requestId);
+    assert.ok(f.requests.filter(r => ["status", "history"].includes(r.command)).every(r => r.args.chatId === "2"));
+    assert.equal(f.requests.filter(r => r.command === "rex_status").length, 1);
+    assert.ok(!f.requests.some(r => ["rex_open", "admit", "create_task", "create_task_brief", "list_chats"].includes(r.command)));
+    assert.deepEqual(await new DraftStore(hub, f.local.env.DECK_CLIENT_STATE_DIRECTORY).list(), []);
+  } finally { await f.close(); }
+});
+
+test("plain task client creates only its own child and opens the same-session route", async () => {
+  const f = await fixture(); Object.assign(f.flags, { managed: true, managedOpen: true, parentRex: true, phase1: true });
+  try {
+    const form = { title: "Plain child", managedParentChatId: "2", problem: "own child problem" };
+    const child = spawn(process.execPath, [fileURLToPath(new URL("./client.js", import.meta.url)), "--port", String(f.port), "--task", "2", "--hub-id", hub, "--rex-allocation", hub], { env: { ...f.local.env, REX_BLOCK: `block:${hub}` } });
+    const closed = once(child, "close"); child.stdout.resume(); let errors = ""; child.stderr.on("data", c => errors += String(c));
+    child.stdin.end(`/new ${JSON.stringify({ ...form, managedParentChatId: "1" })}\n/new ${JSON.stringify(form)}\n/child-open 3\n/exit\n`);
+    assert.equal((await closed)[0], 0, errors); assert.match(errors, /locked/);
+    const creates = f.requests.filter(r => r.command === "create_managed_child"), opens = f.requests.filter(r => r.command === "open_managed_child");
+    assert.equal(creates.length, 1); assert.equal(creates[0].args.parentChatId, "2"); assert.equal(opens.length, 2);
+    assert.ok(opens.every(r => r.args.chatId === "2" && r.args.childId === "3"));
+    assert.ok(!f.requests.some(r => ["rex_open", "admit", "create_task"].includes(r.command)));
+  } finally { await f.close(); }
+});
+
+test("real PTY: failed parent Rex preflight preserves editable child form without a saved/uncertain mutation", { skip: !binary, timeout: 30_000 }, async () => {
+  const f = await fixture(); Object.assign(f.flags, { managed: true, managedOpen: true, phase1: true });
+  try {
+    const child = spawn("python3", [resolve("scripts/tui-pty-test.py"), binary!, "agent", "--tui", "--port", String(f.port), "--task", "2", "--hub-id", hub, "--rex-allocation", hub], { env: { ...f.local.env, DECK_NODE: process.execPath, REX_BLOCK: `block:${hub}` } });
+    const closed = once(child, "close"); let out = "", errors = ""; child.stdout.on("data", c => out += String(c)); child.stderr.on("data", c => errors += String(c));
+    child.stdin.end(JSON.stringify([
+      { wait: "history for 2" }, { keys: "\x1b" }, { keys: ":new-child" }, { wait: "client idle" }, { keys: "\r" }, { wait: "TASK BRIEF" },
+      { keys: "PRESERVED_TITLE" }, { keys: "\x1b" }, { keys: ":send" }, { wait: "client idle" }, { keys: "\r" },
+      { wait: "Parent has no confirmed Rex allocation" }, { capture: "preserved" }, { keys: "i" }, { keys: "_EDITABLE" }, { wait: "_EDITABLE" },
+      { keys: "\x1b" }, { keys: ":cancel" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Unsubmitted task form cleared" }, { keys: ":q\r" },
+    ]));
+    assert.equal((await closed)[0], 0, errors + out); assert.match(JSON.parse(out).screens.preserved, /PRESERVED_TITLE/);
+    assert.doesNotMatch(JSON.parse(out).screens.preserved, /LOCKED/);
+    assert.ok(!f.requests.some(r => r.command.startsWith("create_") || ["open_managed_child", "rex_open", "admit"].includes(r.command)));
+    assert.deepEqual(await new DraftStore(hub, f.local.env.DECK_CLIENT_STATE_DIRECTORY).list(), []);
   } finally { await f.close(); }
 });

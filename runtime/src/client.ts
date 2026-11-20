@@ -124,10 +124,10 @@ async function main() {
   const mode = rexAllocationId ? "task" : "hub";
   const hubChatId = String(status.mainChatId);
   const participate = () => requireParticipation(mode, selected, hubChatId);
-  const create = (managed = false) => {
-    requireCreation(mode, selected, hubChatId);
-    if (managed) {
-      if (status.managedChildren !== 1 || status.hubGuard !== 1) throw new Error("Hub lacks managed children; no request sent");
+  const create = (managedParentChatId?: string) => {
+    requireCreation(mode, selected, hubChatId, managedParentChatId);
+    if (managedParentChatId !== undefined) {
+      if (status.managedChildren !== 1 || status.hubGuard !== 1 || (mode === "task" && status.managedChildOpen !== 1)) throw new Error("Hub lacks managed children; no request sent");
       return;
     }
     if (status.hubGuard !== 1 || status.rexOpen !== 1) throw new Error("Rex support is required to create a task; no request sent");
@@ -161,7 +161,7 @@ async function main() {
   const deliver = async (draft: Draft) => {
     participate();
     if (draft.chatId !== selected) throw new Error("Draft belongs to another chat");
-    if (draft.kind === "task") create(draft.managedParentChatId !== undefined);
+    if (draft.kind === "task") create(draft.managedParentChatId);
     await drafts.save(draft); // Never send until the complete private record is published.
     const method = draft.kind === "task" ? taskCreationCommand(draft) : draft.kind === "input" ? "admit" : "import_instructions";
     const { kind, chatId, ...args } = draft;
@@ -257,13 +257,29 @@ async function main() {
   const requireAcknowledged = () => {
     if (active) throw new Error("Retry or discard your unacknowledged request first");
   };
+  const openChild = async (childId: string) => {
+    participate(); requireAcknowledged();
+    if (status.managedChildOpen !== 1) throw new Error("Hub lacks same-session child opening; no request sent");
+    try {
+      const opened = await command("open_managed_child", { chatId: selected, childId, requestId: randomUUID(), port });
+      stdout.write(`${plain(JSON.stringify(opened))}\nChild TUI opening/reused in the parent's Rex session and saved directory; no model input submitted.\n`);
+    } catch (error) {
+      process.stderr.write(`Child Rex open unconfirmed. Inspect Rex, then /child-open ${childId} for an explicit attempt; do not repeat creation.\n`);
+      throw error;
+    }
+  };
   const createTask = async () => {
     const managed = active?.kind === "task" && active.managedParentChatId !== undefined;
-    create(managed);
+    create(active?.kind === "task" ? active.managedParentChatId : undefined);
     if (active?.kind === "task" && (active.problem !== undefined || active.description !== undefined) && status.taskBrief !== 1) throw new Error("Hub lacks task briefs; no request sent");
     const task = await deliver(active!);
     active = undefined;
     if (detached) return;
+    if (managed && mode === "task") {
+      stdout.write(`Child ${task.chatId} created. Parent chat remains selected.\n`);
+      await openChild(String(task.chatId));
+      return;
+    }
     stdout.write(`Task ${task.chatId} created. /select ${task.chatId} inspects read-only; participate in Rex.\n`);
     if (managed && status.rexOpen !== 1) stdout.write("No input submitted. Use deck agent --list and --resume NAME --here on the assigned host to chat.\n");
     else await runRex("open", String(task.chatId));
@@ -306,7 +322,7 @@ async function main() {
       if (!text) continue;
       try {
         if (text === "/exit") break;
-        if (text === "/help") { stdout.write("/status /activity /stop /older /tasks [more] /select CHAT_ID /hub /task TITLE /task-at JSON /new JSON /hosts /brief /instructions [load|TASK_ID] /rex [open|reopen|status|inspect] /draft /drafts /recover REQUEST_ID /retry /discard [REQUEST_ID] /exit\nEnter submits or steers. /instructions load replaces stored explicit instructions with saved-worker AGENTS.md, only while idle; admission is not application. /instructions reads source/task status without loading. Hub task inspection is read-only; /task creates and opens Rex. Rex task clients cannot list, create or switch tasks. Ctrl+C detaches. Answer previews are sampled/provisional; retained history is authoritative. This is plain line mode, not TUI.\n"); continue; }
+        if (text === "/help") { stdout.write("/status /activity /stop /older /tasks [more] /select CHAT_ID /hub /task TITLE /task-at JSON /new JSON /child-open CHAT_ID /hosts /brief /instructions [load|TASK_ID] /rex [open|reopen|status|inspect] /draft /drafts /recover REQUEST_ID /retry /discard [REQUEST_ID] /exit\nEnter submits or steers. /instructions load replaces stored explicit instructions with saved-worker AGENTS.md, only while idle; admission is not application. /instructions reads source/task status without loading. Hub task inspection is read-only; /task creates and opens Rex. Rex task clients cannot list or switch tasks. /new with this chat's managedParentChatId creates a direct child in its Rex session; /child-open explicitly opens a direct child. Ctrl+C detaches. Answer previews are sampled/provisional; retained history is authoritative. This is plain line mode, not TUI.\n"); continue; }
         if (text === "/draft") {
           if (!active) throw new Error("No active unacknowledged draft");
           const preview = plain(JSON.stringify(active));
@@ -404,10 +420,15 @@ async function main() {
         }
         if (text === "/retry" && active?.kind === "instructions") { await importInstructions(); continue; }
         if (text === "/retry" && active?.kind === "task") { await createTask(); continue; }
+        if (text.startsWith("/child-open ")) { await openChild(text.slice(12).trim()); continue; }
         if (text.startsWith("/new ")) {
           requireAcknowledged();
           const form = parseTaskForm(text.slice(5));
-          create(form.managedParentChatId !== undefined);
+          create(form.managedParentChatId);
+          if (mode === "task") {
+            const rex = await command("rex_status", { chatId: selected }), binding = object(status.binding), terminal = object(rex.binding);
+            if (rex.status !== "allocated" || terminal.chatId !== selected || terminal.machineId !== binding.machineId || terminal.cwd !== binding.cwd) throw new Error("Parent has no confirmed Rex allocation; open the parent in Rex first. No child created and no new-session fallback.");
+          }
           if (form.machineId) {
             if (status.hostInventory !== 1) throw new Error("Hub lacks registered-host inventory");
             const hosts = await command("list_hosts", {});

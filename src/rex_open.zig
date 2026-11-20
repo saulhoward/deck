@@ -17,6 +17,9 @@ fn number(value: V) f64 {
     return if (value == .integer) @floatFromInt(value.integer) else value.float;
 }
 pub fn validArgs(command: []const u8, args: V) bool {
+    if (std.mem.eql(u8, command, "open_managed_child")) {
+        return contracts.validOpenManagedChildArgs(args) and @import("managed_child.zig").precedes(field(args, "chatId"), field(args, "childId"));
+    }
     if (std.mem.eql(u8, command, "rex_adopt")) {
         if (!contracts.validRexAdoptArgs(args) or !safeId(field(args, "chatId"))) return false;
         const target = field(args, "target");
@@ -38,8 +41,14 @@ pub fn validArgs(command: []const u8, args: V) bool {
     return true;
 }
 pub fn validReply(command: []const u8, args: V, hub_id: V, result: V) bool {
-    if (!std.mem.eql(u8, command, "rex_open") and !std.mem.eql(u8, command, "rex_adopt") and !std.mem.eql(u8, command, "rex_status") and !std.mem.eql(u8, command, "rex_inspect")) return true;
-    if (!contracts.validRexUuid(hub_id) or !validArgs(command, args) or !equal(field(args, "chatId"), field(result, "chatId"))) return false;
+    if (!std.mem.eql(u8, command, "open_managed_child") and !std.mem.eql(u8, command, "rex_open") and !std.mem.eql(u8, command, "rex_adopt") and !std.mem.eql(u8, command, "rex_status") and !std.mem.eql(u8, command, "rex_inspect")) return true;
+    if (!contracts.validRexUuid(hub_id) or !validArgs(command, args)) return false;
+    if (std.mem.eql(u8, command, "open_managed_child")) {
+        if (!contracts.validOpenManagedChildAck(result)) return false;
+        const ack = field(result, "ack");
+        return equal(field(args, "chatId"), field(result, "parentChatId")) and equal(field(args, "childId"), field(result, "childId")) and equal(field(args, "childId"), field(ack, "chatId")) and equal(field(args, "requestId"), field(ack, "requestId")) and safeId(field(ack, "taskId"));
+    }
+    if (!equal(field(args, "chatId"), field(result, "chatId"))) return false;
     if (std.mem.eql(u8, command, "rex_adopt")) return contracts.validRexAdoptAck(result) and equal(field(result, "hubId"), hub_id) and equal(field(args, "requestId"), field(result, "requestId")) and safeId(field(result, "taskId"));
     if (std.mem.eql(u8, command, "rex_open")) return contracts.validRexOpenAck(result) and equal(field(args, "requestId"), field(result, "requestId")) and safeId(field(result, "taskId"));
     if (!equal(field(result, "hubId"), hub_id)) return false;
