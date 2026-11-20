@@ -43,7 +43,8 @@ const help =
     \\Enter                 send (waits for request slot); Esc cancels wait
     \\Shift-Enter/Ctrl-J     newline in Insert mode
     \\:sidebar-toggle       override responsive right sidebar visibility
-    \\:tools                full tool inventory; j/k, PgUp/PgDn, g/G, Esc
+    \\:tools                full tool inventory and loaded context; j/k to scroll
+    \\:agentsmd             load ~/.codex/AGENTS.md from this chat's machine
     \\
     \\:new                  hub only: JSON task-brief composer (Ctrl-S creates)
     \\:hosts                registered hosts; Enter selects host for new task
@@ -220,10 +221,9 @@ fn lineLimit(ctx: fw.DrawContext, surface: fw.Surface, x: u16, y: u16, text: []c
 fn isBash(part: wire.TuiPart) bool {
     return std.mem.eql(u8, part.toolName orelse "", "bash");
 }
-fn toolPartRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), part: wire.TuiPart, width: u16, count: usize) !void {
+fn toolPartRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), part: wire.TuiPart, width: u16) !void {
     const name = part.toolName orelse "tool";
-    const repeat = if (count > 1) try std.fmt.allocPrint(ctx.arena, " (×{d})", .{count}) else "";
-    try rows(ctx, list, try std.fmt.allocPrint(ctx.arena, "{s}{s}{s}", .{ name, repeat, if (part.isError orelse false) " (error)" else "" }), width, dim);
+    try rows(ctx, list, try std.fmt.allocPrint(ctx.arena, "{s}{s}", .{ name, if (part.isError orelse false) " (error)" else "" }), width, dim);
     if (part.text.len == 0) return;
     var output: std.ArrayList(Row) = .empty;
     try rows(ctx, &output, part.text, width, dim);
@@ -245,52 +245,48 @@ fn legacyTool(text: []const u8) wire.TuiPart {
     return .{ .kind = .tool, .toolName = if (failed) header[0 .. header.len - " (error)".len] else header, .isError = failed, .text = if (split < text.len) text[split + 1 ..] else "" };
 }
 fn toolRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), text: []const u8, width: u16) !void {
-    try toolPartRows(ctx, list, legacyTool(text), width, 1);
+    try toolPartRows(ctx, list, legacyTool(text), width);
 }
 fn thinkingRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), tokens: i64, width: u16) !void {
     if (tokens > 0) try rows(ctx, list, try std.fmt.allocPrint(ctx.arena, "[thinking: {d} tokens]", .{tokens}), width, dim);
 }
-// Only explicitly typed bash requests / hidden-only assistant entries are
-// transparent to a bash run. Actual text, notices and other tools are barriers.
-fn bashRequests(entry: wire.TuiEntry) bool {
-    if (entry.role != .assistant) return false;
-    const parts = entry.parts orelse return false;
-    for (parts) |part| {
-        if (part.kind == .text and part.text.len == 0) continue;
-        if (part.kind != .tool_request or !isBash(part)) return false;
-    }
-    return true;
+fn hasMessage(entry: wire.TuiEntry) bool {
+    if (entry.role == .tool) return false;
+    // A task-to-task message has a note role (not human input) and typed text.
+    const parts = entry.parts orelse return entry.role != .note and entry.text.len > 0;
+    for (parts) |part| if (part.kind == .text and part.text.len > 0) return true;
+    return false;
 }
-const BashRun = struct {
-    count: usize = 0,
-    latest: ?wire.TuiPart = null,
-    thinking: i64 = 0,
-    requests: std.ArrayList(wire.TuiPart) = .empty,
-    fn add(self: *BashRun, part: wire.TuiPart) void {
-        self.count += 1;
-        self.latest = part;
-        self.requests.clearRetainingCapacity();
+
+// One replaceable activity item, never part of retained page layout. A real
+// message is a boundary even when its entry also has usage or tool metadata.
+fn transientRows(ctx: fw.DrawContext, entries: []const wire.TuiEntry, preview: []const u8, width: u16) ![]const Row {
+    var list: std.ArrayList(Row) = .empty;
+    if (preview.len > 0) {
+        try rows(ctx, &list, preview, width, dim);
+        return list.items;
     }
-    fn flush(self: *BashRun, ctx: fw.DrawContext, list: *std.ArrayList(Row), width: u16, assistant: []const u8) !void {
-        const first = list.items.len;
-        if (self.latest) |part| {
-            try toolPartRows(ctx, list, part, width, self.count);
-            list.items[first].speaker = "·";
-        }
-        // A request AFTER the latest completed result is still pending: don't
-        // hide it or count it as an output. Requests consumed by results vanish.
-        for (self.requests.items) |part| try rows(ctx, list, part.text, width, dim);
-        try thinkingRows(ctx, list, self.thinking, width);
-        if (list.items.len > first) {
-            if (self.latest == null) list.items[first].speaker = assistant;
-            try list.append(ctx.arena, .{});
-        }
-        self.count = 0;
-        self.latest = null;
-        self.thinking = 0;
-        self.requests.clearRetainingCapacity();
+    var i = entries.len;
+    while (i > 0) {
+        i -= 1;
+        const entry = entries[i];
+        if (hasMessage(entry)) break;
+        if (entry.parts) |parts| {
+            var j = parts.len;
+            while (j > 0) {
+                j -= 1;
+                const part = parts[j];
+                if (part.kind == .tool) {
+                    try toolPartRows(ctx, &list, part, width);
+                } else if (part.text.len > 0) try rows(ctx, &list, part.text, width, dim);
+                if (list.items.len > 0) return list.items;
+            }
+        } else if (entry.role == .tool) try toolRows(ctx, &list, entry.text, width) else if (entry.text.len > 0) try rows(ctx, &list, entry.text, width, dim);
+        if (list.items.len == 0) try thinkingRows(ctx, &list, entry.thinkingTokens orelse 0, width);
+        if (list.items.len > 0) break;
     }
-};
+    return list.items;
+}
 fn messageRows(ctx: fw.DrawContext, chat: *std.ArrayList(Row), entry: wire.TuiEntry, width: u16, assistant: []const u8) !void {
     const user = entry.role == .user;
     if (user) {
@@ -304,8 +300,8 @@ fn messageRows(ctx: fw.DrawContext, chat: *std.ArrayList(Row), entry: wire.TuiEn
             const part = parts[index];
             index += 1;
             switch (part.kind) {
-                .notice, .tool_request => try rows(ctx, chat, part.text, width, dim),
-                .tool => try toolPartRows(ctx, chat, part, width, 1),
+                .tool_request, .tool => {},
+                .notice => if (entry.role == .note or std.mem.eql(u8, part.text, "[view clipped]")) try rows(ctx, chat, part.text, width, dim),
                 .text => {
                     // Adjacent text blocks form one Markdown document (fences
                     // and tables may span blocks). Notices never enter Markdown.
@@ -319,10 +315,7 @@ fn messageRows(ctx: fw.DrawContext, chat: *std.ArrayList(Row), entry: wire.TuiEn
                 },
             }
         }
-    } else if (entry.role == .assistant or user) {
-        for (try Markdown.render(ctx, entry.text, width, base)) |cells| try chat.append(ctx.arena, .{ .cells = cells });
-    } else if (entry.role == .tool) try toolRows(ctx, chat, entry.text, width) else try rows(ctx, chat, entry.text, width, dim);
-    if (entry.role == .assistant) try thinkingRows(ctx, chat, entry.thinkingTokens orelse 0, width);
+    } else for (try Markdown.render(ctx, entry.text, width, base)) |cells| try chat.append(ctx.arena, .{ .cells = cells });
     if (chat.items.len == first) {
         if (!user) return; // Hidden/non-text-only entries produce no filler.
         try chat.append(ctx.arena, .{});
@@ -334,29 +327,7 @@ fn messageRows(ctx: fw.DrawContext, chat: *std.ArrayList(Row), entry: wire.TuiEn
     if (user) try chat.append(ctx.arena, .{});
 }
 fn chatRows(ctx: fw.DrawContext, chat: *std.ArrayList(Row), entries: []const wire.TuiEntry, width: u16, assistant: []const u8) !void {
-    var bash: BashRun = .{};
-    for (entries) |entry| {
-        if (bashRequests(entry)) {
-            for (entry.parts.?) |part| if (part.kind == .tool_request) try bash.requests.append(ctx.arena, part);
-            bash.thinking += entry.thinkingTokens orelse 0;
-            continue;
-        }
-        if (entry.role == .tool) {
-            const legacy = [_]wire.TuiPart{legacyTool(entry.text)};
-            for (entry.parts orelse &legacy) |part| {
-                if (part.kind == .tool and isBash(part)) {
-                    bash.add(part);
-                } else {
-                    try bash.flush(ctx, chat, width, assistant);
-                    try messageRows(ctx, chat, .{ .id = entry.id, .role = .tool, .text = "", .parts = &.{part} }, width, assistant);
-                }
-            }
-        } else {
-            try bash.flush(ctx, chat, width, assistant);
-            try messageRows(ctx, chat, entry, width, assistant);
-        }
-    }
-    try bash.flush(ctx, chat, width, assistant);
+    for (entries) |entry| if (hasMessage(entry)) try messageRows(ctx, chat, entry, width, assistant);
 }
 fn historyPageRows(ctx: fw.DrawContext, entries: []const wire.TuiEntry, width: u16, assistant: []const u8) ![]const Row {
     var page: std.ArrayList(Row) = .empty;
@@ -442,16 +413,40 @@ fn subagentRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), sample: ?wire.Su
     }
     if (overflow) try list.append(ctx.arena, .{ .text = try std.fmt.allocPrint(ctx.arena, "{d}{s} more", .{ children.items.len - count, if (children.hasMore) "+" else "" }), .style = dim });
 }
+// Activity is a sample, not tool availability or proof of execution. Promote
+// active names so a busy server is visible even when the catalog overflows.
+fn contextRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), inv: wire.ToolInventory, active: []const []const u8, width: u16, heading: vaxis.Style) !void {
+    for (active) |name| {
+        const label = blk: {
+            for (inv.mcp) |profile| for (profile.tools) |tool| {
+                if (profile.state == .enabled and std.mem.eql(u8, tool.alias, name)) break :blk try std.fmt.allocPrint(ctx.arena, "{s} · {s}/{s}", .{ @tagName(profile.location), profile.profileId, tool.name });
+            };
+            for (inv.builtins) |tool| if (std.mem.eql(u8, tool.name, name)) break :blk try std.fmt.allocPrint(ctx.arena, "{s} · {s}", .{ @tagName(tool.location), name });
+            continue;
+        };
+        try rows(ctx, list, try std.fmt.allocPrint(ctx.arena, "● {s}", .{label}), width, Theme.green);
+    }
+    if (inv.agentsMdLoaded == true) try rows(ctx, list, "AGENTS.md loaded", width, dim);
+    if (inv.loadedSkills) |skills| {
+        try rows(ctx, list, "LOADED SKILLS", width, heading);
+        for (skills) |skill| try rows(ctx, list, try std.fmt.allocPrint(ctx.arena, "{s} · {s}", .{ @tagName(skill.scope), skill.name }), width, dim);
+    }
+}
+
 // Compact sidebar and expanded inventory share one projection. Compact rows
 // never claim clipped data is complete: the sidebar counts omitted rows.
-fn inventoryRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), snapshot: ?wire.TuiSnapshot, width: u16, compact: bool) !void {
+fn inventoryRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), snapshot: ?wire.TuiSnapshot, width: u16, compact: bool, fresh: bool) !void {
+    const heading = if (compact) Theme.sidebar_heading else accent;
+    const warning = if (compact) dim else Theme.orange;
+    const normal = if (compact) dim else base;
     const inventory = if (snapshot) |s| s.toolInventory else null;
     const inv = inventory orelse {
         const unsupported = if (snapshot) |s| s.toolInventoryStatus == .unsupported else false;
-        try rows(ctx, list, if (unsupported) "Inventory unsupported by hub" else "Inventory unavailable", width, Theme.orange);
+        try rows(ctx, list, if (unsupported) "Inventory unsupported by hub" else "Inventory unavailable", width, warning);
         try rows(ctx, list, "Unknown, not an empty tool list.", width, dim);
         return;
     };
+    try contextRows(ctx, list, inv, if (fresh and snapshot.?.activityKnown) snapshot.?.activeTools orelse &.{} else &.{}, width, heading);
     if (!compact) {
         try rows(ctx, list, "Execution location: hub = central Deck host; worker local = this chat's assigned machine, not necessarily this terminal.", width, dim);
         if (inv.hubMachineId) |id| try rows(ctx, list, try std.fmt.allocPrint(ctx.arena, "Hub machine: {s}", .{id}), width, dim);
@@ -459,7 +454,7 @@ fn inventoryRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), snapshot: ?wire
         try list.append(ctx.arena, .{});
     }
     if (inv.mcp.len == 0) {
-        try rows(ctx, list, "MCP SERVERS", width, accent);
+        try rows(ctx, list, "MCP SERVERS", width, heading);
         try rows(ctx, list, "No profiles for this chat", width, dim);
         try list.append(ctx.arena, .{});
     }
@@ -469,14 +464,14 @@ fn inventoryRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), snapshot: ?wire
             count += 1;
         };
         if (count == 0) continue;
-        try rows(ctx, list, if (location == .hub) "MCP · HUB" else "MCP · WORKER LOCAL", width, accent);
+        try rows(ctx, list, if (location == .hub) "MCP · HUB" else "MCP · WORKER LOCAL", width, heading);
         for ([_]@FieldType(wire.InventoryMcpProfile, "state"){ .enabled, .not_granted, .unavailable }) |state| {
             for (inv.mcp) |profile| {
                 if (profile.location != location or profile.state != state) continue;
                 const style = switch (state) {
-                    .enabled => base,
+                    .enabled => normal,
                     .not_granted => dim,
-                    .unavailable => Theme.orange,
+                    .unavailable => warning,
                 };
                 const label = switch (state) {
                     .enabled => "enabled",
@@ -518,8 +513,8 @@ fn inventoryRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), snapshot: ?wire
             .worker => "BUILT-IN · WORKER LOCAL",
             .hub => "BUILT-IN · HUB",
             .environment => "ENVIRONMENT TOOLS",
-        }, width, accent);
-        try rows(ctx, list, names.items, width, base);
+        }, width, heading);
+        try rows(ctx, list, names.items, width, normal);
         try list.append(ctx.arena, .{});
     }
     if (inv.builtins.len == 0) try rows(ctx, list, "No non-MCP model tools", width, dim);
@@ -527,8 +522,7 @@ fn inventoryRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), snapshot: ?wire
     try rows(ctx, list, if (compact) "Shell also exposes host commands." else "MCP is not the whole tool surface. File/shell and hub coordination tools above are separate. When bash or another execution tool is offered, host programs (e.g. git, compilers, tests) are accessible through it subject to that host's permissions and installed software; these are not separate MCP servers or an enumerated command allowlist.", width, dim);
 }
 
-// Project one bounded bottom-aligned block. Full :tools retains its own palette;
-// only the sidebar gets neutral headings and grey text, including error states.
+// One bottom-aligned block. Availability is neutral; only observed use is green.
 fn sidebarRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), snapshot: ?wire.TuiSnapshot, width: u16, height: u16, online: bool, fresh: bool) !void {
     if (height < 12) return;
     if (height >= 16) {
@@ -538,16 +532,13 @@ fn sidebarRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), snapshot: ?wire.T
     }
     try list.append(ctx.arena, .{ .text = if (online) "#TOOLS" else "#TOOLS · STALE", .style = Theme.sidebar_heading });
     var inventory: std.ArrayList(Row) = .empty;
-    try inventoryRows(ctx, &inventory, snapshot, width, true);
+    try inventoryRows(ctx, &inventory, snapshot, width, true, fresh);
     // Rows 0..5 belong to identity/spacing; reserve a blank bottom row
     // above the full-width rule and two footer rows.
     const budget = height - 10 - list.items.len;
     const overflow = inventory.items.len > budget;
     const count = @min(inventory.items.len, budget - @intFromBool(overflow));
-    for (inventory.items[0..count]) |row| try list.append(ctx.arena, .{
-        .text = row.text,
-        .style = if (std.meta.eql(row.style, accent)) Theme.sidebar_heading else dim,
-    });
+    try list.appendSlice(ctx.arena, inventory.items[0..count]);
     if (overflow) try list.append(ctx.arena, .{ .text = try std.fmt.allocPrint(ctx.arena, "{d} more rows", .{inventory.items.len - count}), .style = dim });
 }
 
@@ -617,6 +608,8 @@ const Model = struct {
     shown_transport: TransportStatus = .quiet,
     worker_transport: bool = false,
     uncertain: bool = false,
+    // An import and its retry/discard never own the user's unsent editor text.
+    context_draft: bool = false,
     online: bool = false,
     notice: [1024]u8 = undefined,
     notice_len: usize = 0,
@@ -755,7 +748,7 @@ const Model = struct {
         }
         const newest_rows = if (pages.len > 0) pages[0].rows else active.len;
         var total = self.rendered_rows + if (self.pad_newest) height -| newest_rows else 0;
-        if (total == 0) {
+        if (total == 0 and fallback.len != 0) {
             var hint: std.ArrayList(Row) = .empty;
             try rows(ctx, &hint, fallback, width, dim);
             active = hint.items;
@@ -794,7 +787,7 @@ const Model = struct {
     fn locked(self: *Model) bool {
         if (self.queued_send) return true;
         if (self.state()) |s| if (s.draft != null) return true;
-        if (self.bridge.pending) |p| if (p.action == .send or p.action == .retry or p.action == .discard or p.action == .create or p.action == .select) return true;
+        if (self.bridge.pending) |p| if (p.action == .send or p.action == .retry or p.action == .discard or p.action == .agentsmd or p.action == .create or p.action == .select) return true;
         return self.uncertain or self.snapshot == null or self.bridge.failed;
     }
     fn transportStatus(self: *Model, now: std.Io.Timestamp) TransportStatus {
@@ -970,8 +963,8 @@ const Model = struct {
         if (action == .send and self.queued_send) return; // Repeated Enter is not another message.
         if (action == .hosts and !self.canList()) return;
         if (action == .send and self.task_form) return self.submitTaskForm();
-        if ((action == .send or action == .retry or action == .discard or action == .stop or action == .configure) and !self.canWrite()) return;
-        if (self.settings_uncertain and (action == .send or action == .retry)) {
+        if ((action == .send or action == .retry or action == .discard or action == .stop or action == .configure or action == .agentsmd) and !self.canWrite()) return;
+        if (self.settings_uncertain and (action == .send or action == .retry or action == .agentsmd)) {
             self.note("Settings outcome unconfirmed; wait for a fresh observation before input.");
             return;
         }
@@ -979,8 +972,8 @@ const Model = struct {
             self.note("Client bridge lost; issued outcome unconfirmed. Detach and inspect saved drafts; no replay.");
             return;
         }
-        if (action == .send and self.locked()) {
-            self.note("Saved/unconfirmed request locked: :retry or :discard; instruction drafts use --no-tui");
+        if ((action == .send or action == .agentsmd) and self.locked()) {
+            self.note("Saved/unconfirmed request locked: :retry or :discard; workspace instruction drafts use --no-tui");
             return;
         }
         if (action == .send and std.mem.trim(u8, self.editor.text.items, " \t\r\n").len == 0) return;
@@ -997,6 +990,7 @@ const Model = struct {
         }
         if (try self.bridge.request(action, if (action == .send) self.editor.text.items else null, if (action == .poll) (self.scroll > 0 or self.history_browsing) else null)) {
             self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake);
+            if (action == .agentsmd) self.context_draft = true;
             if (action == .rexStatus or action == .rexInspect or action == .rexOpen) self.rex_view = true;
             if (action == .send or action == .retry or action == .stop or action == .rexOpen) {
                 if (self.terminal_status) |status| status.presentation.invalidate();
@@ -1045,7 +1039,7 @@ const Model = struct {
         } else if (std.mem.eql(u8, cmd, "hub") or std.mem.eql(u8, cmd, "main")) {
             if (self.state()) |s| try self.selectChat(s.hubChatId);
         } else if (std.mem.eql(u8, cmd, "rex") or std.mem.eql(u8, cmd, "rex status")) try self.issue(.rexStatus) else if (std.mem.eql(u8, cmd, "rex inspect")) try self.issue(.rexInspect) else if (std.mem.eql(u8, cmd, "rex open") or std.mem.eql(u8, cmd, "rex reopen")) try self.issue(.rexOpen) else if (std.mem.eql(u8, cmd, "model")) try self.issue(.models) else if (std.mem.eql(u8, cmd, "q") or std.mem.eql(u8, cmd, "quit")) self.quit(ctx, false) else if (std.mem.eql(u8, cmd, "q!")) self.quit(ctx, true) else if (std.mem.eql(u8, cmd, "help")) self.help_visible = true else {
-            const action: ?Action = if (std.mem.eql(u8, cmd, "send")) .send else if (std.mem.eql(u8, cmd, "retry")) .retry else if (std.mem.eql(u8, cmd, "discard")) .discard else if (std.mem.eql(u8, cmd, "stop")) .stop else if (std.mem.eql(u8, cmd, "older")) .older else if (std.mem.eql(u8, cmd, "latest")) .latest else null;
+            const action: ?Action = if (std.mem.eql(u8, cmd, "send")) .send else if (std.mem.eql(u8, cmd, "agentsmd")) .agentsmd else if (std.mem.eql(u8, cmd, "retry")) .retry else if (std.mem.eql(u8, cmd, "discard")) .discard else if (std.mem.eql(u8, cmd, "stop")) .stop else if (std.mem.eql(u8, cmd, "older")) .older else if (std.mem.eql(u8, cmd, "latest")) .latest else null;
             if (action) |a| try self.issue(a) else self.note("Unknown command. :help shows the supported Vim and client commands.");
         }
         self.command_mode = false;
@@ -1354,13 +1348,16 @@ const Model = struct {
                         }
                         if (self.snapshot == null and s.draft != null) try self.editor.set(s.draft.?.text);
                         if (action == .send or action == .retry or action == .discard) {
-                            self.task_form = false;
                             self.uncertain = false;
-                            try self.editor.set("");
-                            self.scroll = 0;
+                            if (!self.context_draft) {
+                                self.task_form = false;
+                                try self.editor.set("");
+                                self.scroll = 0;
+                            }
                         }
+                        self.context_draft = if (s.draft) |d| d.kind == .instructions else false;
                         if ((action == .older and !automatic_older) or action == .latest) self.scroll = 0;
-                        if (action != .poll or self.snapshot == null) self.note(s.notice);
+                        if (action != .poll or self.state() == null or !std.mem.eql(u8, self.state().?.notice, s.notice)) self.note(s.notice);
                         if (self.snapshot) |old| old.deinit();
                         self.snapshot = response;
                         self.online = true;
@@ -1499,7 +1496,7 @@ const Model = struct {
             line(ctx, surface, 2, 1, try std.fmt.allocPrint(ctx.arena, "TOOLS · chat {s} · {s}", .{ if (s) |snap| snap.chatId else "?", if (self.online) "read only" else "STALE observation" }), Theme.orange, null, 0);
             line(ctx, surface, 2, 2, "Enabled = model-visible, not a health check.", dim, null, 0);
             var detail: std.ArrayList(Row) = .empty;
-            try inventoryRows(ctx, &detail, s, w - 4, false);
+            try inventoryRows(ctx, &detail, s, w - 4, false, self.freshActivity());
             const count: usize = h - 6;
             self.tools_height = count;
             self.tools_max = detail.items.len -| count;
@@ -1590,10 +1587,13 @@ const Model = struct {
         // Give the scroll indicator its own last chat line; do not cover an
         // error/admission notice or a retained message with it.
         const notice_y = upper - 1 - @as(u16, if (away) 1 else 0);
-        const chat_h = notice_y;
+        const transient: []const Row = if (s != null and !away) try transientRows(ctx, s.?.entries, if (self.freshActivity()) s.?.preview else "", layout.body) else &.{};
+        const shown = transient[0..@min(transient.len, (notice_y + 1) / 2)];
+        const chat_h = notice_y - @as(u16, @intCast(shown.len));
         self.chat_height = chat_h;
         const fallback = if (s == null) (if (self.bridge.failed) "Selected hub connection failed; no local fallback." else if (self.worker_transport) "Connecting to the selected hub via this worker…" else "Connecting to the selected hub…") else if (self.readOnly()) "Read-only inspection · :rex open to participate" else "Enter to send · Esc for Normal mode · :help";
-        for (try self.historyViewport(ctx, layout.body, chat_h, fallback), 0..) |row, y| {
+        const visible = try self.historyViewport(ctx, layout.body, chat_h, if (shown.len == 0) fallback else "");
+        for (visible, 0..) |row, y| {
             if (row.user) for (0..layout.main) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = Theme.user });
             var speaker_style = row.speaker_style;
             if (row.user) speaker_style.bg = Theme.user.bg;
@@ -1609,6 +1609,7 @@ const Model = struct {
                 }
             } else lineLimit(ctx, surface, layout.x, @intCast(y), row.text, row.style, null, 0, layout.x + layout.body);
         }
+        for (shown, 0..) |row, i| lineLimit(ctx, surface, layout.x, @intCast(visible.len + i), row.text, dim, null, 0, layout.x + layout.body);
         if (away) {
             const history_notice = if (self.loadingOlder()) "Loading older history…" else if (self.older_failed) "Older history unavailable · scroll up to retry" else if (self.history_browsing and self.scroll == self.scroll_max and !(if (s) |snap| snap.hasOlder else true)) "Start of history · :latest to return" else if (self.scrollback.newer_omitted) "Older history · newer pages trimmed · :latest to return" else if (historical or self.history_browsing) "Older history · :latest to return" else "Scrolled up · :latest to follow new messages";
             lineLimit(ctx, surface, 1, upper - 1, history_notice, accent, null, 0, right);
@@ -1640,10 +1641,6 @@ const Model = struct {
         const notice_right = if (self.command_mode and warning.len > 0) warning_x -| 1 else right;
         const notice = self.notice[0..self.notice_len];
         lineLimit(ctx, surface, 1, notice_y, notice, dim, null, 0, notice_right);
-        if (notice.len == 0) if (s) |snap| {
-            const preview = snap.preview[0 .. std.mem.indexOfScalar(u8, snap.preview, '\n') orelse snap.preview.len];
-            if (preview.len > 0) lineLimit(ctx, surface, layout.x, notice_y, try std.fmt.allocPrint(ctx.arena, "live · {s}", .{preview}), dim, null, 0, notice_right);
-        };
         var cursor_row: usize = 0;
         for (prompt.items, 0..) |row, i| if (self.editor.cursor >= row.offset) {
             cursor_row = i;
@@ -2016,7 +2013,7 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     try model.press(&ctx, .{ .codepoint = 'x', .text = "must not edit" });
     try Model.event(&model, &ctx, .paste_end);
     try std.testing.expectEqualStrings("", model.editor.text.items);
-    for ([_]Action{ .send, .retry, .discard, .stop }) |action| try model.issue(action);
+    for ([_]Action{ .send, .retry, .discard, .stop, .agentsmd }) |action| try model.issue(action);
     try std.testing.expect(bridge.pending == null);
     const inspect_surface = try Model.draw(&model, draw_ctx);
     try std.testing.expectEqualDeep(hub_bar.bg, inspect_surface.buffer[0].style.bg);
@@ -2252,12 +2249,7 @@ test "user panels pad full chat width, task footer uses brief, and filters canno
     try std.testing.expectEqualDeep(base.bg, surface.buffer[89].style.bg);
     try std.testing.expectEqualStrings("•", surface.buffer[2 * 140 + 2].char.grapheme);
     try std.testing.expectEqualDeep(base.fg, surface.buffer[5 * 140 + 4].style.fg);
-    const thinking = "[thinking: 27 tokens]";
-    for (thinking, 0..) |_, x| {
-        const cell = surface.buffer[6 * 140 + 4 + x];
-        try std.testing.expectEqualStrings(thinking[x..][0..1], cell.char.grapheme);
-        try std.testing.expectEqualDeep(dim.fg, cell.style.fg);
-    }
+    try std.testing.expect(std.mem.indexOf(u8, try testSurfaceText(draw_ctx.arena, surface), "[thinking:") == null);
     var footer: std.ArrayList(u8) = .empty;
     defer footer.deinit(a);
     for (surface.buffer[38 * 140 .. 39 * 140]) |cell| try footer.appendSlice(a, cell.char.grapheme);
@@ -2415,9 +2407,24 @@ test "tool inventory separates locations and grants, preserves unknown, and offe
     try std.testing.expect(std.mem.indexOf(u8, text, ":tools") == null);
     for ([_][]const u8{ "MCP · HUB", "MCP · WORKER LOCAL", "search · enabled (1)", "workspace · enabled (1)", "browser · not granted (1)", "old_revision · unavailable", "BUILT-IN · WORKER LOCAL", "read · write · edit · bash", "BUILT-IN · HUB", "task_list · subagent", "ENVIRONMENT TOOLS", "custom_environment_tool" }) |expected| try std.testing.expect(std.mem.indexOf(u8, text, expected) != null);
     ctx.max.height = 24;
-    try std.testing.expect(std.mem.indexOf(u8, try testSurfaceText(alloc, try Model.draw(&model, ctx)), "more rows") != null);
+    snap.activityKnown = true;
+    snap.activeTools = &.{ "bash", "mcp_lookup_alias", "mcp_browse_alias" };
+    snap.toolInventory.?.loadedSkills = &.{.{ .scope = .local, .name = "release" }};
+    snap.toolInventory.?.agentsMdLoaded = true;
+    const busy_surface = try Model.draw(&model, ctx);
+    const busy_text = try testSurfaceText(alloc, busy_surface);
+    for ([_][]const u8{ "● worker · bash", "● worker · workspace/lookup", "local · release", "AGENTS.md loaded", "more rows" }) |expected| try std.testing.expect(std.mem.indexOf(u8, busy_text, expected) != null);
+    try std.testing.expect(std.mem.indexOf(u8, busy_text, "browser/browse") == null);
+    const side_x = Theme.Layout.init(ctx.max.width.?, null).main + 2;
+    var green_rows: usize = 0;
+    for (0..busy_surface.size.height - 3) |y| {
+        if (std.meta.eql(Theme.green.fg, busy_surface.buffer[y * busy_surface.size.width + side_x].style.fg)) green_rows += 1;
+    }
+    try std.testing.expectEqual(2, green_rows);
     model.online = false;
-    try std.testing.expect(std.mem.indexOf(u8, try testSurfaceText(alloc, try Model.draw(&model, ctx)), "TOOLS · STALE") != null);
+    const stale_surface = try Model.draw(&model, ctx);
+    try std.testing.expect(std.mem.indexOf(u8, try testSurfaceText(alloc, stale_surface), "TOOLS · STALE") != null);
+    try testSidebarPalette(stale_surface, Theme.Layout.init(ctx.max.width.?, null));
     model.online = true;
     var event: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
     defer event.cmds.deinit(a);
@@ -2470,7 +2477,7 @@ fn testRowsText(a: std.mem.Allocator, rendered: []const Row) ![]const u8 {
     return text.items;
 }
 
-test "typed notices always use dim grey, literal message brackets stay white, hidden entries add no filler" {
+test "only message text persists; literal brackets stay white and latest notice is plain text" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -2487,26 +2494,22 @@ test "typed notices always use dim grey, literal message brackets stay white, hi
         .{ .id = 2, .role = .assistant, .text = "must not show", .parts = &.{} },
     };
     try chatRows(ctx, &rendered, entries, 80, "Δ");
-    try std.testing.expectEqual(7, rendered.items.len); // two literal rows, four notices, one gap
+    try std.testing.expectEqual(4, rendered.items.len); // two literal rows, truncation marker and a gap
+    try std.testing.expectEqualStrings("[view clipped]", rendered.items[2].text);
     for (rendered.items[0..2]) |row| for (row.cells.?) |cell| try std.testing.expectEqualDeep(base.fg, cell.style.fg);
-    for (rendered.items[2..6]) |row| {
-        try std.testing.expect(row.cells == null);
-        try std.testing.expectEqualDeep(dim.fg, row.style.fg);
-    }
-    try std.testing.expectEqualStrings("[thinking: 27 tokens]", rendered.items[5].text);
+    try std.testing.expectEqual(0, (try transientRows(ctx, entries, "", 80)).len);
     try std.testing.expect(std.mem.indexOf(u8, try testRowsText(a, rendered.items), "must not show") == null);
     // Notice wrapping does not route continuation lines through Markdown.
-    rendered.clearRetainingCapacity();
-    try chatRows(ctx, &rendered, &.{.{ .id = 3, .role = .assistant, .text = "", .parts = &.{.{ .kind = .notice, .text = "[a **long** generated notice that wraps]" }} }}, 10, "Δ");
-    try std.testing.expect(rendered.items.len > 3);
-    for (rendered.items[0 .. rendered.items.len - 1]) |row| {
+    const notice = try transientRows(ctx, &.{.{ .id = 3, .role = .assistant, .text = "", .parts = &.{.{ .kind = .notice, .text = "[a **long** generated notice that wraps]" }} }}, "", 10);
+    try std.testing.expect(notice.len > 3);
+    for (notice) |row| {
         try std.testing.expect(row.cells == null);
         try std.testing.expectEqualDeep(dim.fg, row.style.fg);
         try std.testing.expect(displayWidth(ctx, row.text) <= 10);
     }
 }
 
-test "six consecutive bash outputs collapse across requests and hidden reasoning to the latest eight rows" {
+test "one ephemeral activity is replaced by a new tool request, preview or real message" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -2522,27 +2525,26 @@ test "six consecutive bash outputs collapse across requests and hidden reasoning
     }
     var rendered: std.ArrayList(Row) = .empty;
     try chatRows(ctx, &rendered, entries.items, 80, "Δ");
-    try std.testing.expectEqualStrings("bash (×6)", rendered.items[0].text);
-    try std.testing.expectEqualStrings("final3", rendered.items[1].text);
-    try std.testing.expectEqualStrings("final10", rendered.items[8].text);
-    try std.testing.expectEqualStrings("[thinking: 12 tokens]", rendered.items[9].text);
-    try std.testing.expectEqual(11, rendered.items.len);
-    const text = try testRowsText(a, rendered.items);
-    try std.testing.expect(std.mem.indexOf(u8, text, "old") == null);
-    try std.testing.expect(std.mem.indexOf(u8, text, "tool requested") == null);
-    for (rendered.items[0..10]) |row| try std.testing.expectEqualDeep(dim.fg, row.style.fg);
-    // A pending request is visible and does not increment the completed count.
+    try std.testing.expectEqual(0, rendered.items.len);
+    const latest = try transientRows(ctx, entries.items, "", 80);
+    try std.testing.expectEqual(9, latest.len);
+    try std.testing.expectEqualStrings("bash", latest[0].text);
+    try std.testing.expectEqualStrings("final3", latest[1].text);
+    try std.testing.expectEqualStrings("final10", latest[8].text);
+    // A pending request replaces the previous result.
     try entries.append(a, .{ .id = 19, .role = .assistant, .text = "", .parts = &.{.{ .kind = .tool_request, .toolName = "bash", .text = "[tool requested: bash]" }} });
-    rendered.clearRetainingCapacity();
-    try chatRows(ctx, &rendered, entries.items, 80, "Δ");
-    try std.testing.expectEqualStrings("bash (×6)", rendered.items[0].text);
-    try std.testing.expectEqualStrings("[tool requested: bash]", rendered.items[9].text);
+    const pending = try transientRows(ctx, entries.items, "", 80);
+    try std.testing.expectEqual(1, pending.len);
+    try std.testing.expectEqualStrings("[tool requested: bash]", pending[0].text);
+    try std.testing.expectEqualStrings("streaming", (try transientRows(ctx, entries.items, "streaming", 80))[0].text);
+    try entries.append(a, .{ .id = 20, .role = .user, .text = "follow-up" });
+    try std.testing.expectEqual(0, (try transientRows(ctx, entries.items, "", 80)).len);
     // Rendering is pure: earlier results and canonical IDs are unchanged.
     try std.testing.expectEqualStrings("old output must disappear", entries.items[2].parts.?[0].text);
     try std.testing.expectEqual(18, entries.items[17].id);
 }
 
-test "bash runs stop at messages, other tools and notices, including multiple results per entry" {
+test "older pages render only the conversation; ephemeral bash tails stay bounded on resize" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -2559,12 +2561,13 @@ test "bash runs stop at messages, other tools and notices, including multiple re
     };
     var rendered: std.ArrayList(Row) = .empty;
     try chatRows(ctx, &rendered, entries, 80, "Δ");
-    try std.testing.expectEqualStrings("bash (×2)\nbody\n\nread\nfile body\n\nbash (×2)\nbody\n\nMessage boundary\n\nbash\nbody\n\n[retained notice]\n\nbash (×2) (error)\nlegacy latest\n\n", try testRowsText(a, rendered.items));
+    try std.testing.expectEqualStrings("Message boundary\n\n", try testRowsText(a, rendered.items));
+    try std.testing.expectEqualStrings("bash (error)\nlegacy latest\n", try testRowsText(a, try transientRows(ctx, entries, "", 80)));
     // Resizing bounds *visual* rows, including wide graphemes and final LF.
     const unicode = "界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界界\nlast\n";
     for ([_]u16{ 4, 10, 80 }) |width| {
         rendered.clearRetainingCapacity();
-        try toolPartRows(ctx, &rendered, .{ .kind = .tool, .toolName = "bash", .text = unicode, .clipped = true }, width, 1);
+        try toolPartRows(ctx, &rendered, .{ .kind = .tool, .toolName = "bash", .text = unicode, .clipped = true }, width);
         try std.testing.expect(rendered.items.len <= 9);
         try std.testing.expectEqualStrings("last", rendered.items[rendered.items.len - 1].text);
         for (rendered.items) |row| try std.testing.expect(displayWidth(ctx, row.text) <= width);

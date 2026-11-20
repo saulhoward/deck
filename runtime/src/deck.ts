@@ -158,14 +158,14 @@ export class DeckRuntime {
     const control = taskControl(current);
     registry.install(control);
     registry.install(foregroundSubagent(control));
-    if (options.hostFiles) registry.install(nativeFiles(options.hostFiles));
+    if (options.hostFiles) registry.install(nativeFiles(options.hostFiles, options.binding.machineId));
     const importer = instructionImport(options.hostFiles); registry.install(importer.extension);
     const rex = rexAllocation(options.hostFiles); registry.install(rex.extension);
     const reconciler = rexReconciliation(options.hostFiles); registry.install(reconciler.extension);
     const baseExtensions = registry.snapshot().installed();
     const catalog: McpCatalog = options.mcpCatalog === undefined ? {version:1,profiles:[]} : structuredClone(options.mcpCatalog);
     if(!validCatalog(catalog) || (catalog.profiles.length && !options.hostFiles)) throw new DeckError("invalid","Invalid MCP catalog or missing native host");
-    const installed = options.hostFiles ? mcpExtensions(catalog, options.hostFiles, current) : [];
+    const installed = options.hostFiles ? mcpExtensions(catalog, options.hostFiles, current, options.binding.machineId) : [];
     for(const extension of installed) registry.install(extension);
     const baseImplementation = bindImplementation(options.implementation ?? await defaultImplementation(), !!options.hostFiles);
     const implementation = catalog.profiles.length ? createHash("sha256").update(JSON.stringify(["deck.mcp.v1",baseImplementation,catalog])).digest("hex") : baseImplementation;
@@ -289,7 +289,9 @@ export class DeckRuntime {
       const agent = await chat.agent(context);
       const binding = await this.harness.snapshot(ChatDoc, chat.id, context);
       const grants = await this.harness.snapshot(McpGrantsDoc, chat.id, context);
-      return projectToolInventory(String(chat.id), agent, this.extensions.catalog, grants?.profiles ?? [], this.localMachineId, binding?.machineId, profile => this.mcpBindingAllowed(profile, binding?.machineId ?? ""));
+      return projectToolInventory(String(chat.id), agent, this.extensions.catalog, grants?.profiles ?? [], this.localMachineId, binding?.machineId, profile => this.mcpBindingAllowed(profile, binding?.machineId ?? ""), {
+        ...(binding?.loadedSkills?.length ? { loadedSkills: binding.loadedSkills } : {}), ...(binding?.userAgentsMdHash ? { agentsMdLoaded: true } : {}),
+      });
     });
   }
   async toolProfiles(id: string): Promise<McpGrantSnapshot> {
@@ -423,6 +425,7 @@ export class DeckRuntime {
           extensions: agent.extensions.map((extension) => extension.name),
           tools: agent.tools.map((tool) => tool.name), callable: agent.callable.map((tool) => tool.name),
           deferred: agent.deferred.map((tool) => tool.name),
+          ...(binding.userAgentsMdHash ? { userAgentsMdHash: binding.userAgentsMdHash } : {}),
           instructionsHash: agent.instructions === undefined ? null : createHash("sha256").update(agent.instructions).digest("hex"),
         };
         const capture = JSON.stringify({ version: 3, ...observations, implementation: this.implementation });
@@ -448,7 +451,7 @@ export class DeckRuntime {
 
   // Internal operator API only. Returns durable admission to a Pi task, not application
   // success. Callers keep requestId across lost replies and inspect/wait on that task.
-  importInstructions(id: string, requestId: string, signal?: AbortSignal, expectedBinding?: Binding): Promise<TaskId<InstructionImportResult>> {
+  importInstructions(id: string, requestId: string, signal?: AbortSignal, expectedBinding?: Binding, source?: "user"): Promise<TaskId<InstructionImportResult>> {
     return this.serial(async () => {
       signal?.throwIfAborted();
       if (typeof requestId !== "string" || !requestId || requestId.length > 200) throw new DeckError("invalid", "Invalid instruction import request ID");
@@ -456,7 +459,8 @@ export class DeckRuntime {
       return chat.commit(async (tx) => {
         const receipt = await tx.doc(InstructionRequest, chat.id, requestId, null);
         if (receipt.taskId) {
-          const original = (await tx.task(receipt.taskId as TaskId))?.input as { binding?: Binding } | undefined;
+          const original = (await tx.task(receipt.taskId as TaskId))?.input as { binding?: Binding; source?: "user" } | undefined;
+          if (source !== original?.source) throw new DeckError("conflict", "Instruction request ID already used for another source");
           if (expectedBinding && (original?.binding?.machineId !== expectedBinding.machineId || original?.binding?.cwd !== expectedBinding.cwd)) throw new DeckError("conflict", "Instruction import ID already used with another binding");
           return receipt.taskId as TaskId<InstructionImportResult>;
         }
@@ -467,7 +471,7 @@ export class DeckRuntime {
         if (!this.localFiles) throw new DeckError("offline", "Instruction import requires the assigned native worker");
         if (!await configurationIdle(tx, chat.id)) throw new DeckError("busy", "Conversation has unfinished work; stop/drain it before importing instructions");
         signal?.throwIfAborted();
-        const taskId = await tx.createTask(this.extensions.importInstructions, { binding: { machineId: binding.machineId, cwd: binding.cwd }, previousHash: instructionHash(agent.instructions) }, { ownership: { kind: "conversation" } });
+        const taskId = await tx.createTask(this.extensions.importInstructions, { ...(source ? { source } : {}), binding: { machineId: binding.machineId, cwd: binding.cwd }, previousHash: instructionHash(agent.instructions) }, { ownership: { kind: "conversation" } });
         receipt.taskId = taskId; return taskId;
       }, context);
     });

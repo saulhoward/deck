@@ -10,12 +10,22 @@ pub fn directory(native: Native, allocator: std.mem.Allocator, override: ?[]cons
         defer allocator.free(cwd);
         return std.fs.path.resolve(allocator, &.{ cwd, path });
     }
-    const home = try native.environ.getAlloc(allocator, "HOME");
-    defer allocator.free(home);
-    if (@import("builtin").os.tag == .macos) return std.fs.path.join(allocator, &.{ home, "Library", "Application Support", "deck" });
-    const xdg = native.environ.getAlloc(allocator, "XDG_STATE_HOME") catch return std.fs.path.join(allocator, &.{ home, ".local", "state", "deck" });
-    defer allocator.free(xdg);
-    return std.fs.path.join(allocator, &.{ xdg, "deck" });
+    return dataPath(native, allocator, "hubs/default");
+}
+
+pub fn clientDirectory(native: Native, a: std.mem.Allocator, override: ?[]const u8) ![]const u8 {
+    if (override) |dir| {
+        const base = try directory(native, a, dir);
+        defer a.free(base);
+        return std.fs.path.join(a, &.{ base, "client" });
+    }
+    return if (native.environ.getPosix("DECK_CLIENT_STATE_DIRECTORY")) |path| a.dupe(u8, path) else dataPath(native, a, "client");
+}
+
+fn dataPath(native: Native, allocator: std.mem.Allocator, suffix: []const u8) ![]const u8 {
+    const home = native.environ.getPosix("HOME") orelse return error.MissingHome;
+    if (!std.fs.path.isAbsolute(home)) return error.InvalidHome;
+    return std.fs.path.join(allocator, &.{ home, ".local/share/deck", suffix });
 }
 
 pub fn lock(io: Io, dir: Io.Dir) !Io.File {
@@ -102,6 +112,20 @@ pub fn load(io: Io, allocator: std.mem.Allocator, dir: Io.Dir) !std.json.Parsed(
     if (parsed.value.version != 1 or parsed.value.machine_id.len != 32) return error.InvalidConfig;
     for (parsed.value.machine_id) |byte| if (!std.ascii.isHex(byte)) return error.InvalidConfig;
     return parsed;
+}
+
+test "default hub and client roots are separate under HOME; explicit state still wins" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const vars = [_:null]?[*:0]const u8{ "HOME=/home/tester", "XDG_STATE_HOME=/old", "XDG_DATA_HOME=/other" };
+    const native: Native = .{ .io = std.testing.io, .environ = .{ .block = .{ .slice = &vars } } };
+    try std.testing.expectEqualStrings("/home/tester/.local/share/deck/hubs/default", try directory(native, a, null));
+    try std.testing.expectEqualStrings("/home/tester/.local/share/deck/client", try clientDirectory(native, a, null));
+    const overrides = [_:null]?[*:0]const u8{"DECK_CLIENT_STATE_DIRECTORY=/drafts"};
+    const explicit: Native = .{ .io = native.io, .environ = .{ .block = .{ .slice = &overrides } } };
+    try std.testing.expectEqualStrings("/drafts", try clientDirectory(explicit, a, null));
+    try std.testing.expectEqualStrings("/alternate/client", try clientDirectory(explicit, a, "/alternate"));
 }
 
 test "init is private, idempotent and refuses incompatible config" {

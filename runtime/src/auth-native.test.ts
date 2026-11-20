@@ -12,7 +12,7 @@ const binary = process.env.DECK_TEST_BINARY;
 const fakeKey = "FAKE_OP_KEY_NEVER_PRINT";
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "deck-auth-native-"));
-  const state = join(root, "state"), bin = join(root, "bin"), config = join(root, ".config", "deck");
+  const state = join(root, "state"), bin = join(root, "bin"), config = join(root, ".config/deck/hubs/default");
   await mkdir(bin); await mkdir(config, { recursive: true, mode: 0o700 });
   const env = { ...process.env, HOME: root, PATH: bin, DECK_NODE: process.execPath, OPENAI_API_KEY: "", OP_SESSION_fake: "FAKE_SESSION", OP_SERVICE_ACCOUNT_TOKEN: "FAKE_SERVICE" };
   assert.equal(spawnSync(binary!, ["init", "--directory", state], { env, encoding: "utf8" }).status, 0);

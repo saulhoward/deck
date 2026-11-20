@@ -147,6 +147,7 @@ test("direct task selection never grants participation; registered Rex clients c
     const direct = f.taskSession();
     assert.equal((await direct.handle({ version: 1, id: "1", action: "poll" })).clientMode, "hub");
     await assert.rejects(direct.handle({ version: 1, id: "2", action: "send", text: "no direct input" }), /Read-only/);
+    await assert.rejects(direct.handle({ version: 1, id: "3", action: "agentsmd" }), /Read-only/);
     const store = new DraftStore(hub, f.local.env.DECK_CLIENT_STATE_DIRECTORY);
     const draft = { kind: "input" as const, chatId: "2", requestId: "11111111-1111-4111-8111-111111111111", text: "exact saved bytes", mode: "steer" as const };
     await store.save(draft);

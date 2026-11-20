@@ -5,7 +5,7 @@ pub const base: vaxis.Style = .{ .fg = .{ .rgb = .{ 255, 255, 255 } }, .bg = .{ 
 // Muted dark-blue message panel, keeping Vesper's near-black contrast.
 pub const user: vaxis.Style = .{ .fg = base.fg, .bg = .{ .rgb = .{ 24, 32, 48 } } };
 pub const dim: vaxis.Style = .{ .fg = .{ .rgb = .{ 160, 160, 160 } }, .bg = base.bg };
-// Sidebar lists stay neutral; only the rune/name identity uses orange.
+// Sidebar headings stay neutral; orange identifies the agent and green marks active tools.
 pub const sidebar_heading: vaxis.Style = .{ .fg = .{ .rgb = .{ 176, 176, 176 } }, .bg = base.bg };
 pub const rule: vaxis.Style = .{ .fg = .{ .rgb = .{ 80, 80, 80 } }, .bg = base.bg };
 pub const green: vaxis.Style = .{ .fg = .{ .rgb = .{ 153, 255, 228 } }, .bg = base.bg };

@@ -45,7 +45,7 @@ test("real runtime inventory projects resolved model tools, scoped approvals/gra
     assert.ok(validStatusLoginReply({ command: "status", args: { chatId: id }, hubId: r.hubId }, status));
     assert.equal(status.toolInventoryStatus, "ready");
     assert.deepEqual(status.toolInventory.mcp.map((p: any) => p.profileId), ["service", "remote"]);
-    for (const t of status.toolInventory.builtins) assert.equal(t.location, ["read", "write", "edit", "bash"].includes(t.name) ? "worker" : "hub");
+    for (const t of status.toolInventory.builtins) assert.equal(t.location, ["read", "write", "edit", "bash", "loadSkill"].includes(t.name) ? "worker" : "hub");
     await r.setToolProfiles({ chatId: id, expectedRevision: 0, profiles: [profileGrant(service), profileGrant(remote)] });
     const granted = await r.toolInventory(id);
     assert.deepEqual(granted.mcp.map(p => [p.state, p.location]), [["enabled", "hub"], ["enabled", "worker"]]);

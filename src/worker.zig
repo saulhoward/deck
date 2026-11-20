@@ -43,7 +43,12 @@ fn readText(io: Io, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     if ((try file.stat(io)).kind != .file) return error.NotRegularFile;
     return Native.readAll(io, file, allocator, file_limit);
 }
-fn execute(io: Io, allocator: std.mem.Allocator, request: Request) !Result {
+fn execute(native: Native, allocator: std.mem.Allocator, request: Request) !Result {
+    const io = native.io;
+    switch (request.operation) {
+        .skill_catalog, .skill_read, .user_agents_md => return @import("user_resources.zig").read(native, allocator, request.operation, request.args.path),
+        else => {},
+    }
     if (!std.fs.path.isAbsolute(request.cwd)) return error.InvalidArguments;
     const path = try std.fs.path.resolve(allocator, &.{ request.cwd, request.args.path.? });
     defer allocator.free(path);
@@ -122,7 +127,7 @@ fn controlled(native: Native, allocator: std.mem.Allocator, journal: Io.Dir, mac
         // Persist acceptance before touching the workspace. An accepted operation without
         // a retained result is uncertain after restart and is never automatically reissued.
         try save(io, allocator, journal, name, .{ .hash = &hash });
-        result = (if (request.operation == .bash) shell.runObserved(native, allocator, request.cwd, request.args.command.?, @intCast(request.args.timeout orelse 60), cancelled orelse return error.Unsupported, progress) else if (request.operation == .rex_allocate) rex.allocateBound(native, allocator, request.cwd, request.machineId, request.args.plan.?, cancelled orelse return error.Unsupported, rex_client) else execute(io, allocator, request)) catch |err| .{ .ok = false, .output = if (request.operation == .read) @errorName(err) else "effect_uncertain: file operation failed; inspect the file before retrying", .code = if (request.operation == .read) "read_failed" else "effect_uncertain" };
+        result = (if (request.operation == .bash) shell.runObserved(native, allocator, request.cwd, request.args.command.?, @intCast(request.args.timeout orelse 60), cancelled orelse return error.Unsupported, progress) else if (request.operation == .rex_allocate) rex.allocateBound(native, allocator, request.cwd, request.machineId, request.args.plan.?, cancelled orelse return error.Unsupported, rex_client) else execute(native, allocator, request)) catch |err| .{ .ok = false, .output = if (request.operation == .read) @errorName(err) else "effect_uncertain: file operation failed; inspect the file before retrying", .code = if (request.operation == .read) "read_failed" else "effect_uncertain" };
         const checked = try resultFrame(allocator, request, result);
         allocator.free(checked);
         try save(io, allocator, journal, name, .{ .hash = &hash, .result = result });

@@ -119,9 +119,9 @@ export async function dispatch(runtime: DeckRuntime, request: Record<string, unk
       return { chatId: String(chat.id), brief };
     }
     case "import_instructions": {
-      if (!validMutationArgs("import_instructions", args)) throw new DeckError("invalid", "Instruction import accepts only a saved chat/binding and request ID; path is fixed to AGENTS.md");
+      if (!validMutationArgs("import_instructions", args)) throw new DeckError("invalid", "Instruction import requires a saved chat/binding, request ID and a supported fixed source");
       const { chatId, requestId } = args;
-      const taskId = await runtime.importInstructions(chatId, requestId, undefined, { machineId: args.machineId, cwd: args.cwd });
+      const taskId = await runtime.importInstructions(chatId, requestId, undefined, { machineId: args.machineId, cwd: args.cwd }, args.source);
       return { chatId, requestId, taskId: String(taskId), admitted: true, completion: "not_waited" };
     }
     case "instruction_status": {

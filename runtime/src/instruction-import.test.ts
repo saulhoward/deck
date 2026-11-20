@@ -58,6 +58,55 @@ test("idle import fixes assigned-worker bytes in Pi; stable task receipt, prompt
   });
 });
 
+test("personal AGENTS.md is explicit, uses the task's machine, and augments rather than replaces instructions", async () => {
+  const binding = { machineId: "remote", cwd: "/assigned" };
+  const personal = "PERSONAL_CONTEXT_MARKER";
+  let present = false, reads = 0;
+  await fixture({ call: async (actual, _id, op, args) => {
+    reads++; assert.deepEqual(actual, binding); assert.equal(op, "user_agents_md"); assert.deepEqual(args, {});
+    return present ? { ok: true, output: personal } : { ok: false, code: "not_found", output: "missing" };
+  } }, async (runtime, faux) => {
+    const chat = await runtime.createTask("Personal context", binding, "task", undefined, { problem: ORIGINAL });
+    const id = String(chat.id);
+    assert.equal((await runtime.toolInventory(id)).agentsMdLoaded, undefined); assert.equal(reads, 0);
+    const load = (requestId: string) => runtime.importInstructions(id, requestId, undefined, binding, "user");
+    assert.deepEqual(await result(runtime, await load("absent")), { status: "rejected", reason: "not_found" });
+    assert.equal((await runtime.toolInventory(id)).agentsMdLoaded, undefined);
+    present = true;
+    const taskId = await load("personal");
+    assert.equal((await result(runtime, taskId)).status, "applied");
+    assert.equal((await runtime.instructionsStatus(id, String(taskId))).import?.result?.status, "applied");
+    assert.equal(await load("personal"), taskId);
+    await assert.rejects(runtime.importInstructions(id, "personal"), { code: "conflict" });
+    assert.equal(reads, 2); assert.equal(faux.state.callCount, 0);
+    assert.equal((await runtime.toolInventory(id)).agentsMdLoaded, true);
+    assert.equal((await runtime.toolInventory(String(runtime.main.id))).agentsMdLoaded, undefined);
+    present = false;
+    assert.deepEqual(await result(runtime, await load("failed-refresh")), { status: "rejected", reason: "not_found" });
+    faux.setResponses([
+      request => {
+        const prompt = getCurrentSystemPrompt(request.messages);
+        assert.ok(prompt.includes(ORIGINAL)); assert.ok(prompt.includes(personal));
+        return fauxAssistantMessage(fauxToolCall("subagent", { task: "Help with this task" }), { stopReason: "toolUse" });
+      },
+      request => {
+        const prompt = getCurrentSystemPrompt(request.messages);
+        assert.ok(prompt.includes(ORIGINAL)); assert.ok(!prompt.includes(personal));
+        return fauxAssistantMessage("Child done");
+      },
+      request => {
+        const result = request.messages.filter(message => message.role === "toolResult").at(-1)!;
+        assert.equal(result.isError, false);
+        return fauxAssistantMessage("Parent done");
+      },
+    ]);
+    assert.equal((await (await runtime.admit(id, input("next"))).wait(context)).status, "done");
+    const child = (await runtime.listChats()).items.find(item => item.parentChatId === id)!;
+    assert.equal((await runtime.toolInventory(child.chatId)).agentsMdLoaded, undefined);
+    assert.equal(reads, 3); // Neither a later turn nor a failed refresh silently replaces the bytes.
+  });
+});
+
 test("pending import excludes new input/configuration, preserves admitted receipts, and does not block unrelated work", async () => {
   const entered = gate(); const release = gate();
   try {

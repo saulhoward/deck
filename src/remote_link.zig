@@ -362,5 +362,8 @@ pub const Link = struct {
     }
 };
 pub fn supported(op: wire.NativeOperation) bool {
-    return op == .read or op == .write or op == .edit or op == .bash or op == .bash_progress;
+    return switch (op) {
+        .read, .write, .edit, .bash, .bash_progress, .skill_catalog, .skill_read, .user_agents_md => true,
+        else => false,
+    };
 }

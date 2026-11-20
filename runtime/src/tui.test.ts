@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmod, readFile, readdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { freeHubPort } from "./hub-port.test.support.js";
 import { resolve, join } from "node:path";
@@ -116,13 +116,47 @@ test("a fitting history reply without optional samples cannot replay an old live
   const session = new TuiSession(async name => {
     if (name === "status") return { hubGuard: 1, hubId: "test", chatId: "1", mainChatId: "1", tools: "offline" };
     assert.equal(name, "history");
-    return { items: [], ...(includeSample ? { activity: { busy: true, queued: 1 }, progress: { generation: { text: "partial" } } } : {}) };
+    return { items: [], ...(includeSample ? { activity: { busy: true, queued: 1, tools: [{ status: "running", name: "bash" }, { status: "done", name: "read" }, { status: "running", name: "bash" }, { status: "running", name: "mcp_service" }] }, progress: { generation: { text: "partial" } } } : {}) };
   }, undefined, undefined, local.env.DECK_CLIENT_STATE_DIRECTORY);
   try {
-    assert.equal((await session.handle({ version: 1, id: "1", action: "poll" })).preview, "partial");
+    const first = await session.handle({ version: 1, id: "1", action: "poll" });
+    assert.equal(first.preview, "partial"); assert.deepEqual(first.activeTools, ["bash", "mcp_service"]);
     includeSample = false;
     const next = await session.handle({ version: 1, id: "2", action: "poll" });
-    assert.equal(next.preview, ""); assert.equal(next.activityKnown, false);
+    assert.equal(next.preview, ""); assert.equal(next.activityKnown, false); assert.deepEqual(next.activeTools, []);
+  } finally { await local.close(); }
+});
+
+test(":agentsmd keeps the source/binding on lost admission; polls only the receipt before reporting missing or applied", async () => {
+  const local = await clientEnv(), store = new DraftStore("test", local.env.DECK_CLIENT_STATE_DIRECTORY);
+  const binding = { machineId: "assigned", cwd: "/work" };
+  const admissions: Record<string, unknown>[] = [];
+  let terminal = false, applied = false, available = false, taskId = "20";
+  const session = new TuiSession(async (name, args, expected) => {
+    if (name === "status") return { hubId: "test", hubGuard: 1, mainChatId: "1", chatId: "1", binding, tools: "native", toolInventory: { chatId: "1", builtins: [], mcp: [], ...(applied ? { agentsMdLoaded: true } : {}) } };
+    assert.equal(expected, "test");
+    if (name === "history") return { items: [] };
+    if (name === "import_instructions") {
+      admissions.push(args); assert.deepEqual((await store.load(String(args.requestId))).request, { kind: "instructions", ...args });
+      if (admissions.length === 1) throw new Error("ACK lost");
+      return { taskId };
+    }
+    assert.equal(name, "instruction_status"); assert.deepEqual(args, { chatId: "1", taskId });
+    if (!available) throw new Error("read unavailable");
+    return { import: { taskId, state: terminal ? "terminal" : "running", ...(terminal ? { result: applied ? { status: "applied", source: { path: "~/.codex/AGENTS.md" } } : { status: "rejected", reason: "not_found" } } : {}) } };
+  }, undefined, undefined, local.env.DECK_CLIENT_STATE_DIRECTORY);
+  const act = (action: TuiRequest["action"]) => session.handle({ version: 1, id: "1", action });
+  try {
+    await assert.rejects(act("agentsmd"), /ACK lost/);
+    assert.equal((await act("poll")).draft?.kind, "instructions"); assert.equal(admissions.length, 1);
+    const ack = await act("retry"); assert.deepEqual(admissions[0], admissions[1]);
+    assert.equal(admissions[0]?.source, "user"); assert.equal(admissions[0]?.machineId, binding.machineId);
+    assert.equal(ack.draft, null); assert.match(ack.notice, /admitted; result unavailable/);
+    available = true; assert.equal((await act("poll")).toolInventory?.agentsMdLoaded, undefined);
+    terminal = true; const missing = await act("poll"); assert.match(missing.notice, /File not found: ~\/.codex\/AGENTS.md/); assert.equal(missing.toolInventory?.agentsMdLoaded, undefined);
+    applied = true; taskId = "21";
+    const loaded = await act("agentsmd"); assert.match(loaded.notice, /Loaded/); assert.equal(loaded.toolInventory?.agentsMdLoaded, true);
+    assert.equal(admissions.length, 3); assert.notEqual(admissions[2]?.requestId, admissions[0]?.requestId);
   } finally { await local.close(); }
 });
 
@@ -466,16 +500,17 @@ test("real PTY: detach remains responsive while HTTP history is stalled", { skip
   try { await pty(f.port, f.local.env, [{ wait: "STALE" }, { sleep: .3 }, { keys: ":q\r" }]); assert.ok(f.requests.some((v) => v.command === "history")); assert.ok(!f.requests.some((v) => v.command === "stop")); }
   finally { await f.close(); }
 });
-test("real PTY: real isolated mock hub retains input and answer after TUI detach", { skip: !testBinary, timeout: 20_000 }, async () => {
+test("real PTY: default hub loads personal AGENTS.md only on request and retains input and answer after detach", { skip: !testBinary, timeout: 20_000 }, async () => {
   assert.ok(testBinary); const local = await clientEnv();
   const port = await freeHubPort();
-  const directory = join(local.env.DECK_CLIENT_STATE_DIRECTORY, "hub");
-  const initialize = spawn(resolve(testBinary), ["init", "--directory", directory], { env: local.env }); initialize.stdout.resume(); initialize.stderr.resume();
+  const home = join(local.env.DECK_CLIENT_STATE_DIRECTORY, "hub-home"), env = { ...local.env, HOME: home };
+  const directory = join(home, ".local/share/deck/hubs/default");
+  const initialize = spawn(resolve(testBinary), ["init"], { env }); initialize.stdout.resume(); initialize.stderr.resume();
   const initialized = (await once(initialize, "close"))[0];
   if (initialized !== 0) { await local.close(); assert.fail("Scratch hub initialization failed"); }
   // Task creation now opens Rex. Keep worker discovery away from any live
   // operator server; real Rex tests use their own isolated private servers.
-  const hub = spawn(resolve(testBinary), ["serve", "--mock", "--port", String(port), "--directory", directory, "--workspace", local.env.DECK_CLIENT_STATE_DIRECTORY], { env: { ...local.env, DECK_NODE: process.execPath, PATH: directory } });
+  const hub = spawn(resolve(testBinary), ["serve", "--mock", "--port", String(port), "--workspace", local.env.DECK_CLIENT_STATE_DIRECTORY], { env: { ...env, DECK_NODE: process.execPath, PATH: directory } });
   const closed = once(hub, "close"); let errors = ""; hub.stdout.resume(); hub.stderr.on("data", (chunk) => { errors += chunk; });
   try {
     let status: any;
@@ -483,10 +518,16 @@ test("real PTY: real isolated mock hub retains input and answer after TUI detach
       try { status = await hubCommand(port, "status"); break; } catch { await new Promise((resolve) => setTimeout(resolve, 25)); }
     }
     assert.ok(status, errors); assert.match(status.binding.agentName, /^[a-z]+$/);
+    assert.equal(JSON.parse(await readFile(join(directory, "config.json"), "utf8")).machine_id, status.machineId);
+    const screens: Record<string, string> = {};
     await pty(port, local.env, [
-      { wait: `${status.model.provider}/${status.model.modelId}` }, { keys: "hello from real Zig TUI" }, { keys: "\x13" },
-      { wait: "Input admitted" }, { wait: "Deck prototype response" }, { wait: "Δ hub" }, { keys: ":q\r" },
-    ]);
+      { resize: [40, 140] }, { wait: `${status.model.provider}/${status.model.modelId}` }, { keys: "hello from real Zig TUI" }, { keys: "\x1b" },
+      { keys: ":agentsmd" }, { wait: "client idle" }, { keys: "\r" }, { wait: "File not found: ~/.codex/AGENTS.md" }, { capture: "missing" },
+      { checkpoint: "install" }, { keys: ":agentsmd" }, { wait: "client idle" }, { keys: "\r" }, { wait: "AGENTS.md loaded" }, { capture: "received" },
+      { keys: "\x13" }, { wait: "Input admitted" }, { wait: "Deck prototype response" }, { wait: "Δ hub" }, { keys: ":q\r" },
+    ], screens, { install: async () => { await mkdir(join(home, ".codex")); await writeFile(join(home, ".codex/AGENTS.md"), "PRIVATE_PERSONAL_BODY"); } });
+    assert.doesNotMatch(screens.missing!, /AGENTS.md loaded/); assert.doesNotMatch(screens.received!, /PRIVATE_PERSONAL_BODY/);
+    assert.match(screens.received!, /hello from real Zig TUI/);
     const history: any = await hubCommand(port, "history", { chatId: status.chatId, limit: 80 }, status.hubId);
     assert.ok(history.items.some((v: any) => v.kind === "deck.input" && v.data.text === "hello from real Zig TUI"));
     assert.ok(history.items.some((v: any) => v.kind === "pi.assistant"));

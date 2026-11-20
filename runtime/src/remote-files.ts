@@ -74,7 +74,7 @@ export class RoutedFiles implements HostFiles {
       if(!plan || typeof plan!=="object" || (plan as {taskMachineId?:unknown}).taskMachineId!==binding.machineId) return Promise.resolve({ok:false,code:"mcp_refused",output:"MCP worker differs from assigned host; no fallback"});
     }
     const remote = this.remotes.get(binding.machineId);
-    if (!remote || this.paused.has(binding.machineId) || (operation === "mcp_call" ? !this.mcp.has(binding.machineId) : !this.clients.has(binding.machineId) && !["read", "write", "edit", "bash"].includes(operation))) return Promise.resolve({ ok: false, code: "offline", output: "offline: assigned worker/capability unavailable; this attempt was not sent; earlier attempts may have happened; no local fallback" });
+    if (!remote || this.paused.has(binding.machineId) || (operation === "mcp_call" ? !this.mcp.has(binding.machineId) : !this.clients.has(binding.machineId) && !["read", "write", "edit", "bash", "skill_catalog", "skill_read", "user_agents_md"].includes(operation))) return Promise.resolve({ ok: false, code: "offline", output: "offline: assigned worker/capability unavailable; this attempt was not sent; earlier attempts may have happened; no local fallback" });
     return remote.call(binding, id, operation, args, signal, onProgress);
   }
   async close(): Promise<void> { await Promise.all([this.local.close(), ...[...this.remotes.values()].map(remote => remote.close())]); }

@@ -1,3 +1,4 @@
+import { locationGuide, skillTools } from "./skill-tools.js";
 import { Socket } from "node:net";
 import { Type } from "@earendil-works/pi-ai";
 import type { Context } from "@earendil-works/chord";
@@ -110,7 +111,7 @@ export class PipeFiles implements HostFiles {
   }
 }
 
-export function nativeFiles(host: HostFiles) {
+export function nativeFiles(host: HostFiles, hubMachineId: string) {
   const run = async (operation: string, args: Args, api: ToolExecutionApi, context: Context) => {
     context.abortSignal?.throwIfAborted();
     const binding = await api.snapshot(ChatDoc, api.conversationId, context);
@@ -143,10 +144,11 @@ export function nativeFiles(host: HostFiles) {
     finally { ended = true; latest = undefined; await publishing; }
     return { output: [{ type: "text" as const, text: result.output }], isError: !result.ok, details: { host: binding.machineId, operationId: String(api.taskId), code: result.code ?? "ok", exitCode: result.exitCode ?? null, truncated: result.truncated ?? false } };
   };
-  return defineExtension({ name: "deck.native-files", tools: [
+  return defineExtension({ name: "deck.native-files", sections: [{ key: "deck_tool_locations", render: () => locationGuide }], tools: [
     defineTool({ name: "bash", description: "Run bash on the assigned worker. Timeout defaults to 60 seconds, maximum 300. Returns a bounded 64 KiB combined output tail and exit status. Foreground process group is terminated on cancellation, timeout or shell exit. Do not automatically retry uncertain effects.", parameters: Type.Object({ command: Type.String({ minLength: 1 }), timeout: Type.Optional(Type.Integer({ minimum: 1, maximum: 300 })) }), execute: (args, api, ctx) => run("bash", args, api, ctx) }),
     defineTool({ name: "read", description: "Read a UTF-8 text file on the assigned worker (at most 128 KiB). Binary/images are unsupported.", parameters: Type.Object({ path: Type.String() }), execute: (args, api, ctx) => run("read", args, api, ctx) }),
     defineTool({ name: "write", description: "Write UTF-8 text on the assigned worker, replacing the file. At most 128 KiB. Parent directories must exist.", parameters: Type.Object({ path: Type.String(), content: Type.String() }), execute: (args, api, ctx) => run("write", args, api, ctx) }),
     defineTool({ name: "edit", description: "Replace exactly one literal occurrence of oldText in a UTF-8 file on the assigned worker. Rejects zero or multiple matches; no fuzzy matching. At most 128 KiB.", parameters: Type.Object({ path: Type.String(), oldText: Type.String({ minLength: 1 }), newText: Type.String() }), execute: (args, api, ctx) => run("edit", args, api, ctx) }),
+    ...skillTools(host, hubMachineId),
   ] });
 }

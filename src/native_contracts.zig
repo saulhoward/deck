@@ -46,7 +46,8 @@ pub fn validRequest(allocator: std.mem.Allocator, v: V) bool {
     if (!validCancellationId(n)) return false;
     const ephemeral = eq(operation, "rex_inspect") or eq(operation, "rex_resolve") or eq(operation, "link_status");
     if (ephemeral != (n >= (@as(u64, 1) << 63))) return false;
-    if (eq(operation, "link_status")) return args == .object and args.object.count() == 0;
+    if (eq(operation, "link_status") or eq(operation, "skill_catalog") or eq(operation, "user_agents_md")) return args == .object and args.object.count() == 0;
+    if (eq(operation, "skill_read")) return wire.validNativeReadArgs(args) and @import("user_resources.zig").skillPath(text(field(args, "path")));
     if (eq(operation, "read")) return wire.validNativeReadArgs(args) and path(field(args, "path"));
     if (eq(operation, "write")) return wire.validNativeWriteArgs(args) and path(field(args, "path")) and text(field(args, "content")).len <= 128 * 1024;
     if (eq(operation, "edit")) return wire.validNativeEditArgs(args) and path(field(args, "path")) and text(field(args, "oldText")).len > 0 and text(field(args, "oldText")).len <= 128 * 1024 and text(field(args, "newText")).len <= 128 * 1024;

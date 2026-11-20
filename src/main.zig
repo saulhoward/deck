@@ -76,7 +76,7 @@ const help =
     \\subagent waits for a Pi-owned child answer; caller stop drains ordinary owned work.
     \\Owned child chats can be inspected/stopped, but do not accept direct input.
     \\Default provider: OPENAI_API_KEY, otherwise stored ChatGPT OAuth.
-    \\serve resolves private ~/.config/deck/.env references using op before locking state.
+    \\serve resolves private ~/.config/deck/hubs/default/.env references using op before locking state.
     \\Missing credentials refuse startup; run deck login openai (also works offline).
     \\--api-key is a deprecated alias for default authentication selection.
     \\API-key authentication may incur charges. No failure-driven auth fallback.

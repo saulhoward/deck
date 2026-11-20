@@ -5,7 +5,7 @@ import { grantKey, profileGrant, toolAlias } from "./mcp-tools.js";
 import { type McpCatalog, type McpGrant, type McpProfile, type ToolInventory } from "./generated/contracts.js";
 import { validToolInventory } from "./tool-inventory-contracts.js";
 
-export function projectToolInventory(chatId: string, agent: Agent, catalog: McpCatalog, grants: readonly McpGrant[], hubMachineId: string | undefined, workerMachineId: string | undefined, allowed: (profile: McpProfile) => boolean): ToolInventory {
+export function projectToolInventory(chatId: string, agent: Agent, catalog: McpCatalog, grants: readonly McpGrant[], hubMachineId: string | undefined, workerMachineId: string | undefined, allowed: (profile: McpProfile) => boolean, context: Pick<ToolInventory, "loadedSkills" | "agentsMdLoaded"> = {}): ToolInventory {
   const visible = new Set(agent.tools.map(tool => tool.name)); // NOT agent.callable/deferred.
   const granted = new Set(grants.map(grantKey));
   const aliases = new Set<string>();
@@ -40,11 +40,11 @@ export function projectToolInventory(chatId: string, agent: Agent, catalog: McpC
     if (owner?.startsWith("deck.mcp.")) throw new Error("Unresolved MCP model surface");
     // The native adapter and CodingTools have the SAME tool names. Provenance,
     // not the name or localFiles flag, determines where an invocation executes.
-    const location = owner === "deck.native-files" ? (workerMachineId === hubMachineId ? "hub" : "worker") :
+    const location = owner === "deck.native-files" ? (tool.name === "loadHubSkill" || workerMachineId === hubMachineId ? "hub" : "worker") :
       ["deck.task-inspection", "deck.task-control", "deck.foreground-subagent"].includes(owner ?? "") ? "hub" : "environment";
     builtins.push({ name: tool.name, location });
   }
-  const result: ToolInventory = { chatId, ...(hubMachineId ? { hubMachineId } : {}), ...(workerMachineId ? { workerMachineId } : {}), builtins, mcp };
+  const result: ToolInventory = { chatId, ...context, ...(hubMachineId ? { hubMachineId } : {}), ...(workerMachineId ? { workerMachineId } : {}), builtins, mcp };
   // Refuse overlarge/invalid metadata instead of silently clipping a supposedly
   // comprehensive inventory (or leaking a partially projected object).
   if (!validToolInventory(result)) throw new Error("Tool inventory unavailable");

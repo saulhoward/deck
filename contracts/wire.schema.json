@@ -156,7 +156,7 @@
       "type": "object", "additionalProperties": false,
       "properties": { "version": { "const": 1 }, "channel": { "enum": ["data", "control", "clients"] }, "hubId": { "$ref": "#/$defs/TransportId" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "connectionId": { "$ref": "#/$defs/Sha256" } }, "required": ["version", "channel", "hubId", "machineId"]
     },
-    "NativeOperation": { "enum": ["read", "write", "edit", "bash", "bash_progress", "rex_allocate", "rex_inspect", "rex_resolve", "rex_allocation_receipt", "link_status", "mcp_call"] },
+    "NativeOperation": { "enum": ["read", "write", "edit", "skill_catalog", "skill_read", "user_agents_md", "bash", "bash_progress", "rex_allocate", "rex_inspect", "rex_resolve", "rex_allocation_receipt", "link_status", "mcp_call"] },
     "NativeCorrelationId": { "type": "string", "minLength": 1, "maxLength": 32 },
     "NativePath": { "description": "Decoded UTF-8 byte limit and NUL refusal are additional semantic checks; paths are not a sandbox.", "type": "string", "maxLength": 4096 },
     "NativeText": { "type": "string", "maxLength": 131072 },
@@ -269,7 +269,9 @@
     "InventoryBuiltin": { "type": "object", "additionalProperties": false, "properties": { "name": { "$ref": "#/$defs/InventoryToolName" }, "location": { "enum": ["hub", "worker", "environment"] } }, "required": ["name", "location"] },
     "InventoryMcpTool": { "type": "object", "additionalProperties": false, "properties": { "name": { "$ref": "#/$defs/McpToolName" }, "alias": { "$ref": "#/$defs/InventoryToolName" } }, "required": ["name", "alias"] },
     "InventoryMcpProfile": { "description": "Enabled means granted and currently model-visible, not server health. Enabled tools are the actual visible subset; not_granted tools are approved candidates. Unavailable rows have no offered tools. Workspace is absent for a grant whose catalog revision is missing.", "type": "object", "additionalProperties": false, "properties": { "profileId": { "$ref": "#/$defs/McpId" }, "machineId": { "$ref": "#/$defs/MachineIdentity" }, "location": { "enum": ["hub", "worker"] }, "workspace": { "enum": ["task", "fixed"] }, "revision": { "$ref": "#/$defs/Sha256" }, "state": { "enum": ["enabled", "not_granted", "unavailable"] }, "tools": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/InventoryMcpTool" } } }, "required": ["profileId", "machineId", "location", "revision", "state", "tools"] },
-    "ToolInventory": { "description": "Bounded selected-chat metadata only. No schemas, descriptions, environment, credentials or live health checks. Missing inventory is unknown, never an empty inventory.", "type": "object", "additionalProperties": false, "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "hubMachineId": { "$ref": "#/$defs/InventoryMachineId" }, "workerMachineId": { "$ref": "#/$defs/InventoryMachineId" }, "builtins": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/InventoryBuiltin" } }, "mcp": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/InventoryMcpProfile" } } }, "required": ["chatId", "builtins", "mcp"] },
+    "SkillName": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9-]{1,64}$(?![\\s\\S])" },
+    "LoadedSkill": { "type": "object", "additionalProperties": false, "properties": { "name": { "$ref": "#/$defs/SkillName" }, "scope": { "enum": ["local", "hub"] } }, "required": ["name", "scope"] },
+    "ToolInventory": { "description": "Bounded selected-chat metadata only. No schemas, descriptions, environment, credentials or live health checks. Missing inventory is unknown, never an empty inventory.", "type": "object", "additionalProperties": false, "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "hubMachineId": { "$ref": "#/$defs/InventoryMachineId" }, "workerMachineId": { "$ref": "#/$defs/InventoryMachineId" }, "loadedSkills": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/LoadedSkill" } }, "agentsMdLoaded": { "const": true }, "builtins": { "type": "array", "maxItems": 128, "items": { "$ref": "#/$defs/InventoryBuiltin" } }, "mcp": { "type": "array", "maxItems": 16, "items": { "$ref": "#/$defs/InventoryMcpProfile" } } }, "required": ["chatId", "builtins", "mcp"] },
     "ToolInventoryStatus": { "enum": ["ready", "unsupported", "unavailable"] },
     "StatusSnapshot": {
       "description": "Startup/selection identity. Optional capabilities are not inferred when missing on older peers; current producers emit all capabilities and implementation.",
@@ -335,7 +337,7 @@
     },
     "InstructionImportArgs": {
       "type": "object",
-      "properties": { "chatId": { "$ref": "#/$defs/PiId" }, "requestId": { "$ref": "#/$defs/DurableRequestId" }, "machineId": { "$ref": "#/$defs/CommandString" }, "cwd": { "$ref": "#/$defs/CommandString" } },
+      "properties": { "source": { "const": "user" }, "chatId": { "$ref": "#/$defs/PiId" }, "requestId": { "$ref": "#/$defs/DurableRequestId" }, "machineId": { "$ref": "#/$defs/CommandString" }, "cwd": { "$ref": "#/$defs/CommandString" } },
       "required": ["chatId", "requestId", "machineId", "cwd"], "additionalProperties": false
     },
     "AdmitAck": {
@@ -425,12 +427,12 @@
     },
     "InstructionSourceView": {
       "description": "Bounded labels/provenance, never instruction text. Absolute cwd, safe task ID and UTF-16 caps remain semantic checks.",
-      "type": "object", "properties": { "machineId": { "type": "string", "minLength": 1, "maxLength": 80 }, "cwd": { "type": "string", "minLength": 1, "maxLength": 256 }, "path": { "const": "AGENTS.md" }, "sha256": { "$ref": "#/$defs/Sha256" }, "bytes": { "type": "integer", "minimum": 0, "maximum": 32768 }, "taskId": { "$ref": "#/$defs/PiId" }, "labelsClipped": { "const": true } },
+      "type": "object", "properties": { "machineId": { "type": "string", "minLength": 1, "maxLength": 80 }, "cwd": { "type": "string", "minLength": 1, "maxLength": 256 }, "path": { "enum": ["AGENTS.md", "~/.codex/AGENTS.md"] }, "sha256": { "$ref": "#/$defs/Sha256" }, "bytes": { "type": "integer", "minimum": 0, "maximum": 32768 }, "taskId": { "$ref": "#/$defs/PiId" }, "labelsClipped": { "const": true } },
       "required": ["machineId", "cwd", "path", "sha256", "bytes", "taskId"], "additionalProperties": false
     },
     "InstructionTaskState": { "enum": ["pending", "running", "waiting", "sleeping", "completing", "terminal"] },
     "InstructionOutcome": { "enum": ["completed", "failed", "aborted", "orphaned"] },
-    "InstructionRejection": { "enum": ["offline", "unavailable", "read_failed", "effect_uncertain", "invalid", "too_large", "settings_changed", "busy"] },
+    "InstructionRejection": { "enum": ["offline", "unavailable", "read_failed", "not_found", "effect_uncertain", "invalid", "too_large", "settings_changed", "busy"] },
     "InstructionAppliedView": {
       "type": "object", "properties": { "status": { "const": "applied" }, "source": { "$ref": "#/$defs/InstructionSourceView" } }, "required": ["status", "source"], "additionalProperties": false
     },
@@ -704,7 +706,7 @@
     "TuiRequest": {
       "description": "Client-only renderer bridge, never a Pi execution channel. One outstanding request; no replay on loss.",
       "type": "object", "additionalProperties": false,
-      "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "action": { "enum": ["poll", "older", "latest", "send", "retry", "discard", "stop", "models", "configure", "tasks", "hosts", "select", "create", "rexStatus", "rexInspect", "rexOpen"] }, "chatId": { "$ref": "#/$defs/PiId" }, "after": { "$ref": "#/$defs/PiId" }, "configuration": { "$ref": "#/$defs/ModelSettingsChange" }, "taskTarget": { "$ref": "#/$defs/TaskCreationTarget" }, "taskForm": { "$ref": "#/$defs/TaskCreationForm" }, "text": { "type": "string", "maxLength": 16384 }, "hold": { "type": "boolean" } }, "required": ["version", "id", "action"]
+      "properties": { "version": { "const": 1 }, "id": { "$ref": "#/$defs/TransportId" }, "action": { "enum": ["poll", "older", "latest", "send", "retry", "discard", "stop", "models", "configure", "agentsmd", "tasks", "hosts", "select", "create", "rexStatus", "rexInspect", "rexOpen"] }, "chatId": { "$ref": "#/$defs/PiId" }, "after": { "$ref": "#/$defs/PiId" }, "configuration": { "$ref": "#/$defs/ModelSettingsChange" }, "taskTarget": { "$ref": "#/$defs/TaskCreationTarget" }, "taskForm": { "$ref": "#/$defs/TaskCreationForm" }, "text": { "type": "string", "maxLength": 16384 }, "hold": { "type": "boolean" } }, "required": ["version", "id", "action"]
     },
     "TuiPart": { "description": "Display provenance, not Markdown inference. Text is literal message content; notices and requests are generated metadata. Tool text is output only; clipped marks truncation without adding text to terminal output.", "type": "object", "additionalProperties": false, "properties": { "kind": { "enum": ["text", "notice", "tool_request", "tool"] }, "text": { "type": "string", "maxLength": 8192 }, "toolName": { "type": "string", "maxLength": 128 }, "isError": { "type": "boolean" }, "clipped": { "type": "boolean" } }, "required": ["kind", "text"] },
     "TuiEntry": { "description": "Canonical IDs are retained even with empty parts. Parts and their flattened text share an 8192-byte display budget including tool headings and separators; the projector enforces aggregate byte bounds.", "type": "object", "additionalProperties": false, "properties": { "id": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 }, "role": { "enum": ["user", "assistant", "tool", "note"] }, "text": { "type": "string", "maxLength": 8192 }, "parts": { "type": "array", "maxItems": 256, "items": { "$ref": "#/$defs/TuiPart" } }, "thinkingTokens": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 } }, "required": ["id", "role", "text"] },
@@ -714,6 +716,7 @@
     "TuiRex": { "description": "Selected-chat creation provenance and optional independent presence sample, not agent health.", "type": "object", "additionalProperties": false, "properties": { "status": { "$ref": "#/$defs/RexStatusSnapshot" }, "inspection": { "$ref": "#/$defs/RexInspectionSnapshot" } }, "required": ["status"] },
     "TuiClientMode": { "enum": ["hub", "task"] },
     "TuiSnapshot": { "type": "object", "additionalProperties": false, "properties": {
+      "activeTools": { "type": "array", "maxItems": 32, "items": { "type": "string", "maxLength": 80 } },
       "toolInventory": { "$ref": "#/$defs/ToolInventory" }, "toolInventoryStatus": { "$ref": "#/$defs/ToolInventoryStatus" },
       "agentRune": { "$ref": "#/$defs/AgentRune" }, "kind": { "$ref": "#/$defs/ChatListKind" }, "cwd": { "type": "string", "maxLength": 4096 }, "gitBranch": { "type": "string", "maxLength": 160 }, "agentName": { "$ref": "#/$defs/AgentName" }, "clientMode": { "$ref": "#/$defs/TuiClientMode" }, "hubChatId": { "$ref": "#/$defs/PiId" }, "settingsPending": { "type": "boolean" }, "hosts": { "$ref": "#/$defs/HostInventory" }, "brief": { "$ref": "#/$defs/TaskBrief" }, "tasks": { "$ref": "#/$defs/TuiTasks" }, "rex": { "$ref": "#/$defs/TuiRex" }, "modelSettings": { "$ref": "#/$defs/ModelSettingsSnapshot" }, "hubId": { "$ref": "#/$defs/TransportId" }, "chatId": { "$ref": "#/$defs/PiId" }, "title": { "type": "string", "maxLength": 160 }, "model": { "type": "string", "maxLength": 160 }, "tools": { "type": "string", "maxLength": 80 },
       "agentStatus": { "$ref": "#/$defs/AgentStatus" }, "subagents": { "$ref": "#/$defs/SubagentSnapshot" }, "activityKnown": { "type": "boolean" }, "busy": { "type": "boolean" }, "queued": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 }, "entries": { "type": "array", "maxItems": 80, "items": { "$ref": "#/$defs/TuiEntry" } }, "hasOlder": { "type": "boolean" }, "historical": { "type": "boolean" }, "preview": { "type": "string", "maxLength": 4096 }, "notice": { "type": "string", "maxLength": 1024 }, "draft": { "anyOf": [{ "$ref": "#/$defs/TuiDraft" }, { "type": "null" }] }

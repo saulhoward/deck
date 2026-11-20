@@ -5,7 +5,7 @@ export { displayText, thinkingUsage } from "./tui-content.js";
 import { validInventoryFields } from "./tool-inventory-contracts.js";
 import { localGitBranch } from "./tui-workspace.js";
 import { canParticipate, requireParticipation, requireNavigation, requireCreation, inspectOnly } from "./client-access.js";
-import type { TuiClientMode } from "./generated/contracts.js";
+import type { HistoryPage, TuiClientMode } from "./generated/contracts.js";
 import { validAgentStatus, validSubagents } from "./view-contracts.js";
 import { validRexReply } from "./rex-open-contracts.js";
 import { sameSelection, validModelSettingsSnapshot } from "./model-settings-contracts.js";
@@ -13,7 +13,7 @@ import { randomUUID } from "node:crypto";
 import { DraftStore, type Draft } from "./drafts.js";
 import { hubCommand } from "./hub-client.js";
 import { HubError } from "./responses.js";
-import { validMachineIdentity, validRexUuid, validTuiRequest, validTuiResponse, type TuiRequest, type TuiSnapshot, type TuiEntry, type TuiResponse } from "./generated/contracts.js";
+import { validInventoryToolName, validMachineIdentity, validRexUuid, validTuiRequest, validTuiResponse, type TuiRequest, type TuiSnapshot, type TuiEntry, type TuiResponse } from "./generated/contracts.js";
 import { validSafePiId, validMutationArgs } from "./mutation-contracts.js";
 
 import { validTaskTarget } from "./task-target.js";
@@ -64,6 +64,7 @@ export function validReply(value: unknown, id: string, hubId?: string, chatId?: 
     (i === 0 || item.id > s.entries[i - 1]!.id));
 }
 type Command = (name: string, args: Record<string, unknown>, hubId?: string) => Promise<any>;
+const isMessage = (entry: TuiEntry) => entry.parts?.some(part => part.kind === "text" && part.text.length > 0);
 export class TuiSession {
   private hubId?: string;
   private chatId?: string;
@@ -72,6 +73,7 @@ export class TuiSession {
   private activeSaved = false;
   private state?: TuiSnapshot;
   private before: string | undefined;
+  private liveHead: number | undefined; // Anchor from a live read, never a historical page.
   private pageLimits = { latest: 80, older: 80 };
   private supportsSettings = false;
   private supportsRex = false;
@@ -88,6 +90,7 @@ export class TuiSession {
   private localWorkspace = false;
   private gitSampleAt = 0;
   private inventorySampleAt = 0;
+  private userImport: string | undefined;
   constructor(private readonly command: Command, private readonly selected?: string, private readonly expectedHub?: string, private readonly draftRoot?: string, private readonly port = 52800) {}
   async registerStartup(allocationId: string, blockId: string | undefined) {
     if (this.state || this.startupBlocked) throw new Error("Rex startup cannot be replayed in this client");
@@ -117,7 +120,7 @@ export class TuiSession {
   private async initialize() { if (!this.state) await this.selectChat(this.selected); }
   private async selectChat(target?: string) {
     if (this.state) requireNavigation(this.mode);
-    if (this.active || (this.participates() && this.settingsUncertain)) throw new Error("Resolve saved requests/settings before switching tasks");
+    if (this.active || this.userImport || (this.participates() && this.settingsUncertain)) throw new Error("Resolve saved requests/settings before switching tasks");
     const status = await this.command("status", target ? { chatId: target } : {}, this.hubId ?? this.expectedHub);
     if (status.hubGuard !== 1 || (target && status.chatId !== target) || ((this.hubId ?? this.expectedHub) && status.hubId !== (this.hubId ?? this.expectedHub))) throw new Error("Hub/chat identity guard required; selection unchanged");
     if (this.hubChatId !== undefined && status.mainChatId !== this.hubChatId) throw new Error("Hub chat identity changed; selection unchanged");
@@ -129,7 +132,7 @@ export class TuiSession {
     // Commit the selection only after all fallible reads. No old page, sample,
     // cursor, binding or request can leak into the new chat on a failed switch.
     this.hubId = status.hubId; this.chatId = status.chatId; this.hubChatId = status.mainChatId; this.store = store;
-    this.active = active; this.activeSaved = !!active; this.before = undefined;
+    this.active = active; this.activeSaved = !!active; this.before = undefined; this.liveHead = undefined; this.userImport = undefined;
     this.pageLimits = { latest: 80, older: 80 };
     this.binding = status.binding && { machineId: status.binding.machineId, cwd: status.binding.cwd };
     this.localWorkspace = status.binding?.cwd === process.cwd() && (this.mode === "task" || status.machineId === status.binding?.machineId);
@@ -138,7 +141,7 @@ export class TuiSession {
     this.supportsBrief = status.taskBrief === 1; this.supportsHosts = status.hostInventory === 1;
     this.supportsStartup = status.rexStartup === 1;
     this.supportsSettings = status.modelSettings === 1; this.settingsUncertain = this.supportsSettings;
-    const notice = !writable ? `${inspectOnly}${saved.length ? " Saved requests remain untouched; review them in the Rex client." : ""}` : active ? `Saved ${active.kind} ${active.requestId}: :retry or :discard; instruction drafts use --no-tui.${saved.length > 1 ? " Other drafts: --no-tui /drafts." : ""}` : "";
+    const notice = !writable ? `${inspectOnly}${saved.length ? " Saved requests remain untouched; review them in the Rex client." : ""}` : active ? `Saved ${active.kind} ${active.requestId}: ${active.kind === "instructions" && !active.source ? "use --no-tui to retry workspace instructions, or :discard" : ":retry or :discard"}.${saved.length > 1 ? " Other drafts: --no-tui /drafts." : ""}` : "";
     this.state = { ...(status.binding ? { cwd: displayText(status.binding.cwd, 4096), kind: status.binding.kind, ...(status.binding.agentRune === undefined ? {} : { agentRune: status.binding.agentRune }) } : {}), ...(status.binding?.agentName === undefined ? {} : { agentName: status.binding.agentName }), clientMode: this.mode, hubChatId: this.hubChatId!, hubId: this.hubId!, chatId: this.chatId!, title: this.chatId === this.hubChatId ? "Hub" : displayText(status.binding?.title || `Task ${this.chatId}`, 160), model: displayText(`${status.model?.provider ?? ""}/${status.model?.modelId ?? "unknown model"}`, 160), tools: status.tools, activityKnown: false, busy: false, queued: 0, entries: [], hasOlder: false, historical: false, preview: "", notice, draft: null, ...(status.binding?.brief ? { brief: { ...(status.binding.brief.problem === undefined ? {} : { problem: displayText(status.binding.brief.problem, 2048) }), ...(status.binding.brief.description === undefined ? {} : { description: displayText(status.binding.brief.description, 8192) }) } } : {}) };
     this.inventorySampleAt = Date.now();
     this.inventory(status);
@@ -185,27 +188,37 @@ export class TuiSession {
       catch (error) { if (!(error instanceof HubError) || error.policy.action !== "reduce_page" || limit === 1) throw error; limit = Math.max(1, Math.floor(limit / 2)); }
     }
   }
-  private renderHistory(page: any): { entries: TuiEntry[]; next: string | undefined } {
-    let budget = 128 * 1024, wireBudget = 512 * 1024;
-    const entries: TuiEntry[] = [];
-    // History arrives newest-first. Spend the view budget in that order so
-    // older tool output cannot hide new input, answers or failure markers.
-    for (const entry of page.items) {
-      const projected = projectEntry(entry);
-      const bytes = Buffer.byteLength(projected.text);
-      // Parts duplicate the flat compatibility text and add JSON overhead. A
-      // separate wire budget prevents many tiny parts escaping the frame cap.
-      const wireBytes = Buffer.byteLength(JSON.stringify(projected)) + 1;
-      if (bytes > budget || wireBytes > wireBudget) break;
-      budget -= bytes; wireBudget -= wireBytes; entries.push(projected);
+  private renderHistory(page: HistoryPage, mode: "poll" | "older" | "latest" = "latest"): { entries: TuiEntry[]; next: string | undefined } {
+    let budget = 128 * 1024, wireBudget = 512 * 1024, wantActivity = mode !== "older";
+    const entries: TuiEntry[] = []; // newest first until the final reversal
+    const append = (entry: TuiEntry) => {
+      const bytes = Buffer.byteLength(entry.text), wireBytes = Buffer.byteLength(JSON.stringify(entry)) + 1;
+      if (entries.length === 80 || bytes > budget || wireBytes > wireBudget) return false;
+      budget -= bytes; wireBudget -= wireBytes; entries.push(entry); return true;
+    };
+    // A long tool run should not push already visible messages out of the chat.
+    // Reuse only messages in a *contiguous observed range* of this live chat;
+    // never stitch across a gap, selection, historical page or explicit :latest.
+    const oldest = page.items.at(-1)?.id, previous = this.liveHead;
+    const overlaps = mode === "poll" && page.next && previous !== undefined && page.items.some(e => e.id === previous);
+    const carry = overlaps && oldest !== undefined ? this.state!.entries.filter(e => e.id < oldest && isMessage(e)).reverse() : [];
+    this.liveHead = mode === "older" ? undefined : page.items[0]?.id;
+    const full = () => { entries.reverse(); return { entries, next: String(entries[0]!.id) }; };
+    for (const raw of page.items) {
+      // Preserve cursor positions but don't spend a second byte budget shipping
+      // obsolete results/notices that can't be shown. A note can be an actual
+      // agent-origin deck.input message; retain its text and attribution.
+      const empty: TuiEntry = { id: raw.id, role: "note", parts: [], text: "" };
+      let entry = !wantActivity && raw.kind !== "deck.input" && raw.kind !== "pi.assistant" ? empty : projectEntry(raw);
+      if (!isMessage(entry) && !wantActivity) entry = empty;
+      if (entry.thinkingTokens || entry.parts?.some(p => p.kind === "tool" || p.text.length > 0)) wantActivity = false;
+      if (carry.length && entries.length && !entry.text && !entry.thinkingTokens) continue;
+      if (!append(entry)) return full();
     }
-    // The first entry always fits. If the display window is smaller than the
-    // validated page, :older must start before its oldest displayed ID, not
-    // skip the omitted entries using the server's farther-back cursor.
-    const next = entries.length < page.items.length ? String(entries.at(-1)!.id) : page.next;
-    return { entries: entries.reverse(), next };
+    for (const entry of carry) if (!append(entry)) return full();
+    return { entries: entries.reverse(), next: carry.length ? this.before : page.next };
   }
-  private sample(page: any) {
+  private sample(page: Pick<HistoryPage, "activity" | "progress">) {
     // Absence is unknown, never a fresh replay of an old completion/idle sample.
     delete this.state!.agentStatus;
     delete this.state!.subagents;
@@ -214,11 +227,15 @@ export class TuiSession {
     this.state!.activityKnown = page.activity !== undefined;
     this.state!.busy = page.activity?.busy ?? false;
     this.state!.queued = page.activity?.queued ?? 0;
-    this.state!.preview = page.progress ? displayText([page.progress.generation?.text ?? "", ...(page.progress.tools ?? []).map((tool: any) => `[${tool.name}] ${tool.text}`)].filter(Boolean).join("\n"), 4096) : "";
+    const running = (page.activity?.tools ?? []).filter(tool => tool.status === "running").map(tool => tool.name);
+    this.state!.activeTools = [...new Set(running.filter(validInventoryToolName))];
+    const latest = page.progress?.tools?.at(-1);
+    this.state!.preview = displayText(page.progress?.generation?.text || (latest ? `[${latest.name}] ${latest.text}` : running.length ? `[using ${running.at(-1)}]` : ""), 4096);
   }
   private async deliver() {
     requireParticipation(this.mode, this.chatId, this.hubChatId);
-    if (!this.active || this.active.kind === "instructions") throw new Error("Use --no-tui to retry saved instruction requests");
+    if (!this.active) throw new Error("No pending draft to retry");
+    if (this.active.kind === "instructions" && this.active.source !== "user") throw new Error("Use --no-tui to retry workspace instruction requests");
     if (this.active.kind === "task") {
       requireCreation(this.mode, this.chatId, this.hubChatId);
       if (!this.supportsRex) throw new Error("Rex support is required to create a task; no request sent");
@@ -227,12 +244,16 @@ export class TuiSession {
     this.activeSaved = false;
     await this.store!.save(this.active); // Must succeed before network; exact original fields.
     this.activeSaved = true;
-    const method = this.active.kind === "task" ? taskCreationCommand(this.active) : "admit";
+    const method = this.active.kind === "task" ? taskCreationCommand(this.active) : this.active.kind === "instructions" ? "import_instructions" : "admit";
     const { kind, chatId, requestId, ...args } = this.active;
-    const ack = await this.command(method, { requestId, ...args, ...(kind === "input" ? { chatId } : {}) }, this.hubId);
+    const ack = await this.command(method, { requestId, ...args, ...(kind !== "task" ? { chatId } : {}) }, this.hubId);
     this.activeSaved = false;
     await this.store!.remove(requestId); this.active = undefined;
-    if (kind === "input") {
+    if (kind === "instructions") {
+      this.userImport = ack.taskId;
+      this.state!.notice = "Loading ~/.codex/AGENTS.md from the assigned machine…";
+      await this.observeUserImport();
+    } else if (kind === "input") {
       this.state!.historical = false; // The next unheld poll follows the new conversation turn.
       this.state!.notice = "Input admitted; completion not yet confirmed";
     }
@@ -246,6 +267,28 @@ export class TuiSession {
       } catch { this.state!.notice = `Task ${ack.chatId} created; Rex open unconfirmed. :select ${ack.chatId}, inspect Rex, then explicitly open/reopen if needed. No automatic retry.`; }
     }
   }
+  private async observeUserImport() {
+    if (!this.userImport) return;
+    let task: import("./generated/contracts.js").InstructionTaskView | null;
+    try { task = (await this.command("instruction_status", { chatId: this.chatId, taskId: this.userImport }, this.hubId)).import; }
+    catch {
+      // Admission is confirmed. A failed observation must not recreate a draft,
+      // reread the file, or prevent history and activity from being refreshed.
+      this.state!.notice = `AGENTS.md import ${this.userImport} admitted; result unavailable. Checking status, not retrying the read.`;
+      return;
+    }
+    if (task?.state !== "terminal") return;
+    this.userImport = undefined;
+    if (task.result?.status === "applied" && task.result.source.path === "~/.codex/AGENTS.md") {
+      this.state!.notice = "Loaded ~/.codex/AGENTS.md into this chat.";
+      this.inventorySampleAt = 0;
+      await this.refreshInventory();
+    } else {
+      const reason = task.result?.status === "rejected" ? task.result.reason : task.result?.status === "aborted" ? "aborted" : undefined;
+      this.state!.notice = reason === "not_found" ? "File not found: ~/.codex/AGENTS.md on the assigned machine." :
+        reason ? `Could not load ~/.codex/AGENTS.md: ${reason}.` : `AGENTS.md import ${task.taskId} finished; application not confirmed.`;
+    }
+  }
   async handle(request: TuiRequest): Promise<TuiSnapshot> {
     if (!validRequest(request)) throw new Error("Invalid renderer request");
     if (this.startupBlocked) throw new Error("Rex startup unconfirmed; no input enabled");
@@ -253,7 +296,7 @@ export class TuiSession {
     let state = this.state!;
     if (request.action === "select" || request.action === "tasks" || request.action === "hosts") requireNavigation(this.mode);
     if (request.action === "create") requireCreation(this.mode, this.chatId, this.hubChatId);
-    if (["send", "retry", "discard", "stop", "configure"].includes(request.action)) requireParticipation(this.mode, this.chatId, this.hubChatId);
+    if (["send", "retry", "discard", "stop", "configure", "agentsmd"].includes(request.action)) requireParticipation(this.mode, this.chatId, this.hubChatId);
     switch (request.action) {
       case "select":
         await this.selectChat(request.chatId); state = this.state!; break;
@@ -298,6 +341,10 @@ export class TuiSession {
         } catch { throw new Error("Rex open unconfirmed; an attempt may exist. Inspect status/Rex before opening again. No automatic retry."); }
         break;
       }
+      case "agentsmd":
+        if (!this.binding || this.active || this.userImport || this.settingsUncertain) throw new Error("Resolve pending requests and confirm the binding before importing AGENTS.md");
+        this.active = { kind: "instructions", source: "user", requestId: randomUUID(), chatId: this.chatId!, ...this.binding }; this.activeSaved = false;
+        await this.deliver(); break;
       case "send":
         if (this.settingsUncertain) throw new Error("Model settings unconfirmed; wait for a fresh observation before submitting");
         if (this.active) throw new Error("Saved request unresolved: :retry or :discard before new input");
@@ -330,7 +377,7 @@ export class TuiSession {
         state.notice = "Stop requested, not a drained/completed receipt"; break;
       case "older": {
         if (!this.before) { state.notice = "No older history in this view"; break; }
-        const page = this.renderHistory(await this.history(this.before));
+        const page = this.renderHistory(await this.history(this.before), "older");
         const entries = page.entries;
         this.before = page.next; state.hasOlder = !!page.next;
         if (entries.length === 0) { state.notice = "No older retained history; current view unchanged"; break; }
@@ -338,10 +385,11 @@ export class TuiSession {
       }
       case "latest":
       case "poll": {
+        await this.observeUserImport();
         await this.refreshInventory();
         if (this.supportsSettings) await this.refreshSettings();
         if (request.action === "latest" || (!request.hold && !state.historical)) {
-          const page = await this.history(), rendered = this.renderHistory(page);
+          const page = await this.history(), rendered = this.renderHistory(page, request.action);
           state.entries = rendered.entries; this.before = rendered.next; state.hasOlder = !!rendered.next; state.historical = false; this.sample(page);
         } else {
           // Keep a scrolled/history window stable; samples never replace it.

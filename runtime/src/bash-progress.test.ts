@@ -54,7 +54,7 @@ test("native tool publication coalesces to one in-flight commit and one replacem
       await settle.promise; return { ok: true, output: "FINAL" };
     } };
     const api = { taskId: 3, conversationId: 1, snapshot: async () => ({ machineId: "local", cwd: "/saved" }), details: async (value: unknown) => { values.push(value); if (failure) throw new Error("Presentation unavailable"); await commit.promise; } } as unknown as ToolExecutionApi;
-    const bash = nativeFiles(host).tools!.find((tool) => tool.name === "bash")!;
+    const bash = nativeFiles(host, "local").tools!.find((tool) => tool.name === "bash")!;
     const result = bash.execute({ command: "unused", path: "unused" }, api, context);
     // Let the fake binding lookup and the first publication enter.
     await new Promise((resolve) => setTimeout(resolve, 10)); assert.equal(values.length, 1);
@@ -81,7 +81,7 @@ test("a sample arriving between publisher loop exit and finally is not stranded 
       queueMicrotask(() => queueMicrotask(() => callback({ output: "racing replacement", truncated: false, lossyUtf8: false })));
     }) : Promise.resolve();
   } } as unknown as ToolExecutionApi;
-  const result = nativeFiles(host).tools![0]!.execute({ command: "unused", path: "unused" }, api, context);
+  const result = nativeFiles(host, "local").tools![0]!.execute({ command: "unused", path: "unused" }, api, context);
   await new Promise((resolve) => setTimeout(resolve, 10)); commit.release();
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(values.length, 2); assert.match(JSON.stringify(values[1]), /racing replacement/);

@@ -5,6 +5,10 @@ export type { NativeRequest, NativeResponse, NativeOperation, NativeResult, Nati
 const bytes = (s: string, cap: number) => Buffer.byteLength(s, "utf8") <= cap;
 const path = (s: string) => bytes(s, 4096) && !s.includes("\0");
 const safeId = (s: string) => /^[1-9]\d*$/.test(s) && Number.isSafeInteger(Number(s));
+export function validSkillPath(value: string): boolean {
+  const [name, ...parts] = value.split("/");
+  return bytes(value, 512) && name !== undefined && wire.validSkillName(name) && !name.startsWith("-") && !name.endsWith("-") && !name.includes("--") && parts.every(p => p.length > 0 && bytes(p, 255) && !p.startsWith(".") && !/[\\\\\x00-\x1f\x7f]/.test(p));
+}
 export function validCancellationId(s: string): boolean {
   if (!/^[1-9]\d{0,19}$/.test(s)) return false;
   const id = BigInt(s);
@@ -18,7 +22,8 @@ export function validNativeRequest(value: unknown): value is wire.NativeRequest 
   const ephemeral = operation === "rex_inspect" || operation === "rex_resolve" || operation === "link_status";
   if (ephemeral !== (BigInt(id) >= 1n << 63n)) return false;
   switch (operation) {
-    case "link_status": return Object.keys(args).length === 0;
+    case "skill_catalog": case "user_agents_md": case "link_status": return Object.keys(args).length === 0;
+    case "skill_read": return wire.validNativeReadArgs(args) && validSkillPath(args.path);
     case "read": return wire.validNativeReadArgs(args) && path(args.path);
     case "write": return wire.validNativeWriteArgs(args) && path(args.path) && bytes(args.content, 128 * 1024);
     case "edit": return wire.validNativeEditArgs(args) && path(args.path) && args.oldText.length > 0 && bytes(args.oldText, 128 * 1024) && bytes(args.newText, 128 * 1024);

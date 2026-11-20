@@ -61,7 +61,7 @@ let
     npmDeps = pkgs.fetchNpmDeps {
       name = "deck-${version}-npm-deps";
       src = source manifests;
-      hash = "sha256-CE3g6O9SEi/7POrAepMoor5tqZ3IGZZlLmXR4AqAi+k=";
+      hash = "sha256-X+iPY4OkQUZbl3F99TH7XJG44i0C+240Sp/ZwH4lCyA=";
     };
     npmFlags = [ "--ignore-scripts" ];
     outputs = [

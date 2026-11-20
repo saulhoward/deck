@@ -1,7 +1,7 @@
 // Private unacknowledged launcher requests, never a queue or history replica.
 import { createHash,randomUUID } from "node:crypto";
 import { mkdir,lstat,open,link,rm,readdir } from "node:fs/promises";
-import { homedir } from "node:os";
+import { clientDirectory } from "./user-paths.js";
 import { isAbsolute,join } from "node:path";
 import { type LauncherRequest,validRexUuid } from "./generated/contracts.js";
 import { validLaunchRequest } from "./launcher-contracts.js";
@@ -10,7 +10,7 @@ export type LaunchMutation=Extract<LauncherRequest,{command:"launch_create"|"lau
 export class LauncherDrafts {
   readonly directory:string;private readonly root:string;
   constructor(readonly target:Pick<LauncherTarget,"hubId"|"machineId">,root?:string){
-    this.root=root??process.env.DECK_CLIENT_STATE_DIRECTORY??(process.platform==="darwin"?join(homedir(),"Library/Application Support/deck/client"):join(process.env.XDG_STATE_HOME||join(homedir(),".local/state"),"deck/client"));
+    this.root=root??clientDirectory();
     if(!isAbsolute(this.root))throw new Error("Client draft root must be absolute");
     this.directory=join(this.root,"launcher-drafts",createHash("sha256").update(JSON.stringify([target.hubId,target.machineId])).digest("hex"));
   }

@@ -63,7 +63,7 @@ pub fn run(native: Native, allocator: std.mem.Allocator, args: []const []const u
         const config = try @import("state.zig").load(native.io, a, dir);
         if (!std.mem.eql(u8, config.value.machine_id, status.machineId)) return error.HubIdentityChanged;
     }
-    const root = if (opts.directory == null and native.environ.getPosix("DECK_CLIENT_STATE_DIRECTORY") != null) native.environ.getPosix("DECK_CLIENT_STATE_DIRECTORY").? else try std.fs.path.join(a, &.{ try @import("state.zig").directory(native, a, opts.directory), "client" });
+    const root = try @import("state.zig").clientDirectory(native, a, opts.directory);
     var root_dir = try storage.directory(native, root);
     defer root_dir.close(native.io);
     const managed_root = try std.fs.path.join(a, &.{ root, "hubs" });

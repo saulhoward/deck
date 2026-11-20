@@ -329,7 +329,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     if (o.here and (std.c.isatty(0) != 1 or std.c.isatty(1) != 1)) return error.InteractiveTerminalRequired;
     const selected = try selectedHub(o, native.environ.getPosix("DECK_HUB_REX_HOST"));
     const cwd = try std.process.currentPathAlloc(native.io, a);
-    const root = if (o.directory == null and native.environ.getPosix("DECK_CLIENT_STATE_DIRECTORY") != null) native.environ.getPosix("DECK_CLIENT_STATE_DIRECTORY").? else try std.fs.path.join(a, &.{ try @import("state.zig").directory(native, a, o.directory), "client" });
+    const root = try @import("state.zig").clientDirectory(native, a, o.directory);
     var root_dir = try storage.directory(native, root);
     defer root_dir.close(native.io);
     const port = try std.fmt.allocPrint(a, "{d}", .{o.port});

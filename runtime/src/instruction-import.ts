@@ -6,10 +6,13 @@ import type { HostFiles } from "./host-files.js";
 export const INSTRUCTION_BYTES = 32 * 1024;
 export const IMPORT_KIND = "deck.import-instructions";
 export const unfinished = ["pending", "running", "waiting", "sleeping", "completing"] as const;
-export type InstructionSource = { machineId: string; cwd: string; path: "AGENTS.md"; sha256: string; bytes: number; taskId: string };
-type Rejection = "offline" | "unavailable" | "read_failed" | "effect_uncertain" | "invalid" | "too_large" | "settings_changed" | "busy";
+export type InstructionSource = { machineId: string; cwd: string; path: "AGENTS.md" | "~/.codex/AGENTS.md"; sha256: string; bytes: number; taskId: string };
+type Rejection = "offline" | "unavailable" | "not_found" | "read_failed" | "effect_uncertain" | "invalid" | "too_large" | "settings_changed" | "busy";
 export type InstructionImportResult = { status: "applied"; source: InstructionSource } | { status: "rejected"; reason: Rejection } | { status: "aborted" };
-type ImportInput = { binding: Binding; previousHash: string | null };
+type ImportInput = { binding: Binding; previousHash: string | null; source?: "user" };
+// Separate prompt section: an explicit personal default must not overwrite a
+// project import or the instructions derived from the task brief.
+const UserAgentsMd = defineDoc<{ text?: string }>({ kind: "deck.user-agents-md", version: 1, scope: "conversation", history: "rewindable", fork: "initial", initial: () => ({}), checkpointWhen: () => true });
 export const InstructionSourceDoc = defineDoc<{ source?: InstructionSource }>({
   kind: "deck.instruction-source", version: 1, scope: "conversation", history: "rewindable", fork: "asOf", initial: () => ({}), checkpointWhen: () => true,
 });
@@ -57,28 +60,34 @@ export function instructionImport(host?: HostFiles) {
       try {
         // Same Pi task ID and exact request on recovery. The worker retains the bytes
         // or reports uncertainty; never reread on the hub or invent a new operation ID.
-        result = await host.call(task.input.binding, String(api.taskId), "read", { path: "AGENTS.md" }, api.signal);
+        const personal = task.input.source === "user";
+        result = await host.call(task.input.binding, String(api.taskId), personal ? "user_agents_md" : "read", personal ? {} : { path: "AGENTS.md" }, api.signal);
       } catch {
         api.signal.throwIfAborted();
         await api.commit(() => completed({ status: "rejected", reason: "unavailable" }), context); return;
       }
       api.signal.throwIfAborted(); // Issued files drain, but cancellation must never apply them.
       let reason: Rejection | undefined;
-      if (!result.ok) reason = result.code === "offline" || result.code === "effect_uncertain" ? result.code : "read_failed";
+      if (!result.ok) reason = result.code === "offline" || result.code === "not_found" || result.code === "effect_uncertain" ? result.code : "read_failed";
       else if (Buffer.byteLength(result.output, "utf8") > INSTRUCTION_BYTES) reason = "too_large";
       else if (result.truncated || result.output.includes("\0") || Buffer.from(result.output, "utf8").toString("utf8") !== result.output) reason = "invalid";
       if (reason) { await api.commit(() => completed({ status: "rejected", reason }), context); return; }
-      const source: InstructionSource = { ...task.input.binding, path: "AGENTS.md", sha256: instructionHash(result.output)!, bytes: Buffer.byteLength(result.output, "utf8"), taskId: String(api.taskId) };
+      const source: InstructionSource = { ...task.input.binding, path: task.input.source === "user" ? "~/.codex/AGENTS.md" : "AGENTS.md", sha256: instructionHash(result.output)!, bytes: Buffer.byteLength(result.output, "utf8"), taskId: String(api.taskId) };
       await api.commit(async (tx) => {
         const reason = await refusal(tx, api.conversationId, api.taskId, task.input);
         if (reason) return completed({ status: "rejected", reason });
         // Settings, source provenance and task outcome share this one Pi commit.
-        await configure(tx, api.conversationId, { instructions: result.output });
-        (await tx.doc(InstructionSourceDoc, api.conversationId)).source = source;
+        if (task.input.source === "user") {
+          (await tx.doc(UserAgentsMd, api.conversationId)).text = result.output;
+          (await tx.doc(ChatDoc, api.conversationId)).userAgentsMdHash = source.sha256;
+        } else {
+          await configure(tx, api.conversationId, { instructions: result.output });
+          (await tx.doc(InstructionSourceDoc, api.conversationId)).source = source;
+        }
         return completed({ status: "applied", source });
       }, context);
     } },
     abort: async (_task, api, context) => { await api.commit(() => completed({ status: "aborted" }), context); },
   });
-  return { task, extension: defineExtension({ name: "deck.instruction-import", tasks: [task] }) };
+  return { task, extension: defineExtension({ name: "deck.instruction-import", tasks: [task], sections: [{ key: "user_agents_md", render: async ({ read, conversationId }, ctx) => (await read.snapshot(UserAgentsMd, conversationId, ctx))?.text }] }) };
 }

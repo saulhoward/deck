@@ -1,8 +1,8 @@
 // Pre-lock client-only bootstrap. No Harness, credential store, or secret output.
 import { constants } from "node:fs";
 import { access, open } from "node:fs/promises";
-import { homedir } from "node:os";
-import { delimiter, isAbsolute, join, resolve } from "node:path";
+import { hubSecretReferences } from "./user-paths.js";
+import { delimiter, isAbsolute, resolve } from "node:path";
 
 // Deliberately smaller than general dotenv: configuration cannot set PATH,
 // NODE_OPTIONS, authentication-mode overrides, shell expansions or plaintext keys.
@@ -45,7 +45,7 @@ export async function bootstrap(args: string[]): Promise<never> {
   const [stage, executable, ...serveArgs] = args;
   if (!executable || !isAbsolute(executable) || serveArgs[0] !== "serve" || !["resolve", "handoff"].includes(stage ?? "") || serveArgs.includes("--credentials-resolved")) throw new Error("Invalid credential bootstrap");
   if (stage === "resolve") {
-    const refs = await readSecretReferences(join(homedir(), ".config", "deck", ".env"));
+    const refs = await readSecretReferences(hubSecretReferences());
     if (refs?.OPENAI_API_KEY) {
       // Pass the validated snapshot as reference-valued environment variables.
       // op run supports these natively. It must not reread a mutable dotenv file

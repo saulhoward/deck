@@ -9,8 +9,9 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 
 const binary = process.env.DECK_TEST_BINARY;
+const observerMarker = "fixture: store failure observer installed";
 for (const mode of ["killed", "clean exit", "in-flight killed", "active shell killed", "failed harness"] as const) {
-  test(`hub notices writer ${mode}, releases port and permits reopen`, { skip: !binary, timeout: 15_000 }, async () => {
+  test(`hub notices writer ${mode}, releases port and permits reopen`, { skip: !binary, timeout: 15_000 }, async t => {
     const directory = await mkdtemp(join(tmpdir(), "deck-writer-failure-"));
     const probe = createServer(); probe.listen(0, "127.0.0.1"); await once(probe, "listening");
     const address = probe.address(); assert.ok(address && typeof address !== "string"); const port = address.port;
@@ -25,7 +26,7 @@ for (const mode of ["killed", "clean exit", "in-flight killed", "active shell ki
       setInterval(()=>{if(existsSync(database+'.exit'))process.exit(0)},20);
       ${mode === "failed harness" ? `const {DeckRuntime}=await import(${JSON.stringify(pathToFileURL(resolve("runtime/dist/deck.js")).href)});
         const open=DeckRuntime.open; DeckRuntime.open=async(...args)=>{const runtime=await open(...args);
-          Object.defineProperty(runtime.harness,'closed',{value:new Promise(resolve=>{setInterval(()=>{if(existsSync(database+'.fail'))resolve({reason:'failed',error:new Error('PRIVATE_FAILURE_SENTINEL')})},20)})});writeFileSync(database+'.ready','ready');return runtime};
+          Object.defineProperty(runtime.harness,'closed',{value:new Promise(resolve=>{setInterval(()=>{if(existsSync(database+'.fail'))resolve({reason:'failed',error:new Error('PRIVATE_FAILURE_SENTINEL')})},20)})});console.error(${JSON.stringify(observerMarker)});return runtime};
         await import(${JSON.stringify(pathToFileURL(resolve("runtime/dist/main.js")).href)});` : ""}
       ${mode === "active shell killed" ? `const {PipeFiles}=await import(${JSON.stringify(pathToFileURL(resolve("runtime/dist/host-files.js")).href)});
         const tools=new PipeFiles(Number(args[6]),Number(args[7]),Number(args[8]));
@@ -34,7 +35,9 @@ for (const mode of ["killed", "clean exit", "in-flight killed", "active shell ki
     const hub = spawn(binary!, ["serve", "--mock", "--directory", directory, "--port", String(port), "--runtime", fixture]);
     const closed = once(hub, "close"); let errors = ""; let pid: number | undefined; let shellPid: number | undefined;
     const transport = new AbortController();
-    hub.stderr.on("data", (chunk) => { errors += String(chunk); });
+    const observerReady = new Promise<boolean>(ready => {
+      hub.stderr.on("data", chunk => { errors += String(chunk); if (errors.includes(observerMarker)) ready(true); });
+    });
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       for (let i = 0; i < 200; i++) {
@@ -61,15 +64,12 @@ for (const mode of ["killed", "clean exit", "in-flight killed", "active shell ki
       }
       if (mode === "clean exit") await writeFile(join(directory, "session.sqlite.exit"), "exit");
       else if (mode === "failed harness") {
-        // Listener/PID readiness precedes implementation hashing and Harness.open.
-        // Measure failure shutdown only after the synthetic observer is installed,
-        // not against startup cost under concurrent native/fingerprint tests.
-        let observerReady = false;
-        for (let i = 0; i < 500; i++) {
-          try { await readFile(join(directory, "session.sqlite.ready")); observerReady = true; break; }
-          catch { await new Promise((resolve) => setTimeout(resolve, 10)); }
-        }
-        assert.ok(observerReady, "Synthetic Harness observer never became ready");
+        // Listener/PID readiness precedes the real production fingerprint. The
+        // existing test deadline bounds startup; time *shutdown* from injection,
+        // not from spawn, and don't poll the filesystem during fingerprinting.
+        t.signal.throwIfAborted();
+        assert.ok(await Promise.race([observerReady, closed.then(() => false), once(t.signal, "abort").then(() => false)]),
+          `Writer exited or test cancelled before the failure observer was ready: ${errors}`);
         await writeFile(join(directory, "session.sqlite.fail"), "fail");
       }
       else process.kill(pid, "SIGKILL");

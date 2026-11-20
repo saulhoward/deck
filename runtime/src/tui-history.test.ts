@@ -73,8 +73,8 @@ test("TUI view budget preserves newest answers and follow-ups after large tool r
     const first = await f.act("poll");
     assert.equal(first.entries.at(-1)!.text, answer);
     assert.equal(first.entries.at(-2)!.text, "Complex task request");
-    assert.ok(first.entries.length < 80); assert.equal(first.hasOlder, true); bounded(first);
-    assert.ok(first.entries.some(entry => entry.parts?.some(part => part.kind === "tool" && part.clipped)));
+    assert.equal(first.hasOlder, true); bounded(first);
+    assert.ok(first.entries.every(entry => !entry.parts?.some(part => part.kind === "tool")));
     assert.equal(first.activityKnown, true); assert.equal(first.busy, false); assert.equal(first.agentStatus!.state, "done");
     assert.equal(JSON.stringify(f.retained), original);
     const held = structuredClone(first.entries);
@@ -141,7 +141,12 @@ for (const count of [60, 96]) test(`TUI byte-limited older pages expose every re
   try {
     // Hidden-only entries still occupy canonical cursor positions, including
     // positions at byte-limited page boundaries.
-    for (let i = 2; i < count; i += 6) f.retained[i] = { id: f.retained[i]!.id, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "thinking", thinking: "PRIVATE_REASONING" }], usage: { reasoning: 7, output: 10 } }] };
+    const hiddenIds = new Set<number>();
+    for (let i = 0; i < count; i++) {
+      const id = f.retained[i]!.id;
+      if (i % 6 === 2) hiddenIds.add(id);
+      f.retained[i] = hiddenIds.has(id) ? { id, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "thinking", thinking: "PRIVATE_REASONING" }], usage: { reasoning: 7, output: 10 } }] } : { id, kind: "deck.input", data: { text: "🧪".repeat(2048) } };
+    }
     const original = JSON.stringify(f.retained), seen: number[] = [];
     let hidden = 0;
     let page = await f.act("poll");
@@ -151,7 +156,7 @@ for (const count of [60, 96]) test(`TUI byte-limited older pages expose every re
     for (let visits = 0; ; visits++) {
       assert.ok(visits < f.retained.length, "older cursor must make progress"); bounded(page);
       seen.push(...page.entries.slice().reverse().map(entry => entry.id));
-      hidden += page.entries.filter(entry => entry.parts?.length === 0 && entry.text === "" && entry.thinkingTokens === 7).length;
+      hidden += page.entries.filter(entry => hiddenIds.has(entry.id) && entry.parts?.length === 0 && entry.text === "").length;
       assert.doesNotMatch(JSON.stringify(page), /PRIVATE_REASONING|\[non-text content\]/);
       if (!page.hasOlder) break;
       const oldest = page.entries[0]!.id;
@@ -173,10 +178,36 @@ for (const count of [60, 96]) test(`TUI byte-limited older pages expose every re
   } finally { await f.close(); }
 });
 
+test("live polls retain observed messages across an overlapping window of tool results but never stitch across a gap", async () => {
+  const local = await clientEnv();
+  const items: HistoryEntry[] = [{ id: 1, kind: "deck.input", data: { text: "Initial request" } }, { id: 2, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "text", text: "Initial reply" }] }] }];
+  const session = new TuiSession(async (name, args) => {
+    if (name === "status") return { hubId, hubGuard: 1, mainChatId: "1", chatId: "1", tools: "native" };
+    assert.equal(name, "history"); const eligible = items.filter(e => !args.before || e.id < Number(args.before)).slice().reverse();
+    const page = eligible.slice(0, 4); return { items: page, ...(page.length < eligible.length ? { next: String(page.at(-1)!.id) } : {}) };
+  }, undefined, undefined, local.env.DECK_CLIENT_STATE_DIRECTORY);
+  const poll = () => session.handle({ version: 1, id: "p", action: "poll" });
+  const tool = () => items.push({ id: items.length + 1, kind: "pi.tool-result", model: [{ role: "toolResult", toolName: "bash", content: [{ type: "text", text: `result ${items.length}` }] }] });
+  try {
+    await poll();
+    for (let i = 0; i < 100; i++) {
+      tool(); const live = await poll();
+      assert.deepEqual(live.entries.filter(e => e.parts?.some(p => p.kind === "text")).map(e => e.text), ["Initial request", "Initial reply"]);
+      assert.equal(live.entries.filter(e => e.role === "tool").length, 1);
+      assert.equal(live.hasOlder, false);
+    }
+    // An empty provider block has no visible activity and is not a message.
+    items.push({ id: items.length + 1, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "text", text: "" }] }] });
+    const empty = await poll(); assert.equal(empty.entries.filter(e => e.role === "tool").length, 1);
+    for (let i = 0; i < 5; i++) tool();
+    const gap = await poll(); assert.equal(gap.hasOlder, true); assert.ok(gap.entries.every(e => e.id > 2));
+  } finally { await local.close(); }
+});
+
 test("TUI wire budget also paginates many tiny parts without skipping hidden canonical IDs", async () => {
   const local = await clientEnv();
   try {
-    const retained = Array.from({ length: 83 }, (_, i) => ({ id: (i + 1) * 5, kind: i % 10 === 0 ? "pi.assistant" : "pi.tool-result", model: i % 10 === 0 ? [{ role: "assistant", content: [{ type: "thinking", thinking: "PRIVATE_REASONING" }] }] : Array.from({ length: 256 }, () => ({ role: "toolResult", toolName: "bash", isError: false, content: [] })) }));
+    const retained = Array.from({ length: 83 }, (_, i) => ({ id: (i + 1) * 5, kind: "pi.assistant", model: [{ role: "assistant", content: i % 10 === 0 ? [{ type: "thinking", thinking: "PRIVATE_REASONING" }] : Array.from({ length: 256 }, () => ({ type: "text", text: "x" })) }] }));
     const session = new TuiSession(async (name, args) => {
       if (name === "status") return { hubId, hubGuard: 1, mainChatId: "1", chatId: "1", model: { provider: "mock", modelId: "echo" }, tools: "offline" };
       assert.equal(name, "history");
@@ -228,9 +259,10 @@ test("real PTY: large retained tool output cannot hide the latest answer or a ne
     child = spawn("python3", [driver, resolve(binary!), "agent", "--tui", "--port", String(f.port)], { env: { ...f.local.env, DECK_NODE: process.execPath } });
     closed = once(child, "close"); let output = "", errors = "";
     child.stdout!.on("data", chunk => { output += String(chunk); }); child.stderr!.on("data", chunk => { errors += String(chunk); });
-    child.stdin!.end(JSON.stringify([{ wait: answer }, { wait: "bash (×" }, { keys: "What happened?" }, { keys: "\r" }, { wait: "Input admitted" }, { wait: followup }, { keys: "\x1b" }, { keys: ":q\r" }]));
+    child.stdin!.end(JSON.stringify([{ wait: answer }, { capture: "answered" }, { keys: "What happened?" }, { keys: "\r" }, { wait: "Input admitted" }, { wait: followup }, { keys: "\x1b" }, { keys: ":q\r" }]));
     assert.equal((await closed)[0], 0, errors);
     const result = JSON.parse(output); assert.equal(result.restored, true);
+    assert.match(result.screens.answered, /Complex task request/); assert.doesNotMatch(result.screens.answered, /bash|tool requested|retained entry/);
     const terminal = Buffer.from(result.output, "base64").toString(); assert.doesNotMatch(terminal, /\[view budget\]|DO_NOT_RENDER/);
     const admits = f.requests.filter(request => request.command === "admit"); assert.equal(admits.length, 1); assert.equal(admits[0].args.text, "What happened?");
     assert.ok(f.requests.every(request => ["status", "history", "activity", "progress", "admit"].includes(request.command)));
@@ -240,36 +272,36 @@ test("real PTY: large retained tool output cannot hide the latest answer or a ne
   }
 });
 
-test("real PTY: consecutive bash results show one multiplier and only the latest eight lines", { skip: !binary, timeout: 20_000 }, async () => {
+test("real PTY: only the latest tool activity is visible until the next message, including after resize", { skip: !binary, timeout: 20_000 }, async () => {
   const f = await fixture(1);
   let child: ReturnType<typeof spawn> | undefined, closed: Promise<any[]> | undefined;
   try {
     f.retained.length = 0;
+    f.retained.push({ id: 1, kind: "deck.input", data: { text: "Keep this message" } });
     for (let i = 0; i < 6; i++) {
-      f.retained.push({ id: 3 * i + 1, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "thinking", thinking: "PRIVATE_REASONING" }, { type: "toolCall", name: "bash", id: `call-${i}`, arguments: { command: "PRIVATE_ARGS" } }], usage: { reasoning: 2, output: 10 } }] });
-      f.retained.push({ id: 3 * i + 2, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "image", data: "PRIVATE_IMAGE" }] }] });
+      f.retained.push({ id: 3 * i + 2, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "thinking", thinking: "PRIVATE_REASONING" }, { type: "toolCall", name: "bash", id: `call-${i}`, arguments: { command: "PRIVATE_ARGS" } }], usage: { reasoning: 2, output: 10 } }] });
+      f.retained.push({ id: 3 * i + 3, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "image", data: "PRIVATE_IMAGE" }] }] });
       const output = i === 5 ? "PREFIX_OMITTED\n" + "界".repeat(4000) + "\n" + Array.from({ length: 10 }, (_, n) => `latest line ${n + 1}`).join("\n") + "\n" : `old output ${i}`;
-      f.retained.push({ id: 3 * i + 3, kind: "pi.tool-result", model: [{ role: "toolResult", toolName: "bash", isError: false, content: [{ type: "text", text: output }] }] });
+      f.retained.push({ id: 3 * i + 4, kind: "pi.tool-result", model: [{ role: "toolResult", toolName: "bash", isError: false, content: [{ type: "text", text: output }] }] });
     }
-    f.retained.push({ id: 19, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "text", text: "Final answer" }], stopReason: "error" }] });
     const original = JSON.stringify(f.retained);
     const driver = fileURLToPath(new URL("../../scripts/tui-pty-test.py", import.meta.url));
     child = spawn("python3", [driver, resolve(binary!), "agent", "--tui", "--port", String(f.port)], { env: { ...f.local.env, DECK_NODE: process.execPath } });
     closed = once(child, "close"); let output = "", errors = "";
     child.stdout!.on("data", chunk => { output += String(chunk); }); child.stderr!.on("data", chunk => { errors += String(chunk); });
-    child.stdin!.end(JSON.stringify([{ wait: "bash (×6)" }, { wait: "[error]" }, { capture: "compact" }, { resize: [40, 60] }, { wait: "bash (×6)" }, { capture: "narrow" }, { keys: "\x1b" }, { keys: ":q\r" }]));
+    child.stdin!.end(JSON.stringify([{ wait: "latest line 10" }, { capture: "compact" }, { resize: [40, 60] }, { wait: "latest line 10" }, { capture: "narrow" }, { keys: "Continue\r" }, { wait: followup }, { capture: "answered" }, { keys: "\x1b" }, { keys: ":q\r" }]));
     assert.equal((await closed)[0], 0, errors);
     const result = JSON.parse(output); assert.equal(result.restored, true);
-    for (const screen of Object.values(result.screens) as string[]) {
-      assert.equal(screen.match(/bash \(×6\)/g)?.length, 1);
+    for (const screen of [result.screens.compact, result.screens.narrow] as string[]) {
+      assert.match(screen, /Keep this message/);
       assert.equal(screen.match(/latest line /g)?.length, 8);
       for (let n = 3; n <= 10; n++) assert.ok(screen.includes(`latest line ${n}`));
-      assert.match(screen, /\[thinking: 12 tokens\]/);
-      assert.match(screen, /Final answer/); assert.match(screen, /\[error\]/);
-      assert.doesNotMatch(screen, /old output|PREFIX_OMITTED|tool requested|non-text content|output truncated|PRIVATE_/);
+      assert.doesNotMatch(screen, /old output|PREFIX_OMITTED|tool requested|thinking:|non-text content|output truncated|PRIVATE_/);
     }
-    assert.equal(JSON.stringify(f.retained), original);
-    assert.ok(f.requests.every(request => ["status", "history"].includes(request.command)));
+    assert.match(result.screens.answered, /Keep this message/);
+    assert.doesNotMatch(result.screens.answered, /latest line|old output|thinking:|tool requested/);
+    assert.equal(JSON.stringify(f.retained.slice(0, -2)), original);
+    assert.ok(f.requests.every(request => ["status", "history", "admit"].includes(request.command)));
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
     await closed; await f.close();

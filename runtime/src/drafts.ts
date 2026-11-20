@@ -4,12 +4,12 @@ import type { TaskBrief } from "./generated/contracts.js";
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { link, lstat, mkdir, open, opendir, rm } from "node:fs/promises";
-import { homedir } from "node:os";
+import { clientDirectory } from "./user-paths.js";
 import { isAbsolute, join } from "node:path";
 
 export type Draft = { kind: "input"; chatId: string; requestId: string; text: string; mode: "steer" } |
   ({ kind: "task"; chatId: string; requestId: string; title: string; machineId: string; cwd: string } & TaskBrief) |
-  { kind: "instructions"; chatId: string; requestId: string; machineId: string; cwd: string };
+  { kind: "instructions"; chatId: string; requestId: string; machineId: string; cwd: string; source?: "user" };
 type Saved = { version: 1; hubId: string; createdAt: number; request: Draft };
 export type DraftSummary = { kind: Draft["kind"]; chatId: string; requestId: string; createdAt: number };
 const maxBytes = 1024 * 1024;
@@ -29,7 +29,10 @@ function validate(value: unknown): Draft {
   if (data.kind === "input" && data.mode === "steer") return { kind: "input", chatId, requestId: id, text: text(data.text), mode: "steer" };
   if (data.kind === "task" || data.kind === "instructions") {
     const cwd = text(data.cwd); if (!isAbsolute(cwd)) throw new Error("Invalid saved draft cwd");
-    if (data.kind === "instructions") return { kind: "instructions", chatId, requestId: id, machineId: text(data.machineId), cwd };
+    if (data.kind === "instructions") {
+      if (data.source !== undefined && data.source !== "user") throw new Error("Invalid instruction draft source");
+      return { kind: "instructions", chatId, requestId: id, machineId: text(data.machineId), cwd, ...(data.source === "user" ? { source: "user" } : {}) };
+    }
     return { kind: "task", chatId, requestId: id, title: text(data.title), machineId: text(data.machineId), cwd, ...briefFields(data as TaskBrief) };
   }
   throw new Error("Unsupported saved draft");
@@ -44,7 +47,7 @@ export class DraftStore {
   private readonly root: string;
   constructor(readonly hubId: string, root?: string) {
     if (!hubId || hubId.length > 200) throw new Error("Hub lacks draft identity; restart the updated hub");
-    root ??= process.env.DECK_CLIENT_STATE_DIRECTORY ?? (process.platform === "darwin" ? join(homedir(), "Library/Application Support/deck/client") : join(process.env.XDG_STATE_HOME || join(homedir(), ".local/state"), "deck/client"));
+    root ??= clientDirectory();
     if (!isAbsolute(root)) throw new Error("Client state directory must be absolute");
     this.root = root;
     this.directory = join(root, "drafts", createHash("sha256").update(hubId).digest("hex"));

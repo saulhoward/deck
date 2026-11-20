@@ -5,6 +5,19 @@ import { join } from "node:path";
 import test from "node:test";
 import { DraftStore, type Draft } from "./drafts.js";
 import { clientEnv } from "./client.test.env.js";
+import { LauncherDrafts } from "./launcher-drafts.js";
+
+test("ordinary and launcher drafts use the same user data root, not the old platform state root", t => {
+  const check = (root: string) => {
+    assert.ok(new DraftStore("hub").directory.startsWith(join(root, "drafts") + "/"));
+    assert.ok(new LauncherDrafts({ hubId: "hub", machineId: "machine" }).directory.startsWith(join(root, "launcher-drafts") + "/"));
+  };
+  const env: NodeJS.ProcessEnv = { ...process.env, HOME: "/example", XDG_STATE_HOME: "/old" };
+  delete env.DECK_CLIENT_STATE_DIRECTORY;
+  t.mock.property(process, "env", env);
+  check("/example/.local/share/deck/client");
+  process.env.DECK_CLIENT_STATE_DIRECTORY = "/explicit"; check("/explicit");
+});
 
 test("draft cache publishes private immutable records, isolates hub identities and tolerates concurrent identical saves", async () => {
   const local = await clientEnv();

@@ -39,7 +39,7 @@ for (const step of ["created", "answered"] as const) test(`foreground delegation
     const recovered = chats.find((item) => item.kind === "subagent")!;
     assert.equal(recovered.chatId, checkpoint.chatId); assert.equal(recovered.ownerTaskId, checkpoint.ownerTaskId);
     assert.equal(recovered.machineId, "host"); assert.equal(recovered.cwd, "/saved");
-    assert.deepEqual((await (await runtime.chat(checkpoint.chatId)).agent(context)).tools.map((tool) => tool.name), ["read", "write", "edit", "bash"]);
+    assert.deepEqual((await (await runtime.chat(checkpoint.chatId)).agent(context)).tools.map((tool) => tool.name), ["read", "write", "edit", "bash", "loadSkill", "loadHubSkill"]);
     const inputs = (await runtime.history(checkpoint.chatId)).items.filter((entry) => entry.kind === "deck.input");
     assert.equal(inputs.length, 1); assert.equal((inputs[0]!.data as { requestId: string }).requestId, `deck-subagent:${checkpoint.ownerTaskId}`);
     const result = (await runtime.history(String(runtime.main.id))).items.flatMap((entry) => entry.model ?? []).find((message) => message.role === "toolResult" && message.toolName === "subagent");

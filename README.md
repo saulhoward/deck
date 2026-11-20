@@ -67,6 +67,44 @@ Interactive child terminals and captured, headless scheduled jobs remain later g
 
 Pi stores each chat separately. Task answers do not automatically become new input to the hub chat. Rex owns terminals, not agents. Closing a Rex window does not delete the chat or stop hub-owned inference.
 
+## Data, config, and manual migration
+
+Deck uses the same defaults on Linux and macOS, on **each machine**:
+
+| Path | What belongs there |
+| --- | --- |
+| `~/.local/share/deck/hubs/default/` | The hub's machine identity (`config.json`), Pi database, credentials, registrations and local operation receipts. Agents have separate chat IDs in this one store, not a database per agent. |
+| `~/.local/share/deck/client/` | Client-side drafts, startup records, managed hub sessions and automatic workers. Drafts/worker records are scoped by their hub and/or machine identity. |
+| `~/.config/deck/hubs/default/.env` | Optional private 1Password references for `serve`; never loaded by a task worker. |
+| `~/.config/deck/skills/` | One library for this OS user, shared by agents **on this machine**. No cross-machine sync. |
+
+For managed clients, `--directory DIR` uses `DIR/client`; without it, `DECK_CLIENT_STATE_DIRECTORY` can point to an absolute client root. Hub state still accepts `--directory DIR`. Neither override relocates the user's skills. MCP profile/catalog paths remain explicit too: keep hub profiles and agent-machine profiles in separate private directories under `~/.config/deck/` and pass their paths as before. Machine identity files and receipts are operational data, not editable profile templates.
+
+**Existing installation? Migrate before starting the new build.** Deck does not search old paths, move files, rewrite pins, or import skills automatically. If the new hub directory is empty, `deck serve` can initialize a *different* hub.
+
+1. With the original build, [stop and drain work](#stop-upgrade-and-back-up), resolve saved requests and detach clients. Identify the old hub directory (`$XDG_STATE_HOME/deck` or `~/.local/state/deck` on Linux; `~/Library/Application Support/deck` on macOS), or your explicit `--directory`.
+2. Back up the stopped hub: `deck backup --directory "$old" --output "$backup"`, using your actual paths and a **new**, private backup destination. Add `--include-credentials` if you need stored OAuth credentials. Create the parent `~/.local/share/deck/hubs/` and run `deck restore --from "$backup" --directory "$HOME/.local/share/deck/hubs/default"` into a **nonexistent** destination. Verify the original machine/hub IDs before admitting work; never serve both copies. Alternatively keep passing `--directory "$old"`.
+3. Client data is **not** in that backup. If you have managed Rex forms, sessions or worker records, keep the **whole original client root**, including drafts, in place: these records can pin absolute draft roots, executables and sockets. Keep the original `--directory`, or omit it and set `DECK_CLIENT_STATE_DIRECTORY` to the absolute original client root until the allocations/registrations are retired. Otherwise, with clients stopped and no destination collision, move the private `drafts` and `launcher-drafts` directories intact from the old client root to `~/.local/share/deck/client/`. Do not edit pins, run two copies of a worker, or drop receipts to make an upgrade succeed.
+4. On the hub, move an existing `~/.config/deck/.env` to `~/.config/deck/hubs/default/.env` **before** real `serve`. Use private directories (0700) and a private file (0600); don't overwrite another hub's references. Move/copy any skills you choose to install into the shared skills directory on the machine where they should be used.
+
+## Skills and personal instructions
+
+Install a skill as `~/.config/deck/skills/<name>/SKILL.md`. For example, `release-notes/SKILL.md`:
+
+```markdown
+---
+name: release-notes
+description: Write release notes from a reviewed list of changes.
+---
+Group the supplied changes by user-visible behavior. Use refs/style.md for examples.
+```
+
+The model can call **`loadSkill`** with `{}` for names and descriptions on its **assigned machine**, then `{"name":"release-notes"}` for the body. `{"name":"release-notes","resource":"refs/style.md"}` reads a bundled text reference after a successful load. **`loadHubSkill`** does the same on the **hub**, not the client terminal. Update both hub and worker before using these loaders. A missing/offline worker never redirects a read to the hub. Discovery doesn't load a skill or put its body in the prompt. The sidebar and `:tools` list skills actually loaded in this conversation, labeled by scope.
+
+Use a lowercase name of 1–64 letters/digits/hyphens matching the directory (no leading/trailing or consecutive hyphens). Files must be regular UTF-8 text, at most 32 KiB each, with a YAML header of at most 4 KiB for `SKILL.md`. Use real directories and files beneath HOME, including `.config` and `.codex`: the loaders do not follow symlinks there. A bundled reference must stay inside its skill directory and cannot use hidden path components. A manifest with `disable-model-invocation: true` is omitted from discovery and refused by these loaders; that flag does not change existing filesystem permissions. Loading a skill does not install software, execute scripts, or grant shell/MCP access.
+
+In a writable, idle chat, **`:agentsmd`** explicitly reads `~/.codex/AGENTS.md` from the assigned machine's HOME. On success its bytes become a separate instruction section for this chat; the task brief/project instructions remain unchanged. A missing file is reported, and a failed refresh leaves the previous snapshot intact. No file is read on attachment or on each turn. The sidebar says **AGENTS.md loaded** only after successful application, not on admission. As with other model context, loaded content can reach the provider and be retained in private Pi storage and native receipts; keep secrets out of these files.
+
 ## Automatic task startup
 
 Install the full Deck client and run a compatible Rex CLI/server on the invoking machine. A remote coordinator also needs Rex API 14+ and a running `deck serve`. Rex revision N supports APIs 0 through N, so Deck uses minimum-version checks: API 8+ for terminal allocation/inspection and API 14+ for automatic startup/forwarding, including API 16. Required response fields and identity checks still apply. Deck does not install/upgrade Rex or start the hub for you.
@@ -195,7 +233,8 @@ Rex task clients cannot list/create/select other tasks or return to the hub. Hub
 | Add a line | Shift-Enter, or `Ctrl-J` in Insert mode |
 | Submit or steer input | Enter, `Ctrl-S` or `:send` |
 | Toggle the right sidebar | `:sidebar-toggle` |
-| Full tool inventory | `:tools` (read only; `j/k`, Page Up/Down, `g/G`, Esc) |
+| Full tool inventory and loaded context | `:tools` (read only; `j/k`, Page Up/Down, `g/G`, Esc) |
+| Load personal instructions into this chat | `:agentsmd` |
 | Switch between chat and prompt | Tab or `Ctrl-W w` |
 | Scroll chat | `j/k`, arrows, Page Up/Down; mouse wheel works by default in any editing mode |
 | Select/copy history | Use your terminal's selection override (usually Shift-drag), then Copy; normal terminal Paste is unchanged |
@@ -227,7 +266,7 @@ Model, task and host pickers use bounded local fuzzy/subsequence matching, with 
 
 Mouse reporting is **on by default**: the wheel scrolls the chat even while typing or waiting to send. When scrolled up, the last chat line shows **Scrolled up**; scroll back down or use `:latest` to follow the newest messages. Reaching the top with the wheel, Page Up, Ctrl-U/Ctrl-B, or chat `k`/Up/`gg` **automatically fetches older history** without shifting the visible messages. Continue scrolling upward to read it, or downward through pages already loaded. Slow reads show a discreet **Loading older history…** notice; failures keep your view and retry only on a new upward scroll. **Start of history** marks the beginning. Older history stays paused until `:latest` (or chat `G`) returns live; sending a new message also resumes live polling. Use your terminal's selection override (usually Shift-drag) to select/copy text, or explicitly opt out of wheel reporting with `:mouse-toggle`. This uses the terminal's selection/clipboard UI, not a Deck clipboard read/write bridge. Clipboard and selection details vary by terminal.
 
-Otherwise, unsubmitted editor text is memory-only and limited to 16 KiB. Exit warns when that text has no confirmed saved draft. The TUI formats bounded Markdown in chat: headings, emphasis, inline/fenced code, lists, quotes, literal links, and aligned/wrapped tables. Narrow tables fall back to stacked cells. This is a terminal-oriented subset, not a browser or full CommonMark engine; HTML/images are not executed/fetched, links are not OSC hyperlinks, and tool/note summaries remain plain text. Consecutive bash results within the loaded history page collapse into **`bash (×N)`**, followed by only the latest result’s **last eight wrapped output lines** (or fewer). A single result is labeled `bash`; a failed latest result retains its error label. Bash request notices and hidden-only assistant entries do not split the run; messages, other tools and retained notices do. Outstanding requests remain visible and do not count as completed outputs. Other tool results retain their headers, first eight wrapped output lines and explicit truncation notices. Full results remain in canonical history. Generated bracketed notices—including tool requests, failures and clipping markers—always use dim gray, not white. Literal bracketed text in a message is still ordinary message content. Hidden/non-text blocks do not produce `[non-text content]` placeholders. Completed assistant messages display `[thinking: N tokens]` in dim gray only when the provider reports a valid, positive reasoning-token count; zero or missing counts are hidden. Thinking counts from assistant entries folded into a bash run are summed into one dim notice. This is not an estimate, total usage or a live counter. Reasoning text, redacted content and signatures remain hidden. Formatting never changes stored message or draft bytes. It initially loads a recent history window, not a complete local transcript. Scrolling to the top pages through older retained entries; `:older` remains an explicit page-replacement command. Scrollback keeps up to 16 additional projected pages within an 8 MiB serialized-data budget. On very long reads, newer cached pages are trimmed with a notice; `:latest` returns to the current conversation. No retained hub history is deleted. `[view clipped]` means a long message was shortened for display, not that model execution stopped.
+Otherwise, unsubmitted editor text is memory-only and limited to 16 KiB. Exit warns when that text has no confirmed saved draft. The TUI formats bounded Markdown in chat: headings, emphasis, inline/fenced code, lists, quotes, literal links, and aligned/wrapped tables. Narrow tables fall back to stacked cells. This is a terminal-oriented subset, not a browser or full CommonMark engine; HTML/images are not executed/fetched, links are not OSC hyperlinks, and tool/note summaries remain plain text. Chat scrollback shows user and agent messages. At the live edge, one dim activity item (a tool request/result, streaming preview or reported thinking count) replaces the previous item and disappears when a real message arrives. It is not appended to older pages. The sidebar highlights currently running built-ins or MCP server/tool names in Vesper green; an enabled but idle server isn't highlighted. Activity is sampled, not a health check. The full canonical history, including tool results, is unchanged. Literal bracketed message text remains ordinary content. Reasoning text, redacted content and signatures remain hidden. Formatting never changes stored message or draft bytes. It initially loads a recent history window, not a complete local transcript. Scrolling to the top pages through older retained entries; `:older` remains an explicit page-replacement command. Scrollback keeps up to 16 additional projected pages within an 8 MiB serialized-data budget. On very long reads, newer cached pages are trimmed with a notice; `:latest` returns to the current conversation. No retained hub history is deleted. `[view clipped]` means a long message was shortened for display, not that model execution stopped.
 
 The client sends one request at a time. If you submit a message during an in-flight read, it waits locally in the prompt, greyed out and locked with **SEND QUEUED**. The exact message is sent once when the reply arrives, before the next background poll; repeated Enter does not add more messages. Press Esc to cancel the wait and keep the text. A failed read or lost bridge cancels the wait without sending; uncertain admissions still require explicit `:retry` or `:discard`. This local wait is not a saved draft and does not survive detachment. Other overlapping actions remain refused rather than queued. Routine in-flight requests, including slow background polls, do not display a waiting label. Command entry can show `client idle` when the request slot is free; stale observations and a fenced bridge still show warnings. These are client states, not worker-health claims.
 
@@ -362,7 +401,7 @@ Deck does not load this file automatically. The import starts no inference and r
 
 ### 1Password API keys
 
-Install `op` separately and enable its desktop-app integration, or authenticate it from the terminal. Create a private `~/.config/deck/.env` containing **references only**:
+Install `op` separately and enable its desktop-app integration, or authenticate it from the terminal. Create a private `~/.config/deck/hubs/default/.env` containing **references only**:
 
 ```dotenv
 OPENAI_API_KEY="op://deck/local-openai-key/credential"

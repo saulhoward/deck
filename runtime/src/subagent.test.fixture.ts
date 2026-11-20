@@ -17,7 +17,7 @@ const faux = fauxProvider(); const models = createModels(); models.setProvider(f
 const delegation = foregroundSubagent(defineExtension({ name: "deck.task-control" }));
 const tool = delegation.tools![0] as ToolRegistration;
 const registry = createRegistry(); registry.install(CodingTools);
-registry.install(nativeFiles({ call: async () => { throw new Error("No effects expected"); } }));
+registry.install(nativeFiles({ call: async () => { throw new Error("No effects expected"); } }, "host"));
 registry.install(defineExtension({ name: delegation.name, tools: [{ ...tool, execute: async (args, api, context) => {
   const wrapped: ToolExecutionApi = { ...api, async commit(change, context) {
     const value = await api.commit(change, context);

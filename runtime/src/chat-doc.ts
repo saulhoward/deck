@@ -1,6 +1,6 @@
 import { defineDoc } from "@earendil-works/pi-durable";
 import type { AgentNameMetadata } from "./agent-names.js";
-import type { TaskBrief } from "./generated/contracts.js";
+import type { LoadedSkill, TaskBrief } from "./generated/contracts.js";
 
 export type Binding = { machineId: string; cwd: string };
 type Chat = Binding & AgentNameMetadata & {
@@ -9,6 +9,8 @@ type Chat = Binding & AgentNameMetadata & {
   parentChatId?: string;
   ownerTaskId?: string;
   brief?: TaskBrief;
+  loadedSkills?: LoadedSkill[];
+  userAgentsMdHash?: string;
 };
 
 export const ChatDoc = defineDoc<Chat>({

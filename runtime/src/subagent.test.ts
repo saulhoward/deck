@@ -27,7 +27,7 @@ test("foreground child inherits agent/binding without widening selections, retur
     const original = await runtime.main.agent(context);
     await runtime.configure(String(runtime.main.id), { extensions: original.extensions.filter((extension) => extension.name !== "deck.task-inspection"), instructions: "PARENT_INSTRUCTIONS" });
     const selected = await runtime.main.agent(context);
-    await runtime.configure(String(runtime.main.id), { tools: selected.tools.filter((tool) => tool.name !== "write") });
+    await runtime.configure(String(runtime.main.id), { tools: selected.tools.filter((tool) => tool.name !== "write" && tool.name !== "loadHubSkill") });
     const route: FauxResponseFactory = (request) => {
       if (isChild(request.messages)) {
         assert.doesNotMatch(JSON.stringify(request.messages), /PARENT_TRANSCRIPT_SECRET/);
@@ -53,7 +53,7 @@ test("foreground child inherits agent/binding without widening selections, retur
     assert.notEqual(item.agentName, chats.find(chat => chat.kind === "main")!.agentName);
     const child = await runtime.chat(item.chatId); const agent = await child.agent(context);
     assert.deepEqual(agent.model, options.model); assert.equal(agent.instructions, "PARENT_INSTRUCTIONS");
-    assert.deepEqual(agent.tools.map((tool) => tool.name), ["read", "edit", "bash"]);
+    assert.deepEqual(agent.tools.map((tool) => tool.name), ["read", "edit", "bash", "loadSkill"]);
     const record = await runtime.harness.commit(async (tx) => (await tx.scanConversations({}, 10)).items.find((chat) => chat.id === child.id), context);
     assert.equal(String(record!.owner!.taskId), item.ownerTaskId); assert.equal(record!.owner!.conversationId, runtime.main.id);
     await assert.rejects(runtime.admit(item.chatId, { requestId: "external", text: "Do not enqueue this", mode: "followUp" }), /owning tool/);
