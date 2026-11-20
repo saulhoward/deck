@@ -228,6 +228,8 @@ Use Enter, `Ctrl-S` or `:send` to create, not to submit model input. Title is li
 
 Briefs are immutable creation snapshots in this phase. These hub-side creation commands supply initial instructions but start no generation. The separate normal `deck agent` form explicitly requests both creation and the later verified initial-input step. `:brief` reads them without editing context. A later explicit instruction import can replace active instructions; it does not rewrite the saved brief or earlier history. `:cancel` clears only an unsubmitted form. After a lost creation ACK, use the existing exact-draft `:retry`/`:discard` flow; do not start another creation. Brief entry refuses to overwrite an unsent prompt or unresolved request. The separate command line remains 256 bytes with no command paste.
 
+In a `:` command, **Tab completes and cycles prefix matches**, including aliases, `:rex` subcommands and `:subagent` names. For example, `:su<Tab>` becomes `:subagent `, then `wm<Tab>` completes a known `WM…` child. Shift-Tab cycles backward; Enter still executes and Esc cancels. Completion is local: it preserves your prompt and uses names already observed in the child list or through inspection, including siblings while inspecting a child. It does not fetch the full child directory or submit anything; names not yet observed can still be entered in full.
+
 Rex task clients cannot list/create/select other tasks or return to the hub. Hub navigation/creation still refuses unsent prompt text and unresolved requests, rather than losing them. Send or clear the prompt first.
 
 | Action | Keys or command |
@@ -236,12 +238,13 @@ Rex task clients cannot list/create/select other tasks or return to the hub. Hub
 | Edit the prompt externally | Normal-mode `v` opens `$EDITOR` |
 | Leader shortcuts (Normal mode) | Space then `t` tasks, `m` models, `n` new task |
 | Return to Normal mode | `Esc` |
+| Complete `:` commands and known subagent names | Tab cycles matches; Shift-Tab cycles backward; Enter executes |
 | Add a line | Shift-Enter, or `Ctrl-J` in Insert mode |
 | Submit or steer input | Enter, `Ctrl-S` or `:send` |
 | Toggle the right sidebar | `:sidebar-toggle` |
 | Full tool inventory and loaded context | `:tools` (read only; `j/k`, Page Up/Down, `g/G`, Esc) |
 | Load personal instructions into this chat | `:agentsmd` |
-| Switch between chat and prompt | Tab or `Ctrl-W w` |
+| Switch between chat and prompt | Tab or `Ctrl-W w` in Normal mode, outside a `:` command |
 | Scroll chat | `j/k`, arrows, Page Up/Down; mouse wheel works by default in any editing mode |
 | Select/copy history | Use your terminal's selection override (usually Shift-drag), then Copy; normal terminal Paste is unchanged |
 | Toggle mouse-wheel reporting | `:mouse-toggle` opts out/back in; while enabled, use the terminal's selection override (usually Shift-drag) |
@@ -255,7 +258,7 @@ Rex task clients cannot list/create/select other tasks or return to the hub. Hub
 | Inspect the selected task's Rex state | `:rex`; `s` refreshes status, `i` inspects presence |
 | Open/reopen the selected task in Rex | `:rex open`, or `o` in the Rex view |
 | Select a model | Esc, `:model`, Enter; type to filter, arrows or Ctrl-N/P to move, Enter to select, Esc to cancel |
-| Cycle supported thinking levels | Shift-Tab |
+| Cycle supported thinking levels | Shift-Tab outside a `:` command |
 | Retry or discard the active input/task draft | `:retry`, `:discard` |
 | Request stop | `:stop` |
 | Detach | `:q` or `Ctrl-C` |
@@ -272,7 +275,7 @@ Model, task and host pickers use bounded local fuzzy/subsequence matching, with 
 
 Mouse reporting is **on by default**: the wheel scrolls the chat even while typing or waiting to send. When scrolled up, the last chat line shows **Scrolled up**; scroll back down or use `:latest` to follow the newest messages. Reaching the top with the wheel, Page Up, Ctrl-U/Ctrl-B, or chat `k`/Up/`gg` **automatically fetches older history** without shifting the visible messages. Continue scrolling upward to read it, or downward through pages already loaded. Slow reads show a discreet **Loading older history…** notice; failures keep your view and retry only on a new upward scroll. **Start of history** marks the beginning. Scrolling back to the bottom **automatically restores the live view**, including after loading older pages. A pending read briefly shows **Returning to latest…**; the prompt stays unchanged. `:latest` (or chat `G`) remains an immediate jump to live, and sending a new message also resumes live polling. Use your terminal's selection override (usually Shift-drag) to select/copy text, or explicitly opt out of wheel reporting with `:mouse-toggle`. This uses the terminal's selection/clipboard UI, not a Deck clipboard read/write bridge. Clipboard and selection details vary by terminal.
 
-The **Input admitted; completion not yet confirmed** message is a transient acknowledgement: it clears on the next successful live/activity refresh. Clearing it does not claim that generation has finished.
+The **Input admitted; completion not yet confirmed** message is a transient acknowledgement: it clears on the next successful live/activity refresh. Clearing it does not claim that generation has finished. Your admitted message appears immediately in **grey without a blue background** while waiting to be observed in retained history. Once the matching input is observed, the normal white-on-blue message replaces it without a duplicate. Failed or uncertain admissions stay in the saved prompt instead; nothing is automatically resent.
 
 Otherwise, unsubmitted editor text is memory-only and limited to 16 KiB. Exit warns when that text has no confirmed saved draft. The TUI formats bounded Markdown in chat: headings, emphasis, inline/fenced code, lists, quotes, literal links, and aligned/wrapped tables. Narrow tables fall back to stacked cells. This is a terminal-oriented subset, not a browser or full CommonMark engine; HTML/images are not executed/fetched, links are not OSC hyperlinks, and tool/note summaries remain plain text. Chat scrollback shows user and agent messages. At the live edge, one dim activity item (a tool request/result, streaming preview or reported thinking count) replaces the previous item and disappears when a real message arrives. It is not appended to older pages. The sidebar highlights currently running built-ins or MCP server/tool names with the same grey/green activity flicker; an enabled but idle server isn't highlighted. Activity is sampled, not a health check. The full canonical history, including tool results, is unchanged. Literal bracketed message text remains ordinary content. Reasoning text, redacted content and signatures remain hidden. Formatting never changes stored message or draft bytes. It initially loads a recent history window, not a complete local transcript. Scrolling to the top pages through older retained entries; `:older` remains an explicit page-replacement command. Scrollback keeps up to 16 additional projected pages within an 8 MiB serialized-data budget. On very long reads, newer cached pages are trimmed with a notice; `:latest` returns to the current conversation. No retained hub history is deleted. `[view clipped]` means a long message was shortened for display, not that model execution stopped.
 

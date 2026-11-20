@@ -65,6 +65,8 @@ export function validReply(value: unknown, id: string, hubId?: string, chatId?: 
   if (s.agentStatus && !validAgentStatus(s.agentStatus)) return false;
   if (s.subagents !== undefined && !validSubagents(s.subagents, s.chatId)) return false;
   if (s.modelSettings && (!validModelSettingsSnapshot(s.modelSettings) || s.modelSettings.hubId !== s.hubId || s.modelSettings.chatId !== s.chatId)) return false;
+  if (s.admittedInputs !== undefined && (s.kind === "subagent" || s.inspectParentChatId !== undefined || !canParticipate(s.clientMode, s.chatId, s.hubChatId) ||
+    s.admittedInputs.some(input => Buffer.byteLength(input.text) > entryBytes) || new Set(s.admittedInputs.map(input => input.requestId)).size !== s.admittedInputs.length)) return false;
   if (s.entries.reduce((bytes, item) => bytes + Buffer.byteLength(item.text), 0) > 128 * 1024) return false;
   return s.entries.every((item, i) => Buffer.byteLength(item.text) <= entryBytes &&
     (item.parts === undefined || flattenParts(item.parts) === item.text) &&
@@ -81,6 +83,10 @@ export class TuiSession {
   private activeSaved = false;
   private state?: TuiSnapshot;
   private before: string | undefined;
+  // Bounded session presentation only, scoped across navigation. Never persisted,
+  // replayed, assigned history IDs, or retired by an idle/completion sample.
+  private admittedInputs: { chatId: string, requestId: string, text: string }[] = [];
+  private observedInput: { chatId: string, requestId: string } | undefined; // A saved input may appear before explicit ACK recovery.
   private liveHead: number | undefined; // Anchor from a live read, never a historical page.
   private pageLimits = { latest: 80, older: 80 };
   private supportsSettings = false;
@@ -223,6 +229,12 @@ export class TuiSession {
     }
   }
   private renderHistory(page: HistoryPage, mode: "poll" | "older" | "latest" = "latest"): { entries: TuiEntry[]; next: string | undefined } {
+    const observed = new Set(page.items.flatMap(raw => {
+      const data = raw.data as { requestId?: unknown, origin?: unknown } | undefined;
+      return raw.kind === "deck.input" && !data?.origin && typeof data?.requestId === "string" ? [data.requestId] : [];
+    }));
+    if (this.active?.kind === "input" && observed.has(this.active.requestId)) this.observedInput = { chatId: this.chatId!, requestId: this.active.requestId };
+    this.admittedInputs = this.admittedInputs.filter(input => input.chatId !== this.chatId || !observed.has(input.requestId));
     let budget = 128 * 1024, wireBudget = 512 * 1024, wantActivity = mode !== "older";
     const entries: TuiEntry[] = []; // newest first until the final reversal
     const append = (entry: TuiEntry) => {
@@ -279,6 +291,7 @@ export class TuiSession {
     await this.store!.save(this.active); // Must succeed before network; exact original fields.
     this.activeSaved = true;
     const method = this.active.kind === "task" ? taskCreationCommand(this.active) : this.active.kind === "instructions" ? "import_instructions" : "admit";
+    const inputText = this.active.kind === "input" ? this.active.text : undefined;
     const { kind, chatId, requestId, ...args } = this.active;
     const ack = await this.command(method, { requestId, ...args, ...(kind !== "task" ? { chatId } : {}) }, this.hubId);
     this.activeSaved = false;
@@ -288,6 +301,10 @@ export class TuiSession {
       this.state!.notice = "Loading ~/.codex/AGENTS.md from the assigned machine…";
       await this.observeUserImport();
     } else if (kind === "input") {
+      if (this.observedInput?.chatId !== chatId || this.observedInput.requestId !== requestId) {
+        this.admittedInputs = [...this.admittedInputs.filter(input => input.chatId !== chatId || input.requestId !== requestId),
+          { chatId, requestId, text: displayText(inputText!, entryBytes) }].slice(-16);
+      }
       this.state!.historical = false; // The next unheld poll follows the new conversation turn.
       this.state!.notice = inputAdmittedNotice;
     }
@@ -460,6 +477,8 @@ export class TuiSession {
       if (branch === undefined) delete state.gitBranch; else state.gitBranch = branch;
     }
     const text = this.active?.kind === "input" ? displayText(this.active.text, 16384) : "";
+    const admitted = this.participates() ? this.admittedInputs.filter(input => input.chatId === this.chatId).map(({ requestId, text }) => ({ requestId, text })) : [];
+    if (admitted.length) state.admittedInputs = admitted; else delete state.admittedInputs;
     state.settingsPending = this.settingsUncertain;
     state.draft = this.active ? { kind: this.active.kind, requestId: this.active.requestId, saved: this.activeSaved, text, clipped: this.active.kind === "input" && text !== this.active.text } : null;
     return structuredClone(state);

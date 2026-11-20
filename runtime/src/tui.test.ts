@@ -11,11 +11,12 @@ import { clientEnv } from "./client.test.env.js";
 import { DraftStore } from "./drafts.js";
 import { hubCommand } from "./hub-client.js";
 import { displayText, thinkingUsage, TuiSession, validRequest, validReply } from "./tui-session.js";
-import type { ActivitySnapshot, ModelSettingsChange, ModelSettingsSnapshot, TuiRequest } from "./generated/contracts.js";
+import type { ActivitySnapshot, HistoryEntry, ModelSettingsChange, ModelSettingsSnapshot, TuiRequest } from "./generated/contracts.js";
 
 async function fixture(withSettings = false, withProgramStatus = false, withStyle = false, withTools = false, history: { newest?: number, pageSize?: number, hidden?: (id: number) => boolean } = {}) {
   const local = await clientEnv(); const requests: any[] = []; let loss = false, malformed = false, oversized = false, hang = false;
   let settingsLoss = false, settingsInvalid = false, plainHistory = false;
+  let retainedInputs: { id: number, kind: string, data: { text: string, requestId: string } }[] = [];
   // One-shot gates make a request genuinely in-flight until a PTY checkpoint
   // releases it; tests never guess the background poll timing with sleeps.
   const gates = new Map<string, { entered: ReturnType<typeof Promise.withResolvers<any>>, reply: ReturnType<typeof Promise.withResolvers<"ok" | "fail">> }>();
@@ -78,9 +79,10 @@ async function fixture(withSettings = false, withProgramStatus = false, withStyl
       if (hang) return;
       if (oversized && args.limit > 1) { response.end(JSON.stringify({ version: 1, id, ok: false, error: { code: "too_large", message: "Page too large" } })); return; }
       const newest = args.before ? Number(args.before) - 1 : (history.newest ?? 120);
-      const items = withStyle ? [{ id: 2, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "text", text: "# Report\n**Ready** with `code`\n\n| Task | Status |\n| :--- | ---: |\n| Unicode 界 | done |\n| Rendering | ready |" }] }] }, { id: 1, kind: "deck.input", data: { text: "Please render this cleanly." } }] : Array.from({ length: Math.max(0, Math.min(args.limit, history.pageSize ?? 20, newest)) }, (_, i) => history.hidden?.(newest - i)
+      let items: HistoryEntry[] = withStyle ? [{ id: 2, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "text", text: "# Report\n**Ready** with `code`\n\n| Task | Status |\n| :--- | ---: |\n| Unicode 界 | done |\n| Rendering | ready |" }] }] }, { id: 1, kind: "deck.input", data: { text: "Please render this cleanly." } }] : Array.from({ length: Math.max(0, Math.min(args.limit, history.pageSize ?? 20, newest)) }, (_, i) => history.hidden?.(newest - i)
         ? { id: newest - i, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "thinking", thinking: "DO_NOT_RENDER" }] }] }
         : { id: newest - i, kind: "deck.input", data: { text: `line ${newest - i}\nretained ${plainHistory ? "text" : "👩🏽‍💻 é"}\n\x1b]52;c;DO_NOT_RENDER\x07safe` } });
+      if (retainedInputs.length) items = [...retainedInputs.filter(e => !args.before || e.id < Number(args.before)), ...items].sort((a, b) => b.id - a.id).slice(0, Math.min(args.limit, history.pageSize ?? 20));
       result = { items, ...(items.length && items.at(-1)!.id > 1 ? { next: String(items.at(-1)!.id) } : {}), ...(args.includeActivity ? { activity } : {}), ...(args.includeProgress ? { progress } : {}) };
     } else if (command === "activity") result = activity;
     else if (command === "progress") result = progress;
@@ -96,7 +98,7 @@ async function fixture(withSettings = false, withProgramStatus = false, withStyl
   const session = new TuiSession((name, args, expected) => hubCommand(address.port, name, args, expected), undefined, undefined, local.env.DECK_CLIENT_STATE_DIRECTORY);
   let sequence = 0;
   const action = (action: TuiRequest["action"], text?: string, hold?: boolean, configuration?: ModelSettingsChange) => session.handle({ version: 1, id: String(++sequence), action, ...(text !== undefined ? { text } : {}), ...(hold !== undefined ? { hold } : {}), ...(configuration ? { configuration } : {}) });
-  return { local, requests, port: address.port, action, holdNext, newest: (id: number) => { history.newest = id; }, runningTools: (names: string[]) => { activity.tools = names.map((name, i) => ({ callId: String(i + 1), name, status: "running", nested: false })); }, plainHistory: () => { plainHistory = true; }, subagents: (value: ActivitySnapshot["subagents"]) => { if (value === undefined) delete activity.subagents; else activity.subagents = value; }, settingsLoss: (value: boolean) => { settingsLoss = value; }, settingsInvalid: (value: boolean) => { settingsInvalid = value; }, loss: (value: boolean) => { loss = value; }, malformed: (value: boolean) => { malformed = value; }, oversized: () => { oversized = true; }, hang: () => { hang = true; }, close: async () => { for (const reply of pendingGates) reply.resolve("fail"); server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); await local.close(); } };
+  return { local, requests, port: address.port, action, holdNext, retainInputs: () => { retainedInputs = requests.filter(r => r.command === "admit").map((r, i) => ({ id: 121 + i, kind: "deck.input", data: { requestId: r.args.requestId, text: r.args.text } })); }, newest: (id: number) => { history.newest = id; }, runningTools: (names: string[]) => { activity.tools = names.map((name, i) => ({ callId: String(i + 1), name, status: "running", nested: false })); }, plainHistory: () => { plainHistory = true; }, subagents: (value: ActivitySnapshot["subagents"]) => { if (value === undefined) delete activity.subagents; else activity.subagents = value; }, settingsLoss: (value: boolean) => { settingsLoss = value; }, settingsInvalid: (value: boolean) => { settingsInvalid = value; }, loss: (value: boolean) => { loss = value; }, malformed: (value: boolean) => { malformed = value; }, oversized: () => { oversized = true; }, hang: () => { hang = true; }, close: async () => { for (const reply of pendingGates) reply.resolve("fail"); server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); await local.close(); } };
 }
 
 test("TUI adapter holds bounded canonical pages, samples independently, reduces only validated too-large reads", async () => {
@@ -1191,5 +1193,151 @@ test("real PTY: Page Down at a manual older page returns live; a failed latest r
     assert.doesNotMatch(screens.live!, /Older history|Scrolled up|Returning to latest|Delayed fixture read failed/);
     assert.match(screens.live!, /keep manual prompt/);
     assert.ok(f.requests.every(r => ["status", "history", "activity", "progress"].includes(r.command)));
+  } finally { await f.close(); }
+});
+
+test("admitted inputs remain distinct from history and drafts until an exact retained request identity is observed", async () => {
+  const local = await clientEnv();
+  const admissions: Record<string, any>[] = [];
+  let items: any[] = [{ id: 1, kind: "deck.input", data: { text: "same text", requestId: "old" } }];
+  let failRead = false, loseAck = false;
+  const session = new TuiSession(async (name, args) => {
+    if (name === "status") return { hubGuard: 1, hubId: "test", chatId: "1", mainChatId: "1", tools: "offline" };
+    if (name === "admit") { admissions.push(args); if (loseAck) throw new Error("Lost ACK"); return { submissionId: "9" }; }
+    if (name === "history") { if (failRead) throw new Error("Read failed"); return { items, activity: { chatId: "1", busy: false, queued: 0, tools: [] } }; }
+    if (name === "activity") return { chatId: "1", busy: false, queued: 0, tools: [] };
+    assert.equal(name, "progress"); return { version: 1, chatId: "1", provisional: true };
+  }, undefined, undefined, local.env.DECK_CLIENT_STATE_DIRECTORY);
+  let sequence = 0;
+  const act = (action: TuiRequest["action"], text?: string, hold?: boolean) => session.handle({ version: 1, id: String(++sequence), action, ...(text === undefined ? {} : { text }), ...(hold === undefined ? {} : { hold }) });
+  try {
+    await act("poll");
+    const first = await act("send", "same text");
+    assert.deepEqual(first.admittedInputs, [{ requestId: admissions[0]!.requestId, text: "same text" }]);
+    assert.equal(first.entries.length, 1); assert.equal(first.draft, null);
+    const polled = await act("poll");
+    assert.equal(polled.notice, ""); assert.deepEqual(polled.admittedInputs, first.admittedInputs);
+    await act("send", "same text");
+    assert.equal((await act("poll")).admittedInputs?.length, 2);
+    items = [{ id: 2, kind: "deck.input", data: { text: "same text", requestId: admissions[0]!.requestId } }, ...items];
+    assert.equal((await act("poll", undefined, true)).admittedInputs?.length, 2, "Activity/idle cannot confirm an echo");
+    const observed = await act("poll");
+    assert.deepEqual(observed.admittedInputs, [{ requestId: admissions[1]!.requestId, text: "same text" }]);
+    assert.deepEqual(observed.entries.map(e => e.id), [1, 2]);
+    failRead = true; await assert.rejects(act("latest"), /Read failed/);
+    assert.deepEqual((await act("poll", undefined, true)).admittedInputs, observed.admittedInputs);
+    loseAck = true; await assert.rejects(act("send", "uncertain"), /Lost ACK/);
+    const uncertain = await act("poll", undefined, true);
+    assert.equal(uncertain.draft?.text, "uncertain"); assert.deepEqual(uncertain.admittedInputs, observed.admittedInputs);
+    // Retained input can arrive even though its ACK was lost. Explicit recovery
+    // must not add a second display copy after we have already seen that identity.
+    failRead = false;
+    items = [{ id: 3, kind: "deck.input", data: { text: "uncertain", requestId: admissions[2]!.requestId } }, ...items];
+    assert.equal((await act("poll")).admittedInputs?.length, 1);
+    loseAck = false; await act("retry");
+    assert.equal(admissions[2]!.requestId, admissions[3]!.requestId);
+    assert.equal((await act("poll", undefined, true)).admittedInputs?.length, 1);
+    items = items.filter(e => e.id !== 3);
+    items = admissions.slice(1, 3).reverse().map((a, i) => ({ id: 4 - i, kind: "deck.input", data: { text: a.text, requestId: a.requestId } })).concat(items);
+    const confirmed = await act("latest");
+    assert.equal(confirmed.admittedInputs, undefined); assert.equal(confirmed.draft, null);
+    assert.equal(admissions.length, 4, "Observation must never resend input");
+    for (let i = 0; i < 18; i++) await act("send", `${i}: ${"界".repeat(4000)}\x1b]52;c;DO_NOT_RENDER\x07`);
+    const bounded = (await act("poll")).admittedInputs!;
+    assert.equal(bounded.length, 16); assert.match(bounded[0]!.text, /^2:/);
+    assert.ok(bounded.every(input => Buffer.byteLength(input.text) <= 8192 && input.text.endsWith("[view clipped]") && !input.text.includes("DO_NOT_RENDER")));
+  } finally { await local.close(); }
+});
+
+test("admitted echoes stay parent-scoped during read-only subagent inspection and return without replay", async () => {
+  const f = await fixture();
+  try {
+    const sent = await f.action("send", "parent only");
+    assert.equal((await f.action("subagent", "wm001")).admittedInputs, undefined);
+    assert.equal((await f.action("poll")).admittedInputs, undefined);
+    assert.deepEqual((await f.action("parent")).admittedInputs, sent.admittedInputs);
+    assert.equal(f.requests.filter(r => r.command === "admit").length, 1);
+  } finally { await f.close(); }
+});
+
+test("admitted echo replies enforce closed bounds, unique identities and writable scope", async () => {
+  const f = await fixture();
+  try {
+    const snapshot = await f.action("poll");
+    const valid = (admittedInputs: unknown, extra = {}) => validReply({ version: 1, id: "1", ok: true, snapshot: { ...snapshot, admittedInputs, ...extra } }, "1");
+    assert.ok(valid([{ requestId: "r", text: "界".repeat(2730) }]));
+    assert.equal(valid([{ requestId: "r", text: "界".repeat(2731) }]), false);
+    for (const inputs of [null, [{ text: "no identity" }], [{ requestId: "r", text: "x", id: 1 }], Array(2).fill({ requestId: "same", text: "x" }), Array.from({ length: 17 }, (_, i) => ({ requestId: String(i), text: "x" }))]) assert.equal(valid(inputs), false);
+    assert.equal(valid([{ requestId: "r", text: "x" }], { chatId: "2", kind: "task" }), false);
+    assert.equal(valid([{ requestId: "r", text: "x" }], { chatId: "2", kind: "subagent", inspectParentChatId: "1" }), false);
+    assert.ok(valid([{ requestId: "r", text: "x" }], { chatId: "2", kind: "task", clientMode: "task" }));
+  } finally { await f.close(); }
+});
+
+
+test("real PTY: admitted text appears immediately in grey and is replaced once by retained user history", { skip: !testBinary, timeout: 20_000 }, async () => {
+  const f = await fixture(), screens: Record<string, string> = {}; f.plainHistory();
+  try {
+    const output = await pty(f.port, f.local.env, [
+      { wait: "line 120" }, { keys: "admitted echo text" }, { keys: "\r" }, { wait: "Input admitted" }, { capture: "acknowledged" },
+      { checkpoint: "unobserved refresh" }, { keys: "\x1b" }, { keys: ":" }, { wait: "client idle" }, { keys: "\x1b" }, { capture: "stillUnobserved" },
+      { checkpoint: "confirm history" }, { keys: ":" }, { wait: "client idle" }, { keys: "\x1b" }, { capture: "retained" }, { keys: ":q\r" },
+    ], screens, {
+      "unobserved refresh": async () => { const next = f.holdNext("history"); await next.entered; next.release(); },
+      "confirm history": async () => { const next = f.holdNext("history"); await next.entered; f.retainInputs(); next.release(); },
+    });
+    for (const screen of Object.values(screens)) {
+      const { rows, upper, prompt } = promptRegion(screen);
+      assert.equal(rows.slice(0, upper).join("\n").split("admitted echo text").length - 1, 1);
+      assert.equal(prompt.join("").trim(), "");
+    }
+    assert.doesNotMatch(screens.stillUnobserved!, /Input admitted/);
+    assert.ok(textColors(output, "admitted echo text").has("160,160,160"));
+    assert.equal(f.requests.filter(r => r.command === "admit").length, 1);
+  } finally { await f.close(); }
+});
+
+test("real PTY: Tab completes commands and subagent names locally; Shift-Tab reverses without configuring or sending", { skip: !testBinary, timeout: 20_000 }, async () => {
+  const f = await fixture(true), screens: Record<string, string> = {};
+  f.subagents({ chatId: "1", items: [{ chatId: "3", title: "Second", agentName: "WM002" }, { chatId: "2", title: "First", agentName: "WM001" }], hasMore: true });
+  let requests = 0;
+  try {
+    await pty(f.port, f.local.env, [
+      { wait: "mock/echo" }, { resize: [40, 140] }, { wait: "WM002" }, { keys: "keep completion prompt" }, { keys: "\x1b" },
+      { keys: ":su" }, { wait: "client idle" }, { checkpoint: "start" }, { keys: "\t" }, { wait: ":subagent " }, { capture: "verb" },
+      { keys: "wm\t" }, { wait: ":subagent WM001" }, { capture: "first" },
+      { keys: "\t" }, { wait: ":subagent WM002" }, { keys: "\x1b[Z" }, { wait: ":subagent WM001" }, { capture: "reversed" },
+      { keys: "\x1b" }, { keys: ":rex o\t" }, { wait: ":rex open" }, { capture: "rex" },
+      { keys: "\x1b" }, { keys: ":se\t\t" }, { wait: ":send" }, { capture: "send" },
+      { keys: "\x1b" }, { keys: ":q!\t" }, { wait: ":q!" }, { capture: "quit" },
+      { keys: "\x1b" }, { keys: ":subagent missing\t" }, { wait: ":subagent missing" }, { capture: "unmatched" },
+      { checkpoint: "no effects" }, { keys: "\x1b" }, { keys: ":q!\r" },
+    ], screens, {
+      start: () => { requests = f.requests.length; },
+      "no effects": () => { assert.equal(f.requests.length, requests, "Completion must not issue reads, mutations, or settings changes"); },
+    });
+    for (const screen of Object.values(screens)) {
+      assert.equal(promptRegion(screen).prompt.map(row => row.split("│")[0]!).join("").trim(), "keep completion prompt");
+      assert.match(screen, /mock\/echo \[medium\]/);
+    }
+    assert.ok(f.requests.every(r => ["status", "history", "model_settings", "activity", "progress"].includes(r.command)));
+  } finally { await f.close(); }
+});
+
+test("real PTY: completed subagent names execute only on Enter and siblings remain completable in read-only inspection", { skip: !testBinary, timeout: 20_000 }, async () => {
+  const f = await fixture(), screens: Record<string, string> = {};
+  f.subagents({ chatId: "1", items: [{ chatId: "3", title: "Second", agentName: "WM002" }, { chatId: "2", title: "First", agentName: "WM001" }], hasMore: false });
+  try {
+    await pty(f.port, f.local.env, [
+      { wait: "line 120" }, { keys: "\x1b" }, { keys: ":sub\twm\t" }, { wait: ":subagent WM001" }, { checkpoint: "not executed" },
+      { keys: "\r" }, { wait: "CHILD 2 HISTORY 200" }, { capture: "child" },
+      { keys: ":sub\twm\t\t" }, { wait: ":subagent WM002" }, { keys: "\r" }, { wait: "CHILD 3 HISTORY 200" }, { capture: "sibling" },
+      { keys: ":pa\t" }, { wait: ":parent" }, { keys: "\r" }, { wait: "line 120" }, { capture: "parent" }, { keys: ":q\r" },
+    ], screens, { "not executed": () => { assert.equal(f.requests.filter(r => r.command === "subagent_view").length, 0); } });
+    assert.match(screens.child!, /Read-only/); assert.match(screens.sibling!, /Read-only/);
+    assert.doesNotMatch(screens.parent!, /CHILD [23] HISTORY/);
+    assert.ok(f.requests.some(r => r.command === "subagent_view" && r.args.name === "WM001"));
+    assert.ok(f.requests.some(r => r.command === "subagent_view" && r.args.name === "WM002"));
+    assert.ok(f.requests.every(r => ["status", "history", "activity", "progress", "subagent_view"].includes(r.command)));
   } finally { await f.close(); }
 });

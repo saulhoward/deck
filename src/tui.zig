@@ -13,6 +13,7 @@ const TerminalStatus = @import("tui_status.zig");
 const Theme = @import("tui_theme.zig");
 const Markdown = @import("tui_markdown.zig");
 const Filter = @import("tui_filter.zig");
+const Completion = @import("tui_completion.zig");
 const Scrollback = @import("tui_scrollback.zig");
 const Action = @FieldType(wire.TuiRequest, "action");
 var stopping: std.atomic.Value(bool) = .init(false);
@@ -22,6 +23,7 @@ fn signal(_: std.posix.SIG) callconv(.c) void {
 const help =
     \\DECK · local client / Vim-style editing
     \\
+    \\Tab / Shift-Tab       complete / cycle :commands and known subagent names
     \\Tab or Ctrl-W w       switch chat / prompt (Normal mode)
     \\Ctrl-W k / j          focus chat / prompt
     \\Chat j/k, gg/G        scroll / oldest loaded / latest
@@ -82,7 +84,7 @@ const dim = Theme.dim;
 const accent = Theme.green;
 const bar = Theme.dim;
 const hub_bar = bar;
-pub const Row = struct { text: []const u8 = "", style: vaxis.Style = base, offset: usize = 0, cells: ?Markdown.Line = null, speaker: ?[]const u8 = null, speaker_style: vaxis.Style = dim, user: bool = false, active_prefix: usize = 0 };
+pub const Row = struct { text: []const u8 = "", style: vaxis.Style = base, offset: usize = 0, cells: ?Markdown.Line = null, speaker: ?[]const u8 = null, speaker_style: vaxis.Style = dim, user: bool = false, admitted: bool = false, active_prefix: usize = 0 };
 
 const TransportStatus = enum {
     quiet,
@@ -290,11 +292,18 @@ fn transientRows(ctx: fw.DrawContext, entries: []const wire.TuiEntry, preview: [
     }
     return list.items;
 }
-fn messageRows(ctx: fw.DrawContext, chat: *std.ArrayList(Row), entry: wire.TuiEntry, width: u16, assistant: []const u8) !void {
+const Message = struct {
+    role: @FieldType(wire.TuiEntry, "role"),
+    text: []const u8,
+    parts: @FieldType(wire.TuiEntry, "parts") = null,
+    admitted: bool = false,
+};
+fn messageRows(ctx: fw.DrawContext, chat: *std.ArrayList(Row), entry: Message, width: u16, assistant: []const u8) !void {
     const user = entry.role == .user;
+    const panel = user and !entry.admitted;
     if (user) {
         if (chat.items.len == 0) try chat.append(ctx.arena, .{});
-        try chat.append(ctx.arena, .{ .user = true });
+        try chat.append(ctx.arena, .{ .user = panel });
     }
     const first = chat.items.len;
     if (entry.parts) |parts| {
@@ -323,14 +332,17 @@ fn messageRows(ctx: fw.DrawContext, chat: *std.ArrayList(Row), entry: wire.TuiEn
         if (!user) return; // Hidden/non-text-only entries produce no filler.
         try chat.append(ctx.arena, .{});
     }
-    for (chat.items[first..]) |*row| row.user = user;
+    for (chat.items[first..]) |*row| {
+        row.user = panel;
+        row.admitted = entry.admitted;
+    }
     chat.items[first].speaker = if (user) "•" else if (entry.role == .assistant) assistant else "·";
-    chat.items[first].speaker_style = if (user) accent else dim;
-    try chat.append(ctx.arena, .{ .user = user });
+    chat.items[first].speaker_style = if (panel) accent else dim;
+    try chat.append(ctx.arena, .{ .user = panel });
     if (user) try chat.append(ctx.arena, .{});
 }
 fn chatRows(ctx: fw.DrawContext, chat: *std.ArrayList(Row), entries: []const wire.TuiEntry, width: u16, assistant: []const u8) !void {
-    for (entries) |entry| if (hasMessage(entry)) try messageRows(ctx, chat, entry, width, assistant);
+    for (entries) |entry| if (hasMessage(entry)) try messageRows(ctx, chat, .{ .role = entry.role, .text = entry.text, .parts = entry.parts }, width, assistant);
 }
 fn historyPageRows(ctx: fw.DrawContext, entries: []const wire.TuiEntry, width: u16, assistant: []const u8) ![]const Row {
     var page: std.ArrayList(Row) = .empty;
@@ -563,6 +575,8 @@ const Model = struct {
     focus: enum { prompt, chat } = .prompt,
     command: std.ArrayList(u8) = .empty,
     command_mode: bool = false,
+    completion: Completion = .{},
+    completion_names: Completion.Names = .{},
     leader: bool = false,
     external_edit: bool = false,
     model_picker: bool = false,
@@ -600,6 +614,7 @@ const Model = struct {
     scrollback: Scrollback = .{},
     page_rows: usize = 0,
     rendered_rows: usize = 0,
+    admitted_rows: usize = 0, // Live-edge echoes never enter cached history pages.
     history_browsing: bool = false,
     pad_newest: bool = false,
     pin_top: bool = false,
@@ -759,15 +774,17 @@ const Model = struct {
         if (next.entries.len == 0 or prior.entries.len == 0 or next.entries[next.entries.len - 1].id >= prior.entries[0].id) return;
         const expected_pages = self.scrollback.pages.items.len + 1;
         const newest_rows = if (self.scrollback.pages.items.len > 0) self.scrollback.pages.items[0].rows else self.page_rows;
-        const old_padding = if (self.pad_newest) self.chat_height -| newest_rows else 0;
+        const old_padding = if (self.pad_newest) self.chat_height -| (newest_rows + self.admitted_rows) else 0;
+        const had_newest = !self.scrollback.newer_omitted;
         const dropped = try self.scrollback.retain(self.a, prior.entries, self.page_rows);
         const trimmed = self.scrollback.pages.items.len < expected_pages;
         // Padding belongs only to the original short newest page. Retiring
         // that page must not attach fresh padding to another cached page.
         if (trimmed) self.pad_newest = false;
-        self.scroll -|= dropped + (if (trimmed) old_padding else 0);
-        self.scroll_max -|= dropped + (if (trimmed) old_padding else 0);
-        self.rendered_rows -|= dropped;
+        const echoes_dropped = if (trimmed and had_newest) self.admitted_rows else 0;
+        self.scroll -|= dropped + echoes_dropped + (if (trimmed) old_padding else 0);
+        self.scroll_max -|= dropped + echoes_dropped + (if (trimmed) old_padding else 0);
+        self.rendered_rows -|= dropped + echoes_dropped;
         // Independent page layout keeps old Markdown/bash groups and margins
         // identical. Keeping the bottom-relative offset anchors the viewport.
         if (self.older_budget > 0) self.older_check_rows = self.rendered_rows;
@@ -793,7 +810,13 @@ const Model = struct {
             }
             self.rendered_rows += page.rows;
         }
-        const newest_rows = if (pages.len > 0) pages[0].rows else active.len;
+        var admitted: std.ArrayList(Row) = .empty;
+        if (snap) |s| if (!s.historical or (pages.len > 0 and !self.scrollback.newer_omitted)) {
+            if (s.admittedInputs) |inputs| for (inputs) |input| try messageRows(ctx, &admitted, .{ .role = .user, .text = input.text, .admitted = true }, width, speaker);
+        };
+        self.admitted_rows = admitted.items.len;
+        self.rendered_rows += self.admitted_rows;
+        const newest_rows = (if (pages.len > 0) pages[0].rows else active.len) + self.admitted_rows;
         var total = self.rendered_rows + if (self.pad_newest) height -| newest_rows else 0;
         if (total == 0 and fallback.len != 0) {
             var hint: std.ArrayList(Row) = .empty;
@@ -823,6 +846,7 @@ const Model = struct {
             }
             pos += page.rows;
         }
+        if (pos < end and pos + admitted.items.len > first) try visible.appendSlice(ctx.arena, admitted.items[first -| pos..@min(end - pos, admitted.items.len)]);
         return visible.items; // Trailing padding is already blank on the surface.
     }
     fn note(self: *Model, text: []const u8) void {
@@ -1071,6 +1095,19 @@ const Model = struct {
         }
         ctx.quit = true;
     }
+    fn observeCompletionNames(self: *Model) void {
+        const s = self.state() orelse return;
+        const parent = s.inspectParentChatId orelse s.chatId;
+        if (self.completion_names.select(parent)) self.completion.reset();
+        if (s.inspectParentChatId != null) {
+            // :subagent from inspection selects a sibling, not a grandchild.
+            if (s.agentName) |name| self.completion_names.add(name);
+        } else if (s.subagents) |children| {
+            if (std.mem.eql(u8, children.chatId, parent)) for (children.items) |child| {
+                if (child.agentName) |name| self.completion_names.add(name);
+            };
+        }
+    }
     fn ex(self: *Model, ctx: *fw.EventContext) !void {
         const cmd = self.command.items;
         if (std.mem.eql(u8, cmd, "sidebar-toggle")) {
@@ -1183,7 +1220,7 @@ const Model = struct {
             } else self.filterKey(key, &self.model_index);
             return;
         }
-        if (key.matches(vaxis.Key.tab, .{ .shift = true })) {
+        if (!self.command_mode and key.matches(vaxis.Key.tab, .{ .shift = true })) {
             try self.cycleThinking();
             return;
         }
@@ -1196,6 +1233,12 @@ const Model = struct {
             return;
         }
         if (self.command_mode) {
+            if (key.matches(vaxis.Key.tab, .{}) or key.matches(vaxis.Key.tab, .{ .shift = true })) {
+                self.observeCompletionNames();
+                try self.completion.complete(self.a, &self.command, &self.completion_names, key.mods.shift);
+                return;
+            }
+            self.completion.reset(); // Editing, Enter and Escape end the frozen cycle.
             if (key.matches(vaxis.Key.escape, .{})) {
                 self.command_mode = false;
                 self.command.clearRetainingCapacity();
@@ -1233,6 +1276,7 @@ const Model = struct {
             return;
         }
         if (normal and key.matches(':', .{})) {
+            self.completion.reset();
             self.command_mode = true;
             return;
         }
@@ -1434,6 +1478,7 @@ const Model = struct {
                         if (action != .poll or self.state() == null or !std.mem.eql(u8, self.state().?.notice, s.notice)) self.note(s.notice);
                         if (self.snapshot) |old| old.deinit();
                         self.snapshot = response;
+                        self.observeCompletionNames();
                         self.online = true;
                         self.animations.advance(self.frame, self.freshBusy());
                         try self.flushQueuedSend(); // Explicit sends take priority over background polling.
@@ -1679,6 +1724,10 @@ const Model = struct {
                 for (cells) |original| {
                     var cell = original;
                     if (row.user) cell.style.bg = Theme.user.bg;
+                    if (row.admitted) {
+                        cell.style.fg = dim.fg;
+                        cell.style.bg = base.bg;
+                    }
                     if (x + cell.char.width > layout.x + layout.body) break;
                     surface.writeCell(x, @intCast(y), cell);
                     x += cell.char.width;
@@ -3298,4 +3347,172 @@ test "reaching the bottom returns historical views once, defers behind reads and
     bridge.failed = true;
     try model.flushLatest();
     try std.testing.expect(!model.latest_wanted and !model.returningLatest());
+}
+
+test "admitted chat messages use grey text and markers without any blue or Markdown background" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    var model = try testChatModel(a, &bridge);
+    defer model.deinit();
+    const snap = &model.snapshot.?.value.case0.snapshot;
+    const text = "**Pending** `code` 界\n\n```sh\necho hello\n```\n\n| Heading | Value |\n| --- | --- |\n| left | right |";
+    snap.entries = &.{};
+    snap.admittedInputs = &.{.{ .requestId = "request", .text = text }};
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    fw.DrawContext.init(.unicode);
+    var ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 140, .height = 60 }, .cell_size = .{ .width = 8, .height = 16 } };
+    for ([_]u16{ 40, 80, 140 }) |width| {
+        ctx.max.width = width;
+        const surface = try Model.draw(&model, ctx);
+        try std.testing.expect(std.mem.indexOf(u8, try testSurfaceText(ctx.arena, surface), "Pending") != null);
+        var markers: usize = 0;
+        for (0..model.chat_height) |y| for (0..Theme.Layout.init(width, null).main) |x| {
+            const cell = surface.buffer[y * width + x];
+            try std.testing.expectEqualDeep(base.bg, cell.style.bg);
+            if (!std.mem.eql(u8, cell.char.grapheme, " ") and cell.char.grapheme.len != 0) try std.testing.expectEqualDeep(dim.fg, cell.style.fg);
+            if (std.mem.eql(u8, cell.char.grapheme, "•")) markers += 1;
+        };
+        try std.testing.expectEqual(1, markers);
+        try std.testing.expectEqual(0, model.page_rows); // Not a fabricated history entry.
+        try std.testing.expectEqual(model.rendered_rows, model.admitted_rows);
+    }
+    // Once observed, the single canonical user message has normal styling.
+    snap.admittedInputs = null;
+    snap.entries = &.{.{ .id = 1, .role = .user, .text = "Confirmed" }};
+    const surface = try Model.draw(&model, ctx);
+    try std.testing.expectEqualDeep(Theme.user.bg, surface.buffer[2 * 140 + 4].style.bg);
+    try std.testing.expectEqualDeep(base.fg, surface.buffer[2 * 140 + 4].style.fg);
+}
+
+test "admitted echoes stay at the cached live edge, never enter scrollback pages, and hide on newest eviction" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    var model = try testChatModel(a, &bridge);
+    defer model.deinit();
+    const snap = &model.snapshot.?.value.case0.snapshot;
+    snap.entries = &.{.{ .id = 100, .role = .user, .text = "canonical" }};
+    snap.admittedInputs = &.{.{ .requestId = "r", .text = "unobserved echo" }};
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    fw.DrawContext.init(.unicode);
+    const ctx: fw.DrawContext = .{ .arena = arena.allocator(), .min = .{}, .max = .{ .width = 100, .height = 40 }, .cell_size = .{ .width = 8, .height = 16 } };
+    _ = try Model.draw(&model, ctx);
+    model.pad_newest = true;
+    for (0..17) |i| {
+        var next = snap.*;
+        const entries = try ctx.arena.alloc(wire.TuiEntry, 1);
+        entries[0] = .{ .id = @intCast(99 - i), .role = .user, .text = "older canonical" };
+        next.entries = entries;
+        next.historical = true;
+        model.auto_older = true;
+        try model.acceptOlder(next);
+        snap.* = next;
+        model.scroll = 0;
+        const surface = try Model.draw(&model, ctx);
+        const shown = try testSurfaceText(ctx.arena, surface);
+        try std.testing.expectEqual(i < 16, std.mem.indexOf(u8, shown, "unobserved echo") != null);
+        for (model.scrollback.pages.items) |page| for (page.entries()) |entry| try std.testing.expect(std.mem.indexOf(u8, entry.text, "unobserved") == null);
+    }
+    model.resetHistory();
+    _ = try Model.draw(&model, ctx); // A manual historical page has no live-edge echo.
+    try std.testing.expectEqual(0, model.admitted_rows);
+    snap.historical = false;
+    const restored = try testSurfaceText(ctx.arena, try Model.draw(&model, ctx));
+    try std.testing.expect(std.mem.indexOf(u8, restored, "unobserved echo") != null);
+}
+
+test "command Tab completion is local, preserves locked input, and Shift-Tab never changes settings" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    defer bridge.output.deinit(a);
+    var model = try testChatModel(a, &bridge);
+    defer model.deinit();
+    var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
+    defer ctx.cmds.deinit(a);
+    const snap = &model.snapshot.?.value.case0.snapshot;
+    snap.subagents = .{ .chatId = "1", .hasMore = true, .items = &.{
+        .{ .chatId = "3", .title = "second", .agentName = "DS002" },
+        .{ .chatId = "2", .title = "first", .agentName = "DS001" },
+    } };
+    snap.modelSettings = .{ .hubId = "hub", .chatId = "1", .selection = .{ .provider = "mock", .modelId = "echo", .thinkingLevel = .off }, .defaultModel = .{ .provider = "mock", .modelId = "echo" }, .models = &.{.{ .provider = "mock", .modelId = "echo", .name = "Echo", .thinkingLevels = &.{ .off, .low }, .defaultThinkingLevel = .off }} };
+    try model.editor.set("Keep exact unsent input\n界");
+    model.editor.mode = .normal;
+    try model.press(&ctx, .{ .codepoint = ':' });
+    try model.press(&ctx, .{ .codepoint = 's', .text = "su" });
+    try model.press(&ctx, .{ .codepoint = vaxis.Key.tab });
+    try std.testing.expectEqualStrings("subagent ", model.command.items);
+    try model.press(&ctx, .{ .codepoint = 'd', .text = "ds" });
+    try model.press(&ctx, .{ .codepoint = vaxis.Key.tab });
+    try std.testing.expectEqualStrings("subagent DS001", model.command.items);
+    try model.press(&ctx, .{ .codepoint = vaxis.Key.tab, .mods = .{ .shift = true } });
+    try std.testing.expectEqualStrings("subagent DS002", model.command.items);
+    try std.testing.expectEqual(wire.ThinkingLevel.off, snap.modelSettings.?.selection.thinkingLevel);
+    try model.press(&ctx, .{ .codepoint = vaxis.Key.backspace });
+    try model.press(&ctx, .{ .codepoint = vaxis.Key.tab });
+    try std.testing.expectEqualStrings("subagent DS001", model.command.items);
+    model.note("Retain this unrelated warning");
+    snap.draft = .{ .requestId = "saved", .kind = .input, .text = "Original draft", .saved = true, .clipped = false };
+    model.uncertain = true;
+    model.queued_send = true;
+    bridge.failed = true;
+    bridge.pending = .{ .version = 1, .id = "poll", .action = .poll };
+    try model.press(&ctx, .{ .codepoint = vaxis.Key.tab });
+    try std.testing.expectEqualStrings("subagent DS002", model.command.items);
+    try std.testing.expectEqualStrings("Retain this unrelated warning", model.notice[0..model.notice_len]);
+    try std.testing.expectEqualStrings("Original draft", snap.draft.?.text);
+    try model.press(&ctx, .{ .codepoint = vaxis.Key.escape });
+    try std.testing.expect(!model.command_mode and model.queued_send and model.uncertain);
+    try std.testing.expectEqualStrings("Keep exact unsent input\n界", model.editor.text.items);
+    try std.testing.expectEqual(0, bridge.output.items.len);
+    try std.testing.expectEqual(0, bridge.sequence);
+    try std.testing.expectEqual(Action.poll, bridge.pending.?.action);
+    // Completion can suggest even a detach command; only Enter executes it.
+    try model.press(&ctx, .{ .codepoint = ':' });
+    try model.press(&ctx, .{ .codepoint = 'q', .text = "q!" });
+    try model.press(&ctx, .{ .codepoint = vaxis.Key.tab });
+    try std.testing.expect(!ctx.quit);
+    try model.press(&ctx, .{ .codepoint = vaxis.Key.escape });
+    try model.press(&ctx, .{ .codepoint = ':' });
+    try model.press(&ctx, .{ .codepoint = 'h', .text = "he" });
+    try model.press(&ctx, .{ .codepoint = vaxis.Key.tab });
+    try std.testing.expect(!model.help_visible);
+    try model.press(&ctx, .{ .codepoint = vaxis.Key.enter });
+    try std.testing.expect(model.help_visible and !model.command_mode and !ctx.quit);
+}
+
+test "subagent completion retains sibling names through inspection but clears unrelated parent scopes" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    var model = try testChatModel(a, &bridge);
+    defer model.deinit();
+    const snap = &model.snapshot.?.value.case0.snapshot;
+    snap.subagents = .{ .chatId = "1", .items = &.{.{ .chatId = "2", .title = "Review", .agentName = "DS001" }}, .hasMore = true };
+    model.observeCompletionNames();
+    snap.chatId = "2";
+    snap.kind = .subagent;
+    snap.inspectParentChatId = "1";
+    snap.agentName = "DS999"; // Successfully inspected by name, outside the sampled window.
+    snap.subagents = .{ .chatId = "2", .items = &.{.{ .chatId = "3", .title = "Grandchild", .agentName = "ZZ001" }}, .hasMore = false };
+    model.observeCompletionNames();
+    try model.command.appendSlice(a, "subagent ds");
+    try model.completion.complete(a, &model.command, &model.completion_names, false);
+    try std.testing.expectEqualStrings("subagent DS001", model.command.items);
+    try model.completion.complete(a, &model.command, &model.completion_names, false);
+    try std.testing.expectEqualStrings("subagent DS999", model.command.items);
+    model.completion.reset();
+    model.command.clearRetainingCapacity();
+    try model.command.appendSlice(a, "subagent zz");
+    try model.completion.complete(a, &model.command, &model.completion_names, false);
+    try std.testing.expectEqualStrings("subagent zz", model.command.items);
+    snap.chatId = "1";
+    snap.inspectParentChatId = null;
+    snap.kind = .main;
+    snap.subagents = null; // Unavailable observation does not revoke known names.
+    model.observeCompletionNames();
+    try std.testing.expectEqual(2, model.completion_names.len);
+    snap.chatId = "7";
+    model.observeCompletionNames();
+    try std.testing.expectEqual(0, model.completion_names.len);
+    try std.testing.expect(!model.completion.active);
 }

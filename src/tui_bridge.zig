@@ -235,6 +235,13 @@ pub fn validReply(value: std.json.Value, expected: []const u8, hub_id: ?[]const 
     if (s.object.get("modelSettings")) |settings| {
         if (!model_settings.validSnapshot(settings) or !std.mem.eql(u8, settings.object.get("hubId").?.string, s.object.get("hubId").?.string) or !std.mem.eql(u8, settings.object.get("chatId").?.string, chat)) return false;
     }
+    if (s.object.get("admittedInputs")) |inputs| {
+        if (s.object.contains("inspectParentChatId") or child or (!task_mode and !at_hub)) return false;
+        for (inputs.array.items, 0..) |input, i| {
+            if (input.object.get("text").?.string.len > 8192) return false;
+            for (inputs.array.items[0..i]) |prior| if (std.mem.eql(u8, prior.object.get("requestId").?.string, input.object.get("requestId").?.string)) return false;
+        }
+    }
     var previous: f64 = 0;
     var text_bytes: usize = 0;
     for (s.object.get("entries").?.array.items) |entry| {
@@ -676,4 +683,41 @@ test "subagent navigation replies retain parent authority and remain read-only" 
         defer request_value.deinit();
         try std.testing.expect(validRequest(request_value.value));
     }
+}
+
+test "admitted echoes validate identity uniqueness, byte bounds and writable scope" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const fixtures = try std.json.parseFromSlice(std.json.Value, a, @embedFile("contracts.test.json"), .{});
+    var snapshot = fixtures.value.object.get("bases").?.object.get("TuiSnapshot").?;
+    var response = (try std.json.parseFromSlice(std.json.Value, a, "{\"version\":1,\"id\":\"1\",\"ok\":true}", .{})).value;
+    for ([_]struct { text: []const u8, valid: bool }{
+        .{ .text = "[{\"requestId\":\"r\",\"text\":\"pending\"}]", .valid = true },
+        .{ .text = "[{\"requestId\":\"r\",\"text\":\"x\"},{\"requestId\":\"r\",\"text\":\"y\"}]", .valid = false },
+        .{ .text = "[{\"requestId\":\"r\",\"text\":\"x\",\"id\":1}]", .valid = false },
+        .{ .text = "null", .valid = false },
+    }) |case| {
+        try snapshot.object.put(a, "admittedInputs", (try std.json.parseFromSlice(std.json.Value, a, case.text, .{})).value);
+        try response.object.put(a, "snapshot", snapshot);
+        try std.testing.expectEqual(case.valid, validReply(response, "1", "hub", "1"));
+    }
+    for ([_]usize{ 2730, 2731 }) |count| {
+        var text: std.ArrayList(u8) = .empty;
+        for (0..count) |_| try text.appendSlice(a, "界");
+        const encoded = try std.json.Stringify.valueAlloc(a, [_]wire.TuiAdmittedInput{.{ .requestId = "r", .text = text.items }}, .{});
+        try snapshot.object.put(a, "admittedInputs", (try std.json.parseFromSlice(std.json.Value, a, encoded, .{})).value);
+        try response.object.put(a, "snapshot", snapshot);
+        try std.testing.expectEqual(count == 2730, validReply(response, "1", "hub", "1"));
+    }
+    try snapshot.object.put(a, "admittedInputs", (try std.json.parseFromSlice(std.json.Value, a, "[{\"requestId\":\"r\",\"text\":\"x\"}]", .{})).value);
+    try snapshot.object.put(a, "chatId", .{ .string = "2" });
+    try response.object.put(a, "snapshot", snapshot);
+    try std.testing.expect(!validReply(response, "1", "hub", "2"));
+    try snapshot.object.put(a, "clientMode", .{ .string = "task" });
+    try response.object.put(a, "snapshot", snapshot);
+    try std.testing.expect(validReply(response, "1", "hub", "2"));
+    try snapshot.object.put(a, "kind", .{ .string = "subagent" });
+    try response.object.put(a, "snapshot", snapshot);
+    try std.testing.expect(!validReply(response, "1", "hub", "2"));
 }
