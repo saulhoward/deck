@@ -31,6 +31,8 @@ Before replacing a running hub with upgraded code, follow the [stop, drain and b
 nix profile upgrade --refresh deck
 ```
 
+On a machine with about 2 GiB of RAM, use `nix profile upgrade --refresh --max-jobs 1 deck` (or `nix profile add --max-jobs 1 github:saulhoward/deck` for a fresh install). This keeps Nix from compiling Zig and TypeScript at the same time. If the build log ends with `Killed` (exit 137) instead of a compiler diagnostic, retry with this limit.
+
 The unqualified GitHub reference follows this repository's default branch (`master`); it is not a stable release channel. For a new installation pinned to a reviewed revision, use `github:saulhoward/deck/<full-commit-sha>` instead. Keep prior builds while resolving existing work and pinned worker/client registrations; upgrading a profile does not migrate them or restart services.
 
 Intel macOS is not supported by this flake's pinned Nixpkgs. Native Zig cross-builds for that target are not a working Nix installation path.
