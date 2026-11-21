@@ -31,6 +31,7 @@ export function parseRexRoutes(bytes: string, localMachine: string, reserved: nu
   }
   const pending = new Set<string>();
   for (const { plan, phase } of value.handoffs ?? []) {
+    if (phase !== "prepared" && phase !== "committed") throw new Error("Released handoff is not a runtime fence");
     const r = value.slots.find(s => s.registration?.machineId === plan.machineId)?.registration;
     const client = phase === "prepared" ? plan.beforeClient : plan.client;
     if (value.handoffReadFd === undefined || !r || pending.has(plan.machineId) || plan.hubId !== value.hubId || r.capabilities.join(",") !== "files,bash,rex,launcher" || r.implementation !== (phase === "prepared" ? plan.beforeImplementation : plan.implementation) || r.rexClient.executable !== client.executable || r.rexClient.socket !== client.socket || plan.client.socket !== plan.beforeClient.socket) throw new Error("Invalid retained worker handoff");

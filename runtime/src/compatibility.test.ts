@@ -10,6 +10,7 @@ import { createRegistry, defineDoc, defineDocFamily, defineTask, Harness } from 
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { bindImplementation, checkCompatibility, CompatibilityError, fingerprintImplementation, ImplementationDoc } from "./compatibility.js";
 import { DeckRuntime } from "./deck.js";
+import { discardUnfinished } from "./force-start.js";
 const A = "a".repeat(64), B = "b".repeat(64);
 function setup() {
   const faux = fauxProvider(); const models = createModels(); models.setProvider(faux.provider);
@@ -166,7 +167,10 @@ test("unknown stamp formats reject downgrade even while idle, without normalizin
     const Future = defineDoc<{ digest: string }>({ kind: "deck.implementation", version: 2, scope: "session", initial: () => ({ digest: A }), checkpointWhen: () => true });
     await future.commit((tx) => tx.doc(Future), context); await future.close(context);
     const futureRead = await openNodeSqliteStorage(join(directory, "future.sqlite"));
-    try { await assert.rejects(checkCompatibility(futureRead, A), /Unsupported Deck implementation stamp/); }
+    try {
+      await assert.rejects(checkCompatibility(futureRead, A), /Unsupported Deck implementation stamp/);
+      await assert.rejects(discardUnfinished(futureRead), /Unsupported Deck implementation stamp/);
+    }
     finally { await futureRead.close(context); }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

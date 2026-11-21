@@ -18,7 +18,7 @@ const help =
     \\  deck init [--directory PATH]
     \\  deck backup --output NEW_DIRECTORY [--directory STATE] [--include-credentials]
     \\  deck restore --from BACKUP_DIRECTORY --directory NEW_STATE
-    \\  deck serve [--mock] [--model ID] [--port 52800] [--directory PATH]
+    \\  deck serve [--force] [--mock] [--model ID] [--port 52800] [--directory PATH]
     \\    [--workers /private/registry.json --tailscale /absolute/path/to/tailscale]
     \\    [--mcp /private/host-profiles.json] [--mcp-catalog /private/catalog.json]
     \\  deck mcp export --config /private/host-profiles.json
@@ -48,6 +48,9 @@ const help =
     \\  deck --help | --version
     \\
     \\serve initializes fresh/default state under its writer lock; init is optional.
+    \\--force is destructive: discard ALL unfinished hub work and release hub-side worker
+    \\handoff locks before starting. Back up first; issued effects cannot be undone.
+    \\It never breaks a live writer lock, kills remote workers or changes their pins.
     \\An existing store without its identity refuses; never remove writer.lock.
     \\The chat API binds only 127.0.0.1. --stdio selects private framed IPC instead.
     \\Automatic workers use authenticated Rex API-14+ forwarding and pinned enrollment.
@@ -109,6 +112,7 @@ const Options = struct {
     directory: ?[]const u8 = null,
     runtime: ?[]const u8 = null,
     stdio: bool = false,
+    force: bool = false,
     mock: bool = false,
     port: u16 = 52800,
     api_key: bool = false,
@@ -170,6 +174,9 @@ fn parse(args: []const []const u8) !Options {
             if (i == args.len) return error.InvalidArguments;
             result.port = try std.fmt.parseInt(u16, args[i], 10);
             if (result.port == 0) return error.InvalidArguments;
+        } else if (std.mem.eql(u8, arg, "--force")) {
+            if (!std.mem.eql(u8, result.command, "serve") or result.force) return error.InvalidArguments;
+            result.force = true;
         } else if (std.mem.eql(u8, arg, "--stdio")) {
             result.stdio = true;
         } else if (std.mem.eql(u8, arg, "--mock")) {
@@ -268,6 +275,7 @@ fn run(native: Native, allocator: std.mem.Allocator, options: Options) !void {
     defer if (remote) |*manager| manager.deinit();
     const routes = if (remote) |*manager| try manager.json() else null;
     defer if (routes) |bytes| std.heap.page_allocator.free(bytes);
+    if (options.force) try forceStart(native, path, dir, held, config.value.machine_id, if (remote) |manager| manager.registry.value.hubId else null);
     const automatic = if (!options.stdio and options.runtime == null and options.workers == null) try @import("rex_enrollment.zig").Hub.init(native, path, config.value.machine_id, options.port) else null;
     defer if (automatic) |manager| manager.deinit();
     const automatic_routes = if (automatic) |manager| try manager.json() else null;
@@ -338,6 +346,33 @@ fn run(native: Native, allocator: std.mem.Allocator, options: Options) !void {
         .exited => |code| if (code != 0) return error.RuntimeFailed,
         else => return error.RuntimeFailed,
     }
+}
+
+// The real writer lock spans BOTH durable steps and normal startup. Pi is
+// discarded first: a failure between publications leaves worker holds in place,
+// never old runnable work on a newly unlocked route. An explicit retry is safe.
+fn forceStart(native: Native, path: []const u8, dir: std.Io.Dir, held: std.Io.File, machine: []const u8, legacy_hub: ?[]const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const registry_file = @import("rex_registry.zig");
+    const registry = try registry_file.load(native, a, path, machine);
+    if (legacy_hub) |id| if (registry.hubId) |saved| if (!std.mem.eql(u8, id, saved)) return error.HubIdentityChanged;
+    const node = try runtime_paths.node(native, a);
+    const helper = try runtime_paths.entry(native, a, null, "force-start-main.js");
+    const descriptor = try std.fmt.allocPrint(a, "{d}", .{held.handle});
+    var child = try std.process.spawn(native.io, .{
+        .argv = &.{ node, helper, path, descriptor, legacy_hub orelse registry.hubId orelse "" },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .inherit_files = &.{held},
+    });
+    switch (try child.wait(native.io)) {
+        .exited => |code| if (code != 0) return error.ForceStartFailed,
+        else => return error.ForceStartFailed,
+    }
+    const count = registry_file.release(native, a, dir, registry) catch return error.ForceReleaseUnconfirmed;
+    std.debug.print("deck: --force: released {d} hub-side worker handoff locks; no worker was stopped or repinned\n", .{count});
 }
 
 fn maintenance(native: Native, allocator: std.mem.Allocator, options: Options) !void {
@@ -627,6 +662,9 @@ pub fn main(init: std.process.Init) void {
             error.AddressInUse => "deck: hub/enrollment port already in use; choose an unused --port pair\n",
             error.MissingStateIdentity => "deck: state directory is not empty but has no identity; restore its config or choose a new directory; no identity created\n",
             error.PathAlreadyExists => "deck: destination already exists; use a new backup/restore directory\n",
+            error.ForceStartFailed => "deck: forced discard failed or unconfirmed; workers were not unlocked and the hub was not started\n",
+            error.ForceReleaseUnconfirmed => "deck: work discard complete but worker-lock publication unconfirmed; keep the hub stopped and retry --force\n",
+            error.InvalidHandoff, error.InvalidWorkerRegistration, error.HubIdentityChanged => "deck: invalid or mismatched worker registry; check the original hub identity, pins and handoff records\n",
             error.BackupFailed => "deck: backup/restore did not complete; originals were not replaced\n",
             error.WouldBlock => "deck: this state directory already has a running writer\n",
             error.FileNotFound => "deck: missing state, backup or runtime; check paths, init and installation\n",
@@ -640,7 +678,10 @@ pub fn main(init: std.process.Init) void {
 
 test "parse explicit prototype flags and reject malformed options" {
     const options = try parse(&.{ "serve", "--stdio", "--mock", "--directory", "/tmp/deck" });
-    try std.testing.expect(options.stdio and options.mock);
+    try std.testing.expect(options.stdio and options.mock and !options.force);
+    try std.testing.expect((try parse(&.{ "serve", "--force" })).force);
+    for ([_][]const u8{ "init", "backup", "restore", "--help" }) |command| try std.testing.expectError(error.InvalidArguments, parse(&.{ command, "--force" }));
+    try std.testing.expectError(error.InvalidArguments, parse(&.{ "serve", "--force", "--force" }));
     try std.testing.expectEqualStrings("/tmp/deck", options.directory.?);
     try std.testing.expectError(error.InvalidArguments, parse(&.{ "init", "--directory" }));
     try std.testing.expectError(error.InvalidArguments, parse(&.{ "serve", "--hub", "http://remote" }));

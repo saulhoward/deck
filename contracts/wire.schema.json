@@ -116,7 +116,8 @@
     },
     "WorkerHandoffState": {
       "type": "object", "additionalProperties": false,
-      "properties": { "plan": { "$ref": "#/$defs/WorkerHandoffPlan" }, "phase": { "enum": ["prepared", "committed"] } }, "required": ["plan", "phase"]
+      "description": "Hub custody only. free_old/free_new retain exact retry evidence under the old/new pins after force-start, with no lock. Neither spelling grows the bounded registry on release.",
+      "properties": { "plan": { "$ref": "#/$defs/WorkerHandoffPlan" }, "phase": { "enum": ["prepared", "committed", "free_old", "free_new"] } }, "required": ["plan", "phase"]
     },
     "WorkerHandoffLocal": {
       "type": "object", "additionalProperties": false,

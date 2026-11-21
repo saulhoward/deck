@@ -550,7 +550,7 @@ Before an upgrade:
 3. Wait for outstanding work to settle. Stop the hub and wait for the actual writer lock to be released.
 4. Back up the offline state. Start the new build and reopen clients.
 
-Changed code cannot resume unfinished work. If startup refuses, use the original build and mode. Never delete `writer.lock` or edit stored identities to bypass this check. A surviving Pi child can still hold the lock after the supervisor exits.
+Changed code cannot **resume** unfinished work. To keep it, use the original build and mode to drain it. Never delete `writer.lock` or edit stored identities: a surviving Pi child can still hold the lock after the supervisor exits.
 
 ```sh
 deck backup --directory /path/to/state --output /path/to/new-backup
@@ -560,6 +560,14 @@ deck restore --from /path/to/new-backup --directory /path/to/new-state
 Destination paths must not exist; their parents must exist. These commands do not stop or resume work. Backup includes Pi state, config, published native receipts and the hub's automatic-worker registration pins (`rex-workers.json`). It excludes the workspace, runtime, client drafts/startup metadata, detached/remote worker state and Rex objects. Keep worker configuration/receipts and client recovery files separately; the hub archive cannot replace them. Stored credentials are excluded unless you add `--include-credentials`; environment-only keys are never copied.
 
 Restore keeps identities and workspace bindings. Do not run source and restored copies as separate hubs. An old backup can forget later effects without undoing them. Reconcile that difference before serving or retrying drafts. See [recovery and backup details](docs/DEVELOPER.md#recovery-and-backup).
+
+### Start without draining: `deck serve --force`
+
+If you want to **lose all unfinished work**, stop the old hub, wait for its writer lock to be released, and take an offline backup. Then run `deck serve --force` once, with your usual `--directory`, provider and worker options. The hub state directory must be owner-only (normally `0700`). You do not need the original build or an online worker. Do **not** leave `--force` in a service restart command: it discards work even when the build matches.
+
+- All chats are included, even owned children, background tasks, parked runs and queued writes. Tasks become terminal; queued/placed submissions become unanswered. Queued input and live generation/tool previews are discarded. Chat history, already-placed input, request IDs, bindings, credentials and native receipts stay intact. Nothing is resubmitted.
+- The hub releases its saved worker-upgrade admission and routing locks. It keeps the current approved worker pins and enough evidence to recognize a delayed upgrade reply. No worker contact or drain is needed for the **start**. This does not steal an OS lock, stop a worker, erase a client draft or undo a shell, file, MCP or Rex effect. An already-issued operation may still be running. Check the assigned machine before issuing replacement work.
+- Discard happens **before** ordinary startup. If a later step fails (for example, missing credentials or an occupied port), the discard is still committed. Fix the startup error and normally retry **without** `--force`. If worker-lock publication itself failed, keep the hub stopped and retry the explicit force-start before admitting new work.
 
 ### Upgrade an automatic worker
 

@@ -34,7 +34,7 @@ test("native launcher fingerprints actual code and reports incompatible unfinish
     } finally { await runtime.close(); }
     const module = join(root, "runtime/dist/deck.js"); const original = await readFile(module, "utf8");
     await writeFile(module, `${original}\n// A different implementation, despite unchanged package version.\n`);
-    const launch = () => spawnSync(binary!, ["serve", "--stdio", "--mock", "--directory", state, "--workspace", directory, "--runtime", join(root, "runtime/dist/main.js")], {
+    const launch = (...flags: string[]) => spawnSync(binary!, ["serve", "--stdio", "--mock", "--directory", state, "--workspace", directory, "--runtime", join(root, "runtime/dist/main.js"), ...flags], {
       input: encodeFrame({ version: 1, id: "status", command: "status" }), timeout: 10_000,
     });
     const changed = launch(); assert.notEqual(changed.status, 0); assert.equal(changed.signal, null);
@@ -44,5 +44,9 @@ test("native launcher fingerprints actual code and reports incompatible unfinish
     const restored = launch(); assert.equal(restored.status, 0, restored.stderr.toString());
     const response = JSON.parse(restored.stdout.subarray(4).toString()) as { ok: boolean; result: { implementation: string; activity: { tasks: unknown[] } } };
     assert.equal(response.ok, true); assert.equal(response.result.implementation, runtime.implementation); assert.equal(response.result.activity.tasks.length, 1);
+    const sameBuild = launch("--force"); assert.equal(sameBuild.status, 0, sameBuild.stderr.toString());
+    const forced = JSON.parse(sameBuild.stdout.subarray(4).toString());
+    assert.equal(forced.ok, true); assert.equal(forced.result.implementation, runtime.implementation); assert.deepEqual(forced.result.activity.tasks, []);
+    assert.match(sameBuild.stderr.toString(), /settled 1 unfinished tasks/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });

@@ -92,7 +92,7 @@ export type WorkerHandoffRequest = { kind: "worker_upgrade"; action: "probe" | "
 export const validWorkerHandoffRequest = (x: unknown): x is WorkerHandoffRequest => v343(x);
 export type WorkerHandoffReply = { kind: "worker_upgrade"; id: RexUuid; hubId: RexUuid; status: "supported" | "pending" | "deferred" | "prepared" | "committed" | "finished" };
 export const validWorkerHandoffReply = (x: unknown): x is WorkerHandoffReply => v347(x);
-export type WorkerHandoffState = { plan: WorkerHandoffPlan; phase: "prepared" | "committed" };
+export type WorkerHandoffState = { plan: WorkerHandoffPlan; phase: "prepared" | "committed" | "free_old" | "free_new" };
 export const validWorkerHandoffState = (x: unknown): x is WorkerHandoffState => v317(x);
 export type WorkerHandoffLocal = { plan: WorkerHandoffPlan; before: RexWorkerConnection; phase: "requested" | "prepared" | "committed" | "deferred" };
 export const validWorkerHandoffLocal = (x: unknown): x is WorkerHandoffLocal => v352(x);
@@ -844,7 +844,7 @@ function v324(x: unknown): boolean { return v44(x); }
 function v325(x: unknown): boolean { return v24(x); }
 function v326(x: unknown): boolean { return v44(x); }
 function v327(x: unknown): boolean { return v24(x); }
-function v328(x: unknown): boolean { return x === "prepared" || x === "committed"; }
+function v328(x: unknown): boolean { return x === "prepared" || x === "committed" || x === "free_old" || x === "free_new"; }
 function v329(x: unknown): boolean { return object(x) && (Object.hasOwn(x, "version") && v330(x.version)) && (Object.hasOwn(x, "server") && v331(x.server)) && (Object.hasOwn(x, "hostId") && v332(x.hostId)) && (Object.hasOwn(x, "account") && v333(x.account)) && (Object.hasOwn(x, "executable") && v334(x.executable)) && (!Object.hasOwn(x, "hubId") || v335(x.hubId)) && (Object.hasOwn(x, "hubPort") && v336(x.hubPort)) && (!Object.hasOwn(x, "sessionId") || v337(x.sessionId)) && (Object.hasOwn(x, "pid") && v338(x.pid)) && (!Object.hasOwn(x, "handoffVersion") || v339(x.handoffVersion)) && (Object.hasOwn(x, "pendingSession") && v340(x.pendingSession)) && (Object.hasOwn(x, "rexClient") && v341(x.rexClient)) && (Object.hasOwn(x, "implementation") && v342(x.implementation)) && Object.keys(x).every((key) => ["version","server","hostId","account","executable","hubId","hubPort","sessionId","pid","handoffVersion","pendingSession","rexClient","implementation"].includes(key)); }
 function v330(x: unknown): boolean { return x === 1; }
 function v331(x: unknown): boolean { return string(x, 1, 4096); }

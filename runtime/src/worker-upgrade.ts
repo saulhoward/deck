@@ -151,7 +151,7 @@ export async function upgrade(options: UpgradeOptions): Promise<void> {
     const value: unknown = JSON.parse((await read(path)).toString());
     check(validRexWorkerRegistry(value) && value.hubId === plan.before.hubId && value.hosts.every(validRexRegistration));
     const registry: RexWorkerRegistry = value;
-    check(!registry.handoffs?.length, "Hub has unresolved live handoffs; do not replace their custody records");
+    check(!registry.handoffs?.some(s => s.phase !== "free_old" && s.phase !== "free_new"), "Hub has unresolved live handoffs; do not replace their custody records");
     check(new Set(registry.hosts.map(host => host.machineId)).size === registry.hosts.length && registry.hosts.every(host => host.hubId === registry.hubId && host.machineId !== identity.machine));
     const index = registry.hosts.findIndex(host => host.machineId === plan.machineId); const current = registry.hosts[index]; check(current);
     const already = current.upgradeId === plan.id;
@@ -165,6 +165,11 @@ export async function upgrade(options: UpgradeOptions): Promise<void> {
       const next = { ...current, implementation: plan.implementation, rexClient: plan.client, previousClients, upgradeId: plan.id, upgradeHash: hash(canonical(plan)) };
       check(validRexRegistration(next), "Historical client limit/contract exceeded; no authority was discarded");
       registry.hosts[index] = next;
+      // A released control receipt binds the prior pins, not this offline replacement.
+      if (registry.handoffs) {
+        registry.handoffs = registry.handoffs.filter(s => s.plan.machineId !== plan.machineId);
+        if (!registry.handoffs.length) delete registry.handoffs;
+      }
       await publish(path, registry, true);
     } else await syncDirectory(state);
     // Publication order is deliberate. A lost approval is regenerated only if

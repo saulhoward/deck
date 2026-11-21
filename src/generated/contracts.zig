@@ -1053,7 +1053,7 @@ pub fn parseWorkerHandoffReply(allocator: std.mem.Allocator, encoded: []const u8
 }
 pub const WorkerHandoffState = struct {
     plan: WorkerHandoffPlan,
-    phase: enum { prepared, committed },
+    phase: enum { prepared, committed, free_old, free_new },
 };
 pub fn validWorkerHandoffState(x: std.json.Value) bool {
     return v317(x);
@@ -8101,7 +8101,7 @@ fn v327(x: std.json.Value) bool {
     return v24(x);
 }
 fn v328(x: std.json.Value) bool {
-    return x == .string and (std.mem.eql(u8, x.string, "prepared") or std.mem.eql(u8, x.string, "committed"));
+    return x == .string and (std.mem.eql(u8, x.string, "prepared") or std.mem.eql(u8, x.string, "committed") or std.mem.eql(u8, x.string, "free_old") or std.mem.eql(u8, x.string, "free_new"));
 }
 fn v329(x: std.json.Value) bool {
     if (x != .object) return false;

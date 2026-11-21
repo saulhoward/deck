@@ -73,10 +73,14 @@ test("offline upgrade changes only paired pins, retains uncertainty, session, ta
     const originals = await Promise.all(paths.map(path => readFile(path)));
     const originalConnection = await bytes(join(f.worker, "rex-connection.json"));
     await f.prepare(); const plan = await bytes(f.plan); await f.prepare(); assert.equal(await bytes(f.plan), plan);
+    const released = { version: 1 as const, id: randomUUID(), hubId: f.hubId, machineId: machine, beforeImplementation: oldDigest, implementation: newDigest, beforeClient: f.before.rexClient, client: { executable: client, socket: f.before.rexClient.socket } };
+    await put(join(f.hub, "rex-workers.json"), { ...f.registry, handoffs: [{ plan: released, phase: "free_old" }] });
     assert.equal(await bytes(join(f.worker, "rex-connection.json")), originalConnection);
     await f.approve(); const registry = await bytes(join(f.hub, "rex-workers.json")); await f.approve(); assert.equal(await bytes(join(f.hub, "rex-workers.json")), registry);
     assert.equal(await bytes(join(f.worker, "rex-connection.json")), originalConnection, "hub approval does not rewrite worker custody");
-    const registration = (JSON.parse(registry) as RexWorkerRegistry).hosts[0]!;
+    const updated = JSON.parse(registry) as RexWorkerRegistry;
+    assert.equal(updated.handoffs, undefined, "new offline pins supersede the released receipt for this machine");
+    const registration = updated.hosts[0]!;
     assert.equal(registration.implementation, newDigest); assert.equal(registration.rexClient.executable, client); assert.deepEqual(registration.previousClients, [f.before.rexClient]); assert.ok(validRexRegistration(registration));
     await f.apply(); const connection = await bytes(join(f.worker, "rex-connection.json")); await f.apply(); assert.equal(await bytes(join(f.worker, "rex-connection.json")), connection);
     assert.deepEqual(JSON.parse(connection), { ...f.before, implementation: newDigest, rexClient: { ...f.before.rexClient, executable: client } });

@@ -55,7 +55,7 @@ test("Zig init/supervisor: private state, IPC, reopen and inherited lock after s
     // Node still owns the inherited lock even though Zig is gone. Its input
     // stays open independently of Node's ChildProcess exit cleanup.
     assert.equal((await request("orphan", "status")).mainChatId, chatId);
-    const stillBlocked = invoke("serve", "--stdio", "--mock");
+    const stillBlocked = invoke("serve", "--stdio", "--mock", "--force");
     assert.notEqual(stillBlocked.status, 0); assert.match(stillBlocked.stderr, /running writer/);
     input.writer.end();
     // EOF closes the writer; stdout closes only when that orphan child has exited.

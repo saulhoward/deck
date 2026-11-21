@@ -3,6 +3,7 @@
 import { Socket } from "node:net";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { ConversationId, Cursor, Storage } from "@earendil-works/pi-durable";
+import { unfinishedTasks, unfinishedSubmissions } from "./compatibility.js";
 import type { DeckRuntime } from "./deck.js";
 import type { RexRoutedFiles } from "./rex-routes.js";
 import { FrameDecoder, encodeFrame } from "./protocol.js";
@@ -21,7 +22,7 @@ export async function workerIdle(storage: Storage, machine: string): Promise<boo
     }
     const host = bindings.get(id); return host === undefined || host === machine;
   };
-  for (const status of ["pending", "running", "waiting", "sleeping", "completing"] as const) {
+  for (const status of unfinishedTasks) {
     let cursor: Cursor | undefined;
     do {
       const page = await storage.scanTasks({ status }, 100, cursor, context);
@@ -29,7 +30,7 @@ export async function workerIdle(storage: Storage, machine: string): Promise<boo
       cursor = page.next;
     } while (cursor);
   }
-  for (const status of ["queued", "placed"] as const) {
+  for (const status of unfinishedSubmissions) {
     let cursor: Cursor | undefined;
     do {
       const page = await storage.scanSubmissions({ status }, 100, cursor, context);

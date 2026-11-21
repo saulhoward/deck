@@ -7,12 +7,15 @@ import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { defineDoc, type Harness, type Storage } from "@earendil-works/pi-durable";
 
+export const unfinishedTasks = ["pending", "running", "waiting", "sleeping", "completing"] as const;
+export const unfinishedSubmissions = ["queued", "placed"] as const;
+
 export const ImplementationDoc = defineDoc<{ digest: string }>({
   kind: "deck.implementation", version: 1, scope: "session",
   initial: () => ({ digest: "" }), checkpointWhen: () => true,
 });
 export class CompatibilityError extends Error {
-  constructor(format = false) { super(format ? "Unsupported Deck implementation stamp; use the original build and a tested store migration. No work was resumed." : "Unfinished work requires the original Deck implementation; restart that build and resolve/drain work before upgrading. No work was resumed."); }
+  constructor(format = false) { super(format ? "Unsupported Deck implementation stamp; use the original build and a tested store migration. No work was resumed." : "Unfinished work requires the original Deck implementation; restart that build to drain it, or explicitly discard it with deck serve --force. No work was resumed."); }
 }
 export function bindImplementation(code: string, nativeTools: boolean): string {
   if (!/^[a-f0-9]{64}$/.test(code)) throw new Error("Invalid implementation identity");
@@ -24,21 +27,22 @@ export function bindImplementation(code: string, nativeTools: boolean): string {
 // storage reads are bounded; never write Pi tables or keep a second work list.
 export async function checkCompatibility(storage: Storage, digest: string): Promise<void> {
   if (!/^[a-f0-9]{64}$/.test(digest)) throw new Error("Invalid implementation identity");
+  if (await savedImplementation(storage) !== digest) await requireIdleStorage(storage);
+}
+export async function savedImplementation(storage: Storage): Promise<string | undefined> {
   const record = await storage.findDocument({ kind: ImplementationDoc.definition.kind, scope: { kind: "session" } }, "current", context);
-  if (record) {
-    const saved = await storage.document(record.id, "current", context);
-    if (!saved || saved.version !== 1 || typeof saved.value.digest !== "string" || !/^[a-f0-9]{64}$/.test(saved.value.digest)) throw new CompatibilityError(true);
-    if (saved.value.digest === digest) return;
-  }
-  await requireIdleStorage(storage);
+  if (!record) return undefined;
+  const saved = await storage.document(record.id, "current", context);
+  if (!saved || saved.version !== 1 || typeof saved.value.digest !== "string" || !/^[a-f0-9]{64}$/.test(saved.value.digest)) throw new CompatibilityError(true);
+  return saved.value.digest;
 }
 // Global, canonical drainage check; no selected-chat activity sample or Harness
 // opening (which could normalize/resume work) may stand in for this predicate.
 export async function requireIdleStorage(storage: Storage): Promise<void> {
-  for (const status of ["pending", "running", "waiting", "sleeping", "completing"] as const) {
+  for (const status of unfinishedTasks) {
     if ((await storage.scanTasks({ status }, 1, undefined, context)).items.length) throw new CompatibilityError();
   }
-  for (const status of ["queued", "placed"] as const) {
+  for (const status of unfinishedSubmissions) {
     if ((await storage.scanSubmissions({ status }, 1, undefined, context)).items.length) throw new CompatibilityError();
   }
 }
