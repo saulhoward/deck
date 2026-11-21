@@ -34,7 +34,7 @@ const help =
     \\  deck hub --here [--tui | --no-tui] [--port 52800] [--task CHAT_ID] [--message TEXT]
     \\  deck agent [--here] [--hub REX_HOST | --local] [--directory STATE] [--port 52800]
     \\    Create & open form in local Rex; worker/cwd/terminal stay on this machine.
-    \\  deck agent [connection options] --list | --resume NAME [--here] | --drafts
+    \\  deck agent [connection options] --list | --resume NAME [--here [--force]] | --drafts
     \\  deck agent [connection options] --recover STARTUP_ID | --discard REQUEST_ID --confirm
     \\    Recovery and discard both require --confirm. Use deck agent --help for details.
     \\    Selection: --hub, DECK_HUB_REX_HOST, otherwise local; --local ignores env.
@@ -48,7 +48,7 @@ const help =
     \\  deck --help | --version
     \\
     \\serve initializes fresh/default state under its writer lock; init is optional.
-    \\--force is destructive: discard ALL unfinished hub work and release hub-side worker
+    \\serve --force is destructive: discard ALL unfinished hub work and release hub-side worker
     \\handoff locks before starting. Back up first; issued effects cannot be undone.
     \\It never breaks a live writer lock, kills remote workers or changes their pins.
     \\An existing store without its identity refuses; never remove writer.lock.
@@ -102,6 +102,7 @@ const help =
     \\Approved remote launcher: deck agent --launch-from ABS_WORKER_DIRECTORY [--help].
     \\Launcher authority is separate from Rex task allocation and general hub authority.
     \\Explicit --resume NAME --here attaches to an independent task on this worker.
+    \\Add --force to attach without changing the existing Rex allocation.
     \\Terminal allocation uses local Unix endpoints (API 8+); forwarding requires 14+.
     \\Jobs/child terminals remain future.
     \\

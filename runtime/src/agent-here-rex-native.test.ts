@@ -338,6 +338,20 @@ for (const { remote, shell, wrapped, login } of variants) test(`native HERE ${re
     assert.equal(inspection.observation.state, "client_exited");
     assert.deepEqual(await command("rex_status", { chatId: task.chatId }), parent.status);
     await noInput(task.chatId);
+    // A prior registration still exists after the old client exits. Explicit
+    // force opens a writable attachment, not a second registration or a replay.
+    if (shell === "script") {
+      const forced = await openShell("forced", ["--resume", task.agentName, "--force"], invoking);
+      const starts = await startupBytes(), layout = await topology();
+      await start(forced); await waitScreen(forced, "Enter to send");
+      assert.ok(!(await capture(forced)).includes(prompt));
+      await noInput(task.chatId);
+      assert.deepEqual(await command("rex_status", { chatId: task.chatId }), parent.status);
+      assert.deepEqual(await startupBytes(), starts); assert.deepEqual(await topology(), layout);
+      const message = "Fresh input from forced attachment";
+      await input(forced, message); await waitScreen(forced, message); await input(forced, "\r");
+      await until(() => command("history", { chatId: task.chatId }), h => h.items.some((e: any) => e.kind === "deck.input" && e.data.text === message));
+    }
     // Lost-ACK exact-ID/scope and single-send fences are in here-adoption.test;
     // this suite covers the real native process proof + installed Rex effects.
   } catch (error) {

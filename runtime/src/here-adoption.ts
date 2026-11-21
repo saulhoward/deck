@@ -50,7 +50,7 @@ async function rexStatus(endpoint: HereEndpoint, chatId: string, transport: Here
 export async function hereContext(endpoint: HereEndpoint, chatId: string, transport: HereTransport): Promise<RexHereContext> {
   const context = await taskContext(endpoint, chatId, transport);
   const status = await rexStatus(endpoint, chatId, transport);
-  if (status.status !== "unallocated" || status.taskId !== null || status.binding !== null || status.previousBinding !== null) throw new Error("HERE refuses any prior Rex allocation attempt; nothing replaced");
+  if (status.status !== "unallocated" || status.taskId !== null || status.binding !== null || status.previousBinding !== null) throw new Error("HERE refuses any prior Rex allocation attempt; nothing replaced. Use --resume NAME --here --force to attach without changing the allocation.");
   return context;
 }
 function matchesAllocation(record: RexBootstrapRecord, status: RexStatusSnapshot): boolean {
