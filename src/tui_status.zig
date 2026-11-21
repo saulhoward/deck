@@ -59,9 +59,9 @@ last: Report = .{ .state = .unknown },
 title_pushed: bool = false,
 title_storage: [192]u8 = undefined,
 
-pub fn identity(self: *Reporter, rune: []const u8, cwd: []const u8) !void {
+pub fn identity(self: *Reporter, rune: []const u8, label: []const u8) !void {
     var buffer: [192]u8 = undefined;
-    const title = identityTitle(&buffer, cwd, rune);
+    const title = identityTitle(&buffer, label, rune);
     if (std.mem.eql(u8, title, self.title)) return;
     @memcpy(self.title_storage[0..title.len], title);
     self.title = self.title_storage[0..title.len];
@@ -118,20 +118,25 @@ pub fn publish(self: *Reporter, view: View, now: std.Io.Timestamp) !void {
     self.last = next;
 }
 
-/// One bounded, control-safe title for both OSC 2 and OSC 7501. Preserve UTF-8
-/// boundaries; filesystem bytes need not be UTF-8. Never emit raw path controls.
-pub fn directoryTitle(out: *[192]u8, cwd: []const u8) []const u8 {
-    return identityTitle(out, cwd, "·");
+/// Saved problem first; legacy/missing/blank problems use the task title.
+/// This is presentation only: never derive the label from the workspace path.
+pub fn problem(snapshot: wire.TuiSnapshot) []const u8 {
+    if (snapshot.brief) |brief| if (brief.problem) |text| {
+        if (std.mem.trim(u8, text, " \t\r\n").len > 0) return text;
+    };
+    return snapshot.title;
 }
-pub fn identityTitle(out: *[192]u8, cwd: []const u8, rune: []const u8) []const u8 {
-    const trimmed = std.mem.trimEnd(u8, cwd, "/");
-    const name = if (std.mem.eql(u8, rune, "Δ")) "hub" else if (trimmed.len == 0) "/" else std.fs.path.basename(trimmed);
+/// One bounded, single-line, control-safe title for both OSC 2 and OSC 7501.
+/// Preserve UTF-8 boundaries and never interpret problem text as a path.
+pub fn identityTitle(out: *[192]u8, label: []const u8, rune: []const u8) []const u8 {
+    const name = if (std.mem.eql(u8, rune, "Δ")) "hub" else label;
     const symbol = if (wire.validAgentRune(.{ .string = rune })) rune else "·";
     @memcpy(out[0..symbol.len], symbol);
     @memcpy(out[symbol.len..][0..3], " - ");
     const prefix_len = symbol.len + 3;
     var n: usize = prefix_len;
     var i: usize = 0;
+    var space = false;
     while (i < name.len) {
         var bytes: []const u8 = "�";
         var size: usize = 1;
@@ -146,8 +151,17 @@ pub fn identityTitle(out: *[192]u8, cwd: []const u8, rune: []const u8) []const u
             }
         } else |_| {}
         i += size;
+        if (cp == ' ' or cp == '\t' or cp == '\r' or cp == '\n' or cp == 0x2028 or cp == 0x2029) {
+            space = n > prefix_len;
+            continue;
+        }
         if (cp < 0x20 or (cp >= 0x7f and cp <= 0x9f) or cp == 0x061c or (cp >= 0x200b and cp <= 0x200f) or (cp >= 0x2028 and cp <= 0x202e) or (cp >= 0x2060 and cp <= 0x206f) or cp == 0xfeff) continue;
-        if (n + bytes.len > out.len) break;
+        if (n + @intFromBool(space) + bytes.len > out.len) break;
+        if (space) {
+            out[n] = ' ';
+            n += 1;
+            space = false;
+        }
         @memcpy(out[n..][0..bytes.len], bytes);
         n += bytes.len;
     }
@@ -194,19 +208,21 @@ test "terminal status uses fresh settled observations, not polling, ACKs or old 
 
 test "OSC title and status are bounded, safe, change-only and cleaned up by namespace" {
     var title: [192]u8 = undefined;
-    try std.testing.expectEqualStrings("Δ - hub", identityTitle(&title, "/tmp/repo/", "Δ"));
-    try std.testing.expectEqualStrings("· - repo", directoryTitle(&title, "/tmp/repo/"));
-    try std.testing.expectEqualStrings("· - /", directoryTitle(&title, "/"));
-    const unsafe = directoryTitle(&title, "/tmp/ab\x1b\x07\n\t\x7f\u{85}\u{202e}cd\xff");
-    try std.testing.expectEqualStrings("· - abcd�", unsafe);
+    try std.testing.expectEqualStrings("Δ - hub", identityTitle(&title, "Ignored hub problem", "Δ"));
+    try std.testing.expectEqualStrings("ᚦ - Fix /api/path handling", identityTitle(&title, "Fix /api/path handling", "ᚦ"));
+    try std.testing.expectEqualStrings("· - Legacy task title", identityTitle(&title, "Legacy task title", "invalid rune"));
+    try std.testing.expectEqualStrings("ᚦ - First line second line 界", identityTitle(&title, "  First line\n\tsecond line 界  ", "ᚦ"));
+    try std.testing.expectEqualStrings("· - unknown", identityTitle(&title, " \n\t\x1b\x07", ""));
+    const unsafe = identityTitle(&title, "ab\x1b\x07\n\t\x7f\u{85}\u{202e}cd\xff", "·");
+    try std.testing.expectEqualStrings("· - ab cd�", unsafe);
     var unicode_name: [300]u8 = undefined;
     for (0..100) |i| @memcpy(unicode_name[i * 3 ..][0..3], "界");
-    const long = directoryTitle(&title, &unicode_name);
+    const long = identityTitle(&title, &unicode_name, "ᚦ");
     try std.testing.expect(long.len <= 192 and std.unicode.utf8ValidateSlice(long));
     var vx: vaxis.Vaxis = undefined; // These Vaxis methods only write to the supplied writer.
     var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
-    var reporter: Reporter = .{ .vx = &vx, .writer = &output.writer, .title = directoryTitle(&title, "/tmp/repo") };
+    var reporter: Reporter = .{ .vx = &vx, .writer = &output.writer, .title = identityTitle(&title, "Fix the parser", "ᚦ") };
     try reporter.begin();
     const view: View = .{ .online = true, .fenced = false, .unresolved_input = false, .settings_uncertain = false };
     reporter.presentation.observe(.{ .state = .working }, .zero);
@@ -216,7 +232,54 @@ test "OSC title and status are bounded, safe, change-only and cleaned up by name
     try std.testing.expectEqual(size, output.written().len);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "\x1b]7501;state=working:id=deck:app=deck:title=") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "progress=") == null);
+    try reporter.identity("ᚦ", "Fix the parser");
+    try std.testing.expectEqual(size, output.written().len);
+    try reporter.identity("ᚦ", "New problem / same workspace");
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "\x1b]2;ᚦ - New problem / same workspace\x1b\\") != null);
+    const changed = output.written().len;
+    try reporter.publish(view, .zero); // Same activity, new coherent title.
+    try std.testing.expect(output.written().len > changed);
+    var encoded_title: [256]u8 = undefined;
+    const encoded = std.base64.standard.Encoder.encode(&encoded_title, reporter.title);
+    try std.testing.expect(std.mem.indexOf(u8, output.written()[changed..], encoded) != null);
+    const published = output.written().len;
+    try reporter.identity("ᚦ", " New problem / same workspace\n");
+    try reporter.publish(view, .zero);
+    try std.testing.expectEqual(published, output.written().len);
     reporter.end();
     try std.testing.expect(std.mem.endsWith(u8, output.written(), "\x1b]7501;state=clear:id=deck\x1b\\\x1b[23;2t"));
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "\x1b]7501;state=clear\x1b\\") == null);
+}
+
+test "terminal problem comes from the saved brief with a legacy title fallback, never cwd" {
+    var snapshot: wire.TuiSnapshot = .{
+        .clientMode = .task,
+        .hubChatId = "1",
+        .hubId = "hub",
+        .chatId = "2",
+        .title = "Legacy task title",
+        .model = "",
+        .tools = "",
+        .activityKnown = false,
+        .busy = false,
+        .queued = 0,
+        .entries = &.{},
+        .hasOlder = false,
+        .historical = false,
+        .preview = "",
+        .notice = "",
+        .draft = null,
+    };
+    try std.testing.expectEqualStrings("Legacy task title", problem(snapshot));
+    snapshot.brief = .{ .description = "Description is not the problem" };
+    try std.testing.expectEqualStrings("Legacy task title", problem(snapshot));
+    for ([_][]const u8{ "", " \t\r\n" }) |blank| {
+        snapshot.brief.?.problem = blank;
+        try std.testing.expectEqualStrings("Legacy task title", problem(snapshot));
+    }
+    snapshot.brief.?.problem = "  Fix /api/path\nwith Unicode 界  ";
+    snapshot.cwd = "/unrelated/workspace";
+    try std.testing.expectEqualStrings(snapshot.brief.?.problem.?, problem(snapshot));
+    snapshot.cwd = null;
+    try std.testing.expectEqualStrings(snapshot.brief.?.problem.?, problem(snapshot));
 }

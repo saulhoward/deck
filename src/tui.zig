@@ -1876,7 +1876,7 @@ const Model = struct {
                         if (navigation or action == .latest) self.forward_view = false;
                         if (self.snapshot == null or navigation) self.animations.attach(self.frame, !std.mem.eql(u8, s.chatId, s.hubChatId));
                         if (action == .poll or action == .latest or navigation) self.activity_seen = self.frame;
-                        if (self.terminal_status) |status| if (s.cwd) |cwd| try status.identity(rune(s), cwd);
+                        if (self.terminal_status) |status| try status.identity(rune(s), TerminalStatus.problem(s));
                         if (navigation) {
                             self.task_picker = false;
                             self.hosts_view = false;
@@ -2473,8 +2473,6 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     const ignore_pipe: std.posix.Sigaction = .{ .handler = .{ .handler = std.posix.SIG.IGN }, .mask = std.posix.sigemptyset(), .flags = 0 };
     std.posix.sigaction(.PIPE, &ignore_pipe, &previous_pipe);
     defer std.posix.sigaction(.PIPE, &previous_pipe, null);
-    const cwd = std.process.currentPathAlloc(init.io, init.gpa) catch null;
-    defer if (cwd) |path| init.gpa.free(path);
     while (!stopping.load(.monotonic)) {
         {
             var buffer: [4096]u8 = undefined;
@@ -2491,7 +2489,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
             app.vx.opts.system_clipboard_allocator = null;
             var title_buffer: [192]u8 = undefined;
             const snapshot = model.state();
-            var terminal_status: TerminalStatus = .{ .vx = &app.vx, .writer = app.tty.writer(), .title = TerminalStatus.identityTitle(&title_buffer, if (snapshot) |s| s.cwd orelse "unknown" else cwd orelse "unknown", if (snapshot) |s| Model.rune(s) else if (chat_id == null) "Δ" else "·") };
+            var terminal_status: TerminalStatus = .{ .vx = &app.vx, .writer = app.tty.writer(), .title = TerminalStatus.identityTitle(&title_buffer, if (snapshot) |s| TerminalStatus.problem(s) else "connecting", if (snapshot) |s| Model.rune(s) else if (chat_id == null) "Δ" else "·") };
             defer terminal_status.end();
             try terminal_status.begin();
             model.terminal_status = &terminal_status;

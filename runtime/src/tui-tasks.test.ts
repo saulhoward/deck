@@ -326,7 +326,7 @@ for (const tui of [false, true]) test(`${tui ? "real PTY: :" : "plain client: /"
 test("real PTY: allocation-registered Rex TUI participates but refuses every task-navigation path", { skip: !binary, timeout: 30_000 }, async () => {
   const f = await fixture();
   try {
-    Object.assign(f.chats[1]!, { agentRune: "ᚦ", agentName: "frostwire", agentNameAlgorithm: "wintermute-v1" });
+    Object.assign(f.chats[1]!, { agentRune: "ᚦ", agentName: "frostwire", agentNameAlgorithm: "wintermute-v1", brief: { problem: "Fix /api/path handling\nwith Unicode 界" } });
     const steps: object[] = [{ wait: "history for 2" }, { wait: "Rex startup registered" }, { keys: "\x1b" }];
     for (const cmd of [":tasks", ":hosts", ":new", ":hub", ":main", ":select 1", ":task forbidden", ":task-at {}"]) steps.push({ keys: cmd }, { wait: "client idle" }, { keys: "\r" }, { wait: "Task client locked" });
     // Command mode pauses polls and exposes precise transport readiness. A
@@ -336,12 +336,41 @@ test("real PTY: allocation-registered Rex TUI participates but refuses every tas
     const closed = once(child, "close"); let output = "", errors = ""; child.stdout.on("data", c => { output += c; }); child.stderr.on("data", c => { errors += c; }); child.stdin.end(JSON.stringify(steps));
     assert.equal((await closed)[0], 0, errors);
     const terminal = Buffer.from(JSON.parse(output).output, "base64").toString();
-    assert.ok(terminal.includes("\x1b]2;ᚦ - task\x1b\\"));
+    assert.ok(terminal.includes("\x1b]2;ᚦ - Fix /api/path handling with Unicode 界\x1b\\"));
+    assert.ok(!terminal.includes("\x1b]2;ᚦ - task\x1b\\"));
+    assert.ok(!terminal.includes("\x1b]2;ᚦ - Existing task\x1b\\"));
     assert.ok(!terminal.includes("\x1b]2;Δ"));
     assert.equal(f.requests.filter(r => r.command === "admit").length, 1);
     assert.equal(f.requests.find(r => r.command === "admit").args.text, "allowed in Rex");
     assert.ok(f.requests.every(r => r.args.chatId === "2"));
     assert.ok(!f.requests.some(r => ["list_chats", "create_task"].includes(r.command)));
+  } finally { await f.close(); }
+});
+
+
+for (const brief of [undefined, { description: "Not the problem" }, { problem: " \t\n" }, { problem: "  Saved /task/problem\nsecond line 界  " }]) test(`real PTY: terminal title follows the selected problem or legacy title (${JSON.stringify(brief)})`, { skip: !binary, timeout: 20_000 }, async () => {
+  const f = await fixture();
+  try {
+    if (brief) f.chats[1]!.brief = brief;
+    // Legacy task with no rune: neutral dot, never hub or a directory label.
+    const expected = brief?.problem?.trim() ? "· - Saved /task/problem second line 界" : "· - Existing task";
+    const child = spawn("python3", [resolve("scripts/tui-pty-test.py"), binary!, "hub", "--tui", "--port", String(f.port)], { env: f.local.env });
+    let out = "", errors = ""; child.stdout.on("data", c => out += String(c)); child.stderr.on("data", c => errors += String(c));
+    const closed = once(child, "close");
+    child.stdin.end(JSON.stringify([
+      { wait: "history for 1" }, { keys: "\x1b" }, { keys: ":select 2" }, { wait: "client idle" }, { keys: "\r" },
+      { wait: "history for 2" }, { sleep: 1.2 },
+      { keys: ":hub" }, { wait: "client idle" }, { keys: "\r" }, { wait: "history for 1" }, { keys: ":q\r" },
+    ]));
+    assert.equal((await closed)[0], 0, errors + out);
+    const result = JSON.parse(out); assert.equal(result.restored, true);
+    const terminal = Buffer.from(result.output, "base64").toString();
+    const titles = [...terminal.matchAll(/\x1b\]2;([^\x1b]*)\x1b\\/g)].map(m => m[1]);
+    assert.deepEqual(titles, ["Δ - hub", expected, "Δ - hub"], "Polling must not repeat the title; navigation must restore the correct identity");
+    assert.equal(terminal.split("\x1b[22;2t").length - 1, 1);
+    assert.equal(terminal.split("\x1b[23;2t").length - 1, 1);
+    assert.ok(terminal.indexOf("\x1b[23;2t") > terminal.lastIndexOf("\x1b]2;"), "Detach restores the terminal title after the final update");
+    assert.ok(f.requests.every(r => ["status", "history", "activity"].includes(r.command)), "Title changes are presentation only");
   } finally { await f.close(); }
 });
 
