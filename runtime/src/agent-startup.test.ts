@@ -194,6 +194,7 @@ for (const { remote, upgrading, live = false, interrupted = false } of [{ remote
     const partialTasks = await hubCommand(port, "list_chats", {}, status.hubId);
     const partial = JSON.parse(await invoke("python3", [resolve("scripts/agent-here-refusal-pty-test.py"), deck!, "agent", ...flags, "--here"], work, { ...env, PATH: `${root}/bin:${process.env.PATH}`, REX_BLOCK: "block:11111111-1111-4111-8111-111111111111" }));
     assert.notEqual(partial.exitCode, 0); assert.match(partial.output, /agent startup refused/);
+    assert.match(partial.output, /native startup reason: InvalidHereRexContext/);
     assert.deepEqual(await readdir(join(client, "startups")), partialStarts);
     assert.deepEqual(await hubCommand(port, "list_chats", {}, status.hubId), partialTasks);
     assert.deepEqual(await hubCommand(port, "rex_status", { chatId: task.chatId }, status.hubId), reopened);

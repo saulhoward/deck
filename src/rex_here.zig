@@ -53,11 +53,11 @@ fn processes(native: Native, a: std.mem.Allocator, target: Target, b: Binding, c
 fn membership(native: Native, a: std.mem.Allocator, value: Processes, client: os.Sample, root: os.Sample) !void {
     const child = value.child orelse return error.ProcessReadFailed;
     const foreground = value.foreground orelse return error.ProcessReadFailed;
-    if (child.pid != root.proof.pid or child.user_id != root.proof.uid or client.proof.uid != root.proof.uid or client.proof.uid != std.c.getuid() or std.c.geteuid() != std.c.getuid()) return error.ProcessConflict;
+    if (child.pid != root.proof.pid or child.user_id != root.proof.uid or client.proof.uid != std.c.getuid() or std.c.geteuid() != std.c.getuid()) return error.ProcessConflict;
     if (client.proof.pgid != client.kernel.foreground) return error.NotForeground;
     try os.descendant(native, a, client, root);
     const fg = try os.sample(native, a, foreground.pid);
-    if (foreground.user_id != fg.proof.uid or fg.proof.pgid != client.proof.pgid) return error.ProcessConflict;
+    if (foreground.user_id != fg.proof.uid or fg.proof.uid != client.proof.uid or fg.proof.pgid != client.proof.pgid) return error.ProcessConflict;
     try os.descendant(native, a, fg, root);
 }
 /// Pure capture: callers persist the returned record + index before admission.
@@ -75,7 +75,7 @@ pub fn capture(native: Native, a: std.mem.Allocator, base: wire.RexBootstrapReco
     const window = try describe(native, a, base.target, sid, bid, cancelled);
     const binding: Binding = .{ .sessionId = try a.dupe(u8, sid), .windowId = window, .blockId = try a.dupe(u8, bid), .pid = client.proof.pid };
     const value = try processes(native, a, base.target, binding, cancelled);
-    const root = try os.sample(native, a, value.child.?.pid);
+    const root = try os.sampleRoot(native, a, value.child.?.pid);
     try membership(native, a, value, client, root);
     var record = base;
     record.binding = binding;
@@ -90,7 +90,11 @@ pub fn verify(native: Native, a: std.mem.Allocator, record: wire.RexBootstrapRec
     const proof = record.here orelse return error.InvalidBootstrap;
     const b = record.binding orelse return error.InvalidBootstrap;
     if (b.pid != proof.process.pid) return error.BindingConflict;
-    if (proof.process.uid != std.c.getuid() or proof.terminal.uid != proof.process.uid or std.c.geteuid() != std.c.getuid()) return error.ProcessConflict;
+    if (proof.process.uid != std.c.getuid() or std.c.geteuid() != std.c.getuid()) return error.ProcessConflict;
+    // A record may describe the special root, but cannot establish it: every
+    // running verification below re-reads its birth, real/effective/saved UID,
+    // canonical system executable and terminal with the root-only kernel probe.
+    if (proof.terminal.uid != proof.process.uid and !(@import("builtin").os.tag == .macos and proof.terminal.uid == 0 and std.mem.eql(u8, proof.terminal.executable, "/usr/bin/login"))) return error.ProcessConflict;
     // Validate even callers constructing typed records directly (not just JSON).
     const checked = try wire.parseRexHereProof(a, try std.json.Stringify.valueAlloc(a, proof, .{}));
     checked.deinit();
@@ -100,10 +104,10 @@ pub fn verify(native: Native, a: std.mem.Allocator, record: wire.RexBootstrapRec
     const exited = before == null or !std.mem.eql(u8, before.?.start, proof.process.start);
     if (!exited) {
         const client = try os.sample(native, a, proof.process.pid);
-        const root = try os.sample(native, a, proof.terminal.pid);
+        const root = try os.sampleRoot(native, a, proof.terminal.pid);
         if (!os.same(client.proof, proof.process) or !os.same(root.proof, proof.terminal)) return error.ProcessConflict;
         try membership(native, a, try processes(native, a, record.target, b, cancelled), client, root);
-        if (!os.same(client.proof, (try os.sample(native, a, client.proof.pid)).proof) or !os.same(root.proof, (try os.sample(native, a, root.proof.pid)).proof)) return error.ProcessConflict;
+        if (!os.same(client.proof, (try os.sample(native, a, client.proof.pid)).proof) or !os.same(root.proof, (try os.sampleRoot(native, a, root.proof.pid)).proof)) return error.ProcessConflict;
     }
     if (!std.mem.eql(u8, b.windowId, try describe(native, a, record.target, b.sessionId, b.blockId, cancelled))) return error.BindingConflict;
     try identity(native, a, record.target, cancelled);
@@ -113,7 +117,7 @@ pub fn verify(native: Native, a: std.mem.Allocator, record: wire.RexBootstrapRec
     const last = (try os.probe(native, a, proof.process.pid)) orelse return .exited;
     if (!std.mem.eql(u8, last.start, proof.process.start)) return .exited;
     const final_client = try os.sample(native, a, proof.process.pid);
-    const final_root = try os.sample(native, a, proof.terminal.pid);
+    const final_root = try os.sampleRoot(native, a, proof.terminal.pid);
     if (!os.same(final_client.proof, proof.process) or !os.same(final_root.proof, proof.terminal) or final_client.kernel.foreground != final_client.proof.pgid) return error.ProcessConflict;
     try os.descendant(native, a, final_client, final_root);
     return .running;

@@ -530,6 +530,12 @@ pub fn main(init: std.process.Init) void {
                 else => "deck: agent startup refused; check private client storage, selected hub and Rex authentication/version. No fallback, worker replacement or effect replay.\n",
             };
             std.Io.File.stderr().writeStreamingAll(init.io, message) catch {};
+            // A native error-set name is a compile-time identifier, not a Rex,
+            // provider or filesystem diagnostic. Preserve the actual refusal
+            // reason without exposing paths, credentials or response bodies.
+            var reason_buffer: [512]u8 = undefined;
+            const reason = std.fmt.bufPrint(&reason_buffer, "deck: native startup reason: {s}\n", .{@errorName(err)}) catch "";
+            std.Io.File.stderr().writeStreamingAll(init.io, reason) catch {};
             std.process.exit(1);
         };
         return;
