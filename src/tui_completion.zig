@@ -5,8 +5,8 @@ const std = @import("std");
 const Completion = @This();
 
 pub const commands = [_][]const u8{
-    "agentsmd", "brief", "child-open ", "cancel", "discard", "help",        "hosts",    "hub",        "latest",     "main",    "model", "mouse-toggle",   "new",  "new-child", "older", "parent",
-    "q",        "q!",    "quit",        "retry",  "rex",     "rex inspect", "rex open", "rex reopen", "rex status", "select ", "send",  "sidebar-toggle", "stop", "subagent ", "task ", "task-at ",
+    "agentsmd", "brief", "child-open ", "cancel", "discard", "help",        "hosts",    "hub",        "latest",     "main",    "model", "mouse-toggle",   "new",  "new-child ", "older", "parent",
+    "q",        "q!",    "quit",        "retry",  "rex",     "rex inspect", "rex open", "rex reopen", "rex status", "select ", "send",  "sidebar-toggle", "stop", "subagent ",  "task ", "task-at ",
     "tasks",    "tools",
 };
 const Text = struct {
@@ -111,6 +111,7 @@ test "Ex completion cycles commands and Rex actions without completing arbitrary
     try std.testing.expectEqualStrings("select ", text.items);
     for ([_]struct { input: []const u8, result: []const u8 }{
         .{ .input = "", .result = "agentsmd" },
+        .{ .input = "new-c", .result = "new-child " },
         .{ .input = "SUB", .result = "subagent " },
         .{ .input = "rex op", .result = "rex open" },
         .{ .input = "rex ", .result = "rex inspect" },

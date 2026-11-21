@@ -21,6 +21,7 @@ target_buf: [20]u8 = undefined,
 after_buf: [20]u8 = undefined,
 before_buf: [20]u8 = undefined,
 entry_buf: [20]u8 = undefined,
+child_problem_buf: [2048]u8 = undefined,
 failed: bool = false,
 hub_id: ?[]const u8 = null,
 chat_id: ?[]const u8 = null,
@@ -125,6 +126,10 @@ pub fn messageContent(self: *Bridge, entry_id: i64, offset: usize) !bool {
 }
 fn requestConfigured(self: *Bridge, action: @FieldType(wire.TuiRequest, "action"), text: ?[]const u8, hold: ?bool, configuration: ?wire.ModelSettingsChange, chat_id: ?[]const u8, after: ?[]const u8, task_target: ?wire.TaskCreationTarget, task_form: ?wire.TaskCreationForm, entry_id: ?[]const u8, offset: ?i64, before: ?[]const u8) !bool {
     if (self.failed or self.pending != null) return false;
+    if (action == .newChild) {
+        const own = self.chat_id orelse return error.TaskLocked;
+        if (self.inspect_parent_id != null or (self.client_mode == .hub and (self.hub_chat_id == null or !std.mem.eql(u8, own, self.hub_chat_id.?)))) return error.TaskLocked;
+    }
     if (self.client_mode == .task) {
         if (action == .select or action == .tasks or action == .hosts) return error.TaskLocked;
         if (action == .create) {
@@ -160,6 +165,10 @@ fn requestConfigured(self: *Bridge, action: @FieldType(wire.TuiRequest, "action"
     if (after) |cursor| request_value.after = try std.fmt.bufPrint(&self.after_buf, "{s}", .{cursor});
     // The complete mutation payload is owned by output; reply correlation does
     // not retain borrowed JSON task-target strings after the command is parsed.
+    if (action == .newChild) {
+        @memcpy(self.child_problem_buf[0..text.?.len], text.?);
+        request_value.text = self.child_problem_buf[0..text.?.len];
+    }
     request_value.taskTarget = null;
     request_value.taskForm = null;
     self.pending = request_value;
@@ -193,6 +202,10 @@ pub fn validRequest(value: std.json.Value) bool {
     if (value.object.contains("configuration")) return false;
     if (value.object.get("taskForm")) |form| return std.mem.eql(u8, action, "create") and text == null and @import("task_brief.zig").form(form);
     if (value.object.get("taskTarget")) |target| return std.mem.eql(u8, action, "create") and text == null and validTaskTarget(target);
+    if (std.mem.eql(u8, action, "newChild")) {
+        const content = text orelse return false;
+        return @import("managed_child.zig").problemText(content.string);
+    }
     if (std.mem.eql(u8, action, "subagent")) return wire.validAgentNameQuery(text orelse return false);
     if (std.mem.eql(u8, action, "send") or std.mem.eql(u8, action, "create")) {
         const content = text orelse return false;
@@ -1025,4 +1038,43 @@ test "forward request cursors are safe owned and replies are action scoped with 
     try std.testing.expect(validReplyAction(response, request_value, "hub", "1"));
     try entry.object.put(scratch, "id", .{ .integer = 100 });
     try std.testing.expect(!validReplyAction(response, request_value, "hub", "1"));
+}
+
+test "newChild requires only bounded nonblank problem text, owns bytes and refuses inspection" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{
+        "{\"version\":1,\"id\":\"1\",\"action\":\"newChild\"}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"newChild\",\"text\":\" \\t\"}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"newChild\",\"text\":\"problem\",\"chatId\":\"2\"}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"newChild\",\"text\":\"problem\",\"taskForm\":{\"title\":\"override\"}}",
+        "{\"version\":1,\"id\":\"1\",\"action\":\"newChild\",\"text\":\"problem\",\"hold\":false}",
+    }) |bytes| {
+        const parsed = try std.json.parseFromSlice(std.json.Value, a, bytes, .{});
+        defer parsed.deinit();
+        try std.testing.expect(!validRequest(parsed.value));
+    }
+    var fixture = try TestPipe.init();
+    defer fixture.deinit();
+    fixture.bridge.client_mode = .task;
+    fixture.bridge.chat_id = try a.dupe(u8, "2");
+    fixture.bridge.hub_chat_id = try a.dupe(u8, "1");
+    var text: [2049]u8 = @splat('x');
+    text[0] = 0xc3;
+    text[1] = 0xa9; // Limits are UTF-8 bytes, not characters.
+    try std.testing.expectError(error.InvalidContract, fixture.bridge.request(.newChild, &text, null));
+    try std.testing.expect(try fixture.bridge.request(.newChild, text[0..2048], null));
+    text[2] = 'z';
+    try std.testing.expectEqual(@as(u8, 'x'), fixture.bridge.pending.?.text.?[2]);
+    try std.testing.expect(!try fixture.bridge.request(.newChild, "not queued", null));
+    const request_value = try std.json.parseFromSlice(std.json.Value, a, fixture.bridge.output.items[4..], .{});
+    defer request_value.deinit();
+    try std.testing.expectEqual(4, request_value.value.object.count());
+    try std.testing.expectEqualStrings("newChild", request_value.value.object.get("action").?.string);
+    try std.testing.expectEqual(2048, request_value.value.object.get("text").?.string.len);
+    fixture.bridge.pending = null;
+    fixture.bridge.client_mode = .hub;
+    try std.testing.expectError(error.TaskLocked, fixture.bridge.request(.newChild, "read only hub task", null));
+    fixture.bridge.client_mode = .task;
+    fixture.bridge.inspect_parent_id = try a.dupe(u8, "1");
+    try std.testing.expectError(error.TaskLocked, fixture.bridge.request(.newChild, "captured inspection", null));
 }

@@ -34,6 +34,7 @@ import { DeckError } from "./deck-error.js";
 export { ChatDoc, DeckError, type Binding };
 import { validHosts } from "./host-inventory.js";
 import { briefFields, briefInstructions, validBriefBinding } from "./task-brief.js";
+import { validManagedChildProblem } from "./mutation-contracts.js";
 import { validChain, type MessageChain } from "./message-causality.js";
 import { validMachineIdentity, type TaskBrief, type HostInventory } from "./generated/contracts.js";
 import { ManagedChildRequest, ManagedChildOpenRequest, managedAgentSnapshot, independentDeckChat, assertManagedMessageRelation } from "./managed-child.js";
@@ -400,7 +401,7 @@ export class DeckRuntime {
     });
   }
 
-  createManagedChild(parentId: string, title: string, requestId: string, suppliedBrief: TaskBrief = {}, signal?: AbortSignal): Promise<Conversation> {
+  createManagedChild(parentId: string, title: string | undefined, requestId: string, suppliedBrief: TaskBrief = {}, signal?: AbortSignal): Promise<Conversation> {
     const guard = this.commandGuard.getStore();
     return this.serial(async () => {
       signal?.throwIfAborted();
@@ -410,9 +411,14 @@ export class DeckRuntime {
       const record = await this.harness.commit(tx => tx.conversation(parent.id), context);
       if (!independentDeckChat(record, binding, this.main.id) || !binding) throw new DeckError("invalid", "Managed children require canonical main or an independent task parent, including a managed parent");
       this.requireWorkerAdmission(binding.machineId);
-      if (typeof title !== "string" || !binding.machineId || !validBriefBinding(title, binding.cwd)) throw new DeckError("invalid", "Managed child needs a bounded title and coherent parent binding");
+      if ((title !== undefined && typeof title !== "string") || !binding.machineId || !validBriefBinding(title ?? "child", binding.cwd)) throw new DeckError("invalid", "Managed child needs a bounded title and coherent parent binding");
+      if (title === undefined && !validManagedChildProblem(suppliedBrief)) throw new DeckError("invalid", "Problem-only managed child needs a nonblank problem (at most 2048 UTF-8 bytes) and exactly empty description, without overrides");
       const brief = briefFields(suppliedBrief);
-      const hash = createHash("sha256").update(JSON.stringify(["deck.managed-child-create.v1", parentId, title, brief])).digest("hex");
+      // Do not change the historical explicit-title hash, even when it happens
+      // to equal an allocated name. Mode is pinned before any name allocation.
+      const hash = createHash("sha256").update(JSON.stringify(title === undefined
+        ? ["deck.managed-child-create.problem.v1", parentId, brief]
+        : ["deck.managed-child-create.v1", parentId, title, brief])).digest("hex");
       const prior = await this.harness.snapshot(ManagedChildRequest, requestId, context);
       if (prior) {
         if (prior.hash !== hash) throw new DeckError("conflict", "Managed child request ID already used with different arguments");
@@ -423,7 +429,7 @@ export class DeckRuntime {
       const saved = await this.harness.snapshot(AgentDoc, parent.id, context);
       const agent = await parent.agent(context);
       if (agent.cwd !== binding.cwd) throw new DeckError("invalid", "Parent agent cwd differs from its saved binding");
-      const snapshot = managedAgentSnapshot(agent, saved ?? {}, title, brief, binding.cwd);
+      const snapshot = managedAgentSnapshot(agent, saved ?? {}, title ?? "", brief, binding.cwd);
       await guard?.();
       signal?.throwIfAborted();
       const createdId = await this.harness.commit(async tx => {
@@ -439,10 +445,13 @@ export class DeckRuntime {
         if (JSON.stringify(currentAgent) !== JSON.stringify(saved ?? {}) || currentBinding.machineId !== binding.machineId || currentBinding.cwd !== binding.cwd) throw new DeckError("settings_changed", "Parent settings changed during managed child creation; retry the same request");
         signal?.throwIfAborted();
         const created = await tx.createConversation({ ownership: { kind: "ownerless" } });
-        Object.assign(await tx.doc(AgentDoc, created.id), snapshot);
         const metadata = await tx.doc(ChatDoc, created.id);
-        Object.assign(metadata, { kind: "task", title, brief, managedParentChatId: parentId, machineId: binding.machineId, cwd: binding.cwd });
+        Object.assign(metadata, { kind: "task", brief, managedParentChatId: parentId, machineId: binding.machineId, cwd: binding.cwd });
         await assignAgentName(tx, created.id, metadata);
+        // Name claim, canonical title, immutable instructions and receipt all
+        // commit with the child. Replays return above without consuming a name.
+        metadata.title = title ?? metadata.agentName!;
+        Object.assign(await tx.doc(AgentDoc, created.id), snapshot, { instructions: briefInstructions(metadata.title, brief) });
         Object.assign(await tx.doc(McpGrantsDoc, created.id), { revision: grants.revision, profiles: grants.profiles.map(grant => ({ ...grant })) });
         receipt.chatId = created.id;
         return created.id;

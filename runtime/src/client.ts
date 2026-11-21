@@ -161,7 +161,10 @@ async function main() {
   const deliver = async (draft: Draft) => {
     participate();
     if (draft.chatId !== selected) throw new Error("Draft belongs to another chat");
-    if (draft.kind === "task") create(draft.managedParentChatId);
+    if (draft.kind === "task") {
+      create(draft.managedParentChatId);
+      if (draft.title === undefined && status.managedChildProblem !== 1) throw new Error("Hub lacks problem-only managed children; saved request unchanged");
+    }
     await drafts.save(draft); // Never send until the complete private record is published.
     const method = draft.kind === "task" ? taskCreationCommand(draft) : draft.kind === "input" ? "admit" : "import_instructions";
     const { kind, chatId, ...args } = draft;

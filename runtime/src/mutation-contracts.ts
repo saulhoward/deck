@@ -10,6 +10,11 @@ export const validSafePiId = (value: unknown): value is string => validPiId(valu
 export function validManagedParent(chatId: string, value: { kind?: string; managedParentChatId?: string; parentChatId?: string; ownerTaskId?: string }): boolean {
   return value.managedParentChatId === undefined || (value.kind === "task" && value.parentChatId === undefined && value.ownerTaskId === undefined && validSafePiId(chatId) && validSafePiId(value.managedParentChatId) && Number(value.managedParentChatId) < Number(chatId));
 }
+// Omitted-title mode is a closed problem-only brief, also checked by the direct
+// runtime API before briefFields can discard unknown overrides.
+export function validManagedChildProblem(value: unknown): value is { problem: string; description: "" } {
+  return validBrief(value) && typeof value.problem === "string" && !!value.problem.trim() && value.description === "";
+}
 export function validMutationArgs(command: "create_managed_child", value: unknown): value is CreateManagedChildArgs;
 export function validMutationArgs(command: "admit", value: unknown): value is AdmitArgs;
 export function validMutationArgs(command: "create_task", value: unknown): value is CreateTaskArgs;
@@ -24,7 +29,7 @@ export function validMutationArgs(command: string, value: unknown): boolean {
     // bounds. This migration does not widen admission or reinterpret saved bytes.
     case "admit": return validAdmitArgs(value) && validSafePiId(value.chatId) && value.requestId.length <= 200 && value.text.length <= 200_000;
     case "create_task": return validCreateTaskArgs(value) && value.requestId.length <= 200 && [value.title, value.machineId, value.cwd].every((text) => text.length <= 200_000);
-    case "create_managed_child": return validCreateManagedChildArgs(value) && validSafePiId(value.parentChatId) && value.requestId.length <= 200 && validBriefBinding(value.title, "/") && validBrief({ ...(value.problem === undefined ? {} : { problem: value.problem }), ...(value.description === undefined ? {} : { description: value.description }) });
+    case "create_managed_child": return validCreateManagedChildArgs(value) && validSafePiId(value.parentChatId) && value.requestId.length <= 200 && (value.title === undefined ? validManagedChildProblem({ problem: value.problem, description: value.description }) : validBriefBinding(value.title, "/")) && validBrief({ ...(value.problem === undefined ? {} : { problem: value.problem }), ...(value.description === undefined ? {} : { description: value.description }) });
     case "create_task_brief": return validCreateTaskBriefArgs(value) && value.requestId.length <= 200 && value.machineId.length <= 200_000 && validBriefBinding(value.title, value.cwd) && (value.problem !== undefined || value.description !== undefined) && validBrief({ ...(value.problem === undefined ? {} : { problem: value.problem }), ...(value.description === undefined ? {} : { description: value.description }) });
     case "import_instructions": return validInstructionImportArgs(value) && validSafePiId(value.chatId) && value.requestId.length <= 200 && [value.machineId, value.cwd].every((text) => text.length <= 200_000);
     case "stop": return validStopArgs(value) && validSafePiId(value.chatId);

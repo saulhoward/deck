@@ -17,7 +17,7 @@ import { DraftStore, type Draft } from "./drafts.js";
 import { hubCommand } from "./hub-client.js";
 import { HubError } from "./responses.js";
 import { validInventoryToolName, validMachineIdentity, validRexUuid, validTuiRequest, validTuiResponse, type TuiRequest, type TuiSnapshot, type TuiEntry, type TuiResponse } from "./generated/contracts.js";
-import { validManagedParent, validSafePiId, validMutationArgs } from "./mutation-contracts.js";
+import { validManagedChildProblem, validManagedParent, validSafePiId, validMutationArgs } from "./mutation-contracts.js";
 
 import { validTaskTarget } from "./task-target.js";
 import { validForm, validBrief, taskCreationCommand, taskCreationArgs } from "./task-brief.js";
@@ -38,6 +38,7 @@ export function validRequest(value: unknown): value is TuiRequest {
   if (value.action === "configure" ? value.configuration === undefined : value.configuration !== undefined) return false;
   if (value.taskForm !== undefined) return value.action === "create" && value.text === undefined && value.taskTarget === undefined && validForm(value.taskForm);
   if (value.taskTarget !== undefined) return value.action === "create" && value.text === undefined && validTaskTarget(value.taskTarget);
+  if (value.action === "newChild") return validManagedChildProblem({ problem: value.text, description: "" });
   if (value.action === "subagent") return validAgentNameQuery(value.text);
   if (value.action === "send" || value.action === "create") return typeof value.text === "string" && value.text.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, "").length > 0 && Buffer.byteLength(value.text) <= (value.action === "send" ? 16384 : 200);
   return value.text === undefined;
@@ -112,6 +113,7 @@ export class TuiSession {
   private supportsBrief = false;
   private supportsManaged = false;
   private supportsManagedOpen = false;
+  private supportsManagedProblem = false;
   private supportsHosts = false;
   private startupBlocked = false;
   private attachmentMachine?: string;
@@ -174,8 +176,7 @@ export class TuiSession {
     this.localWorkspace = !inspectParent && status.binding?.cwd === process.cwd() && (this.mode === "task" || status.machineId === status.binding?.machineId);
     this.gitSampleAt = 0;
     this.supportsRex = !inspectParent && status.rexOpen === 1;
-    this.supportsManaged = !inspectParent && status.managedChildren === 1;
-    this.supportsManagedOpen = !inspectParent && status.managedChildOpen === 1;
+    this.observeManagedCapabilities(status);
     this.supportsBrief = status.taskBrief === 1; this.supportsHosts = status.hostInventory === 1;
     this.supportsStartup = status.rexStartup === 1;
     this.supportsSettings = status.modelSettings === 1; this.settingsUncertain = !inspectParent && this.supportsSettings;
@@ -226,6 +227,7 @@ export class TuiSession {
     try {
       const status = await this.readView("status", { chatId: this.chatId });
       if (status.hubGuard !== 1 || status.hubId !== this.hubId || status.chatId !== this.chatId || status.mainChatId !== this.hubChatId) return;
+      this.observeManagedCapabilities(status);
       this.inventory(status);
     } catch { /* Observation unavailable; no automatic effect or health probe. */ }
   }
@@ -326,6 +328,7 @@ export class TuiSession {
     if (this.active.kind === "task") {
       requireCreation(this.mode, this.chatId, this.hubChatId, this.active.managedParentChatId);
       if (this.active.managedParentChatId !== undefined) {
+        if (this.active.title === undefined && !this.supportsManagedProblem) throw new Error("Hub lacks problem-only managed children; saved request unchanged");
         if (!this.supportsManaged || (this.mode === "task" && !this.supportsManagedOpen)) throw new Error("Hub lacks scoped managed children; no request sent");
       } else if (!this.supportsRex) throw new Error("Rex support is required to create a task; no request sent");
     }
@@ -380,6 +383,22 @@ export class TuiSession {
     if (!this.supportsManagedOpen || !validSafePiId(childId) || Number(childId) <= Number(this.chatId)) throw new Error("Same-session managed child opening unavailable; no request sent");
     return this.command("open_managed_child", { chatId: this.chatId, childId, requestId: randomUUID(), port: this.port }, this.hubId);
   }
+  private observeManagedCapabilities(status: any) {
+    this.supportsManaged = !this.inspectParentChatId && status.managedChildren === 1;
+    this.supportsManagedOpen = !this.inspectParentChatId && status.managedChildOpen === 1;
+    this.supportsManagedProblem = !this.inspectParentChatId && status.managedChildProblem === 1;
+  }
+  private async requireChildProblemCapability() {
+    // New creation gets a fresh, pinned observation before reserving an ID.
+    // This is not a permission lease and is never a replacement for saved retry.
+    const status = await this.command("status", { chatId: this.chatId }, this.hubId);
+    if (status.hubGuard !== 1 || status.hubId !== this.hubId || status.chatId !== this.chatId || status.mainChatId !== this.hubChatId ||
+      !this.binding || status.binding?.machineId !== this.binding.machineId || status.binding?.cwd !== this.binding.cwd) throw new Error("Parent identity/workspace changed; no child requested");
+    this.observeManagedCapabilities(status);
+    this.supportsRex = status.rexOpen === 1;
+    if (!this.supportsManaged || !this.supportsManagedProblem || status.taskBrief !== 1) throw new Error("Hub lacks problem-only managed children; update the hub before :new-child PROBLEM. No child requested.");
+    this.supportsBrief = true;
+  }
   private async requireParentTerminal() {
     // Read-only preflight for NEW forms, never a permission lease or a reason to
     // abandon an already saved creation identity. The runtime rechecks at open.
@@ -426,6 +445,7 @@ export class TuiSession {
     let state = this.state!;
     if (this.inspectParentChatId && !["poll", "older", "newer", "latest", "models", "subagent", "parent", "messageContent", ...(this.mode === "hub" ? ["select"] : [])].includes(request.action)) throw new Error("Read-only subagent inspection; :parent to return");
     if (request.action === "select" || request.action === "tasks" || request.action === "hosts") requireNavigation(this.mode);
+    if (request.action === "newChild") requireCreation(this.mode, this.chatId, this.hubChatId, this.chatId);
     if (request.action === "create") requireCreation(this.mode, this.chatId, this.hubChatId, request.taskForm?.managedParentChatId);
     if (["send", "retry", "discard", "stop", "configure", "agentsmd", "childOpen"].includes(request.action)) requireParticipation(this.mode, this.chatId, this.hubChatId);
     switch (request.action) {
@@ -453,6 +473,21 @@ export class TuiSession {
         if (this.supportsHosts) state.hosts = await this.command("list_hosts", {}, this.hubId);
         state.tasks = { items: page.items.map((row: any) => ({ ...(row.agentRune === undefined ? {} : { agentRune: row.agentRune }), ...(row.agentName === undefined ? {} : { agentName: row.agentName }), chatId: row.chatId, kind: row.kind, title: row.chatId === this.hubChatId ? "Hub" : displayText(row.title, 160), machineId: displayText(row.machineId, 80), cwd: displayText(row.cwd, 256), ...(row.parentChatId ? { parentChatId: row.parentChatId } : {}), ...(row.managedParentChatId ? { managedParentChatId: row.managedParentChatId } : {}), activity: row.activity ?? "unknown", rexState: row.rexState ?? "unknown", connection: state.hosts ? state.hosts.items.find(h => h.machineId === row.machineId)?.connection ?? "unregistered" : "unknown" })), ...(request.after ? { after: request.after } : {}), ...(page.next ? { next: page.next } : {}) };
         break;
+      }
+      case "newChild": {
+        try {
+          if (this.active || this.userImport || this.settingsUncertain) throw new Error("Resolve saved requests/settings before creating a child");
+          await this.requireChildProblemCapability();
+          if (this.mode === "task") await this.requireParentTerminal();
+        } catch (error) {
+          if (this.active) throw error; // Never dismiss an older unresolved request.
+          throw new TuiRequestNotSent(error instanceof Error ? error.message : "Child preflight failed; no request sent");
+        }
+        // Separate command-owned recovery intent: no prompt bytes or form. The
+        // server assigns the permanent name/title atomically with the child.
+        this.active = { kind: "task", chatId: this.chatId!, requestId: randomUUID(), managedParentChatId: this.chatId!, problem: request.text!, description: "" };
+        this.activeSaved = false;
+        await this.deliver(); break;
       }
       case "create": {
         const managed = request.taskForm?.managedParentChatId !== undefined;

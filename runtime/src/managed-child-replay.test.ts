@@ -9,10 +9,13 @@ import { fileURLToPath } from "node:url";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import type { DeckRuntime, Input } from "./deck.js";
+import { ChatDoc } from "./chat-doc.js";
+import { lookupAgentName } from "./agent-names.js";
+import { briefInstructions } from "./task-brief.js";
 import { setup } from "./managed-child.test.support.js";
 import { within } from "./instructions.test.support.js";
 
-for (const kind of ["create", "message"]) test(`SIGKILL after managed ${kind} commit recovers the original receipt without duplicate creation/input or generation on create`, { timeout: 15000 }, async () => {
+for (const kind of ["create", "problem", "message"]) test(`SIGKILL after managed ${kind} commit recovers the original receipt without duplicate creation/input or generation on create`, { timeout: 15000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "deck-managed-replay-")), path = join(root, "pi.sqlite");
   const process = spawn(globalThis.process.execPath, [fileURLToPath(new URL("./managed-child-replay.test.fixture.js", import.meta.url)), kind, path]);
   const closed = once(process, "close"); let errors = ""; process.stdout.resume(); process.stderr.on("data", chunk => { errors += String(chunk); });
@@ -20,7 +23,7 @@ for (const kind of ["create", "message"]) test(`SIGKILL after managed ${kind} co
   try {
     const checkpoint = await within((async () => {
       for (;;) {
-        try { return JSON.parse(await readFile(`${path}.checkpoint`, "utf8")) as { parentId: string; childId: string; submissionId?: string; input?: Input }; }
+        try { return JSON.parse(await readFile(`${path}.checkpoint`, "utf8")) as { parentId: string; childId: string; submissionId?: string; input?: Input; metadata?: unknown }; }
         catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
         if (process.exitCode !== null || process.signalCode !== null) throw new Error(`Fixture exited: ${errors}`);
         await new Promise(resolve => setTimeout(resolve, 10));
@@ -33,8 +36,15 @@ for (const kind of ["create", "message"]) test(`SIGKILL after managed ${kind} co
     const child = await runtime.chat(checkpoint.childId), parent = await runtime.chat(checkpoint.parentId);
     await within(child.waitForIdle(context)); await within(parent.waitForIdle(context));
     assert.equal((await runtime.listChats()).items.length, 3);
-    assert.equal((await runtime.createManagedChild(checkpoint.parentId, "Managed", "create-managed", { problem: "Own problem", description: "Own immutable task" })).id, child.id);
-    if (kind === "create") {
+    assert.equal((await runtime.createManagedChild(checkpoint.parentId, kind === "problem" ? undefined : "Managed", "create-managed", { problem: "Own problem", description: kind === "problem" ? "" : "Own immutable task" })).id, child.id);
+    if (kind === "create" || kind === "problem") {
+      const metadata = (await runtime.harness.snapshot(ChatDoc, child.id, context))!;
+      assert.deepEqual(metadata, checkpoint.metadata);
+      if (kind === "problem") {
+        assert.equal(metadata.title, metadata.agentName); assert.equal(metadata.agentNameAlgorithm, "wintermute-v1");
+        assert.equal(await lookupAgentName(runtime.harness, metadata.title, context), child.id);
+        assert.equal((await child.agent(context)).instructions, briefInstructions(metadata.title, { problem: "Own problem", description: "" }));
+      }
       assert.equal((await runtime.history(checkpoint.childId)).items.length, 0); assert.equal((await runtime.history(checkpoint.parentId)).items.length, 0); assert.equal(f.faux.state.callCount, 0);
     } else {
       const results = (await runtime.history(checkpoint.childId)).items.flatMap(e => e.model ?? []);

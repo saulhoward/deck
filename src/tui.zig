@@ -56,7 +56,7 @@ const help =
     \\:agentsmd             load ~/.codex/AGENTS.md from this chat's machine
     \\
     \\:new                  hub only: JSON task-brief composer (Ctrl-S creates)
-    \\:new-child [ID]       managed child (agent: self; hub: optional parent ID)
+    \\:new-child PROBLEM    create/open child of this chat (1..2048 UTF-8 bytes)
     \\:child-open ID        explicitly open a direct child in this Rex session
     \\:hosts                registered hosts; Enter selects host for new task
     \\:brief                inspect saved creation brief (read only)
@@ -584,6 +584,7 @@ const Model = struct {
     focus: enum { prompt, chat } = .prompt,
     command: std.ArrayList(u8) = .empty,
     command_mode: bool = false,
+    command_overflow: bool = false, // Refuse Enter after a bounded append was rejected.
     completion: Completion = .{},
     completion_names: Completion.Names = .{},
     leader: bool = false,
@@ -667,6 +668,7 @@ const Model = struct {
     uncertain: bool = false,
     // An import and its retry/discard never own the user's unsent editor text.
     context_draft: bool = false,
+    command_creation: bool = false, // Command creation/recovery never owns the prompt.
     online: bool = false,
     notice: [1024]u8 = undefined,
     notice_len: usize = 0,
@@ -1132,7 +1134,7 @@ const Model = struct {
     fn locked(self: *Model) bool {
         if (self.queued_send) return true;
         if (self.state()) |s| if (s.draft != null) return true;
-        if (self.bridge.pending) |p| if (p.action == .send or p.action == .retry or p.action == .discard or p.action == .agentsmd or p.action == .create or p.action == .childOpen or p.action == .select or p.action == .subagent or p.action == .parent) return true;
+        if (self.bridge.pending) |p| if (p.action == .send or p.action == .retry or p.action == .discard or p.action == .agentsmd or p.action == .create or p.action == .newChild or p.action == .childOpen or p.action == .select or p.action == .subagent or p.action == .parent) return true;
         return self.uncertain or self.snapshot == null or self.bridge.failed;
     }
     fn transportStatus(self: *Model, now: std.Io.Timestamp) TransportStatus {
@@ -1270,39 +1272,44 @@ const Model = struct {
         self.focus = .prompt;
         self.note("Paste JSON {title,problem?,description?,machineId?,cwd?}. Ctrl-S creates; :cancel clears. No input/generation.");
     }
-    fn beginManagedForm(self: *Model, parent: []const u8) !void {
-        // A previous composer may already own task_form even when the normal
-        // navigation guards refuse. Never mistake that old flag for success.
+    fn commandCreationDraft(self: *Model) bool {
+        if (self.command_creation) return true;
+        // A task draft discovered after reconnect has no local form to clear.
+        return !self.task_form and (if (self.state()) |s| (if (s.draft) |d| d.kind == .task else false) else false);
+    }
+    fn canManageChild(self: *Model) bool {
+        if (!self.canWrite()) return false;
         if (self.task_form) {
             self.note("Resolve the current task form first; :cancel clears only unsubmitted text.");
-            return;
+            return false;
         }
-        if (!@import("managed_child.zig").safeId(.{ .string = parent })) {
-            self.note("Use :new-child for this agent, or a parent chat ID in the hub.");
-            return;
-        }
-        if (!self.canWrite() or !self.canInspect()) return;
-        const s = self.state() orelse return;
-        if (s.clientMode == .task and !std.mem.eql(u8, parent, s.chatId)) {
-            self.note("Task client locked: :new-child can only use this agent as parent.");
-            return;
+        if (self.locked() or self.settings_uncertain) {
+            self.note("Resolve saved requests/settings before creating or opening children.");
+            return false;
         }
         if (self.bridge.pending != null) {
-            self.note("Client request in flight; creation composer not queued.");
+            self.note("Client request in flight; child action not queued.");
+            return false;
+        }
+        return true; // An unrelated unsent prompt is deliberately allowed.
+    }
+    fn newChild(self: *Model, problem: []const u8) !void {
+        if (problem.len > 2048 or !std.unicode.utf8ValidateSlice(problem) or std.mem.indexOfAny(u8, problem, "\x00\r\n\x1b") != null) {
+            self.note("Child problem must be 1..2048 UTF-8 bytes on one command line.");
             return;
         }
-        self.hosts_view = false;
-        self.task_form = true;
-        self.focus = .prompt;
-        const text = try std.fmt.allocPrint(self.a, "{{\"title\":\"\",\"managedParentChatId\":\"{s}\",\"problem\":\"\",\"description\":\"\"}}", .{parent});
-        defer self.a.free(text);
-        try self.editor.set(text);
-        self.editor.cursor = 10; // Inside the empty title string, not before the JSON.
-        self.editor.mode = .insert;
-        self.note("Managed child: edit JSON title/problem/description. Inherits parent host/model/tools; Ctrl-S creates, not input. :cancel clears.");
+        if (!@import("managed_child.zig").problemText(problem)) {
+            self.note("Usage: :new-child PROBLEM (1..2048 UTF-8 bytes, not just whitespace).");
+            return;
+        }
+        if (!self.canManageChild()) return;
+        if (try self.bridge.request(.newChild, problem, null)) {
+            self.command_creation = true;
+            self.pending_since = std.Io.Timestamp.now(self.bridge.io, .awake);
+        } else self.note("Client request in flight; child creation not queued.");
     }
     fn openChild(self: *Model, child: []const u8) !void {
-        if (!self.canWrite() or !self.canInspect()) return;
+        if (!self.canManageChild()) return;
         const s = self.state() orelse return;
         if (!@import("managed_child.zig").precedes(.{ .string = s.chatId }, .{ .string = child })) {
             self.note("Use :child-open with a direct child's numeric chat ID.");
@@ -1441,6 +1448,10 @@ const Model = struct {
         }
     }
     fn ex(self: *Model, ctx: *fw.EventContext) !void {
+        if (self.command_overflow) {
+            self.note("Command limit exceeded; Backspace to correct or Esc to cancel. Nothing submitted.");
+            return;
+        }
         const cmd = self.command.items;
         if (self.selected_message != null and !std.mem.eql(u8, cmd, "q") and !std.mem.eql(u8, cmd, "quit") and !std.mem.eql(u8, cmd, "q!") and !std.mem.eql(u8, cmd, "older") and !std.mem.eql(u8, cmd, "latest") and !std.mem.eql(u8, cmd, "help")) {
             self.note("Message selected: Esc returns to the prompt; only history, help and detach commands are available.");
@@ -1454,9 +1465,9 @@ const Model = struct {
             self.tools_view = true;
             self.tools_scroll = 0;
         } else if (std.mem.eql(u8, cmd, "new-child")) {
-            if (self.state()) |s| try self.beginManagedForm(s.chatId);
+            try self.newChild("");
         } else if (std.mem.startsWith(u8, cmd, "new-child ")) {
-            try self.beginManagedForm(std.mem.trim(u8, cmd[10..], " "));
+            try self.newChild(cmd[10..]);
         } else if (std.mem.startsWith(u8, cmd, "child-open ")) {
             try self.openChild(std.mem.trim(u8, cmd[11..], " "));
         } else if (std.mem.eql(u8, cmd, "new")) try self.beginTaskForm(null) else if (std.mem.eql(u8, cmd, "hosts")) try self.issue(.hosts) else if (std.mem.eql(u8, cmd, "brief")) {
@@ -1590,14 +1601,30 @@ const Model = struct {
             if (key.matches(vaxis.Key.escape, .{})) {
                 self.command_mode = false;
                 self.command.clearRetainingCapacity();
+                self.command_overflow = false;
             } else if (key.matches(vaxis.Key.enter, .{})) try self.ex(ctx) else if (key.matches(vaxis.Key.backspace, .{})) {
                 var it = vaxis.unicode.graphemeIterator(self.command.items);
                 var last: usize = 0;
                 while (it.next()) |g| last = g.start;
                 self.command.shrinkRetainingCapacity(last);
+                self.command_overflow = false;
             } else if (!key.mods.ctrl and !key.mods.alt) {
                 if (key.text) |text| {
-                    if (std.unicode.utf8ValidateSlice(text) and self.command.items.len + text.len <= 256 and std.mem.indexOfAny(u8, text, "\x00\r\n\x1b") == null) try self.command.appendSlice(self.a, text);
+                    if (std.unicode.utf8ValidateSlice(text) and std.mem.indexOfAny(u8, text, "\x00\r\n\x1b") == null) {
+                        // Only the required-problem command gets a larger buffer.
+                        // Check the prospective prefix too (a key can carry a chunk).
+                        const prefix = "new-child ";
+                        const head = @min(self.command.items.len, prefix.len);
+                        const child_command = std.mem.eql(u8, self.command.items[0..head], prefix[0..head]) and
+                            (head == prefix.len or (text.len >= prefix.len - head and std.mem.startsWith(u8, text, prefix[head..])));
+                        const limit: usize = if (child_command) prefix.len + 2048 else 256;
+                        if (self.command.items.len + text.len <= limit) {
+                            try self.command.appendSlice(self.a, text);
+                        } else {
+                            self.command_overflow = true;
+                            self.note("Command limit exceeded; Backspace to correct or Esc to cancel. Nothing submitted.");
+                        }
+                    }
                 }
             }
             return;
@@ -1758,10 +1785,21 @@ const Model = struct {
                         self.online = false;
                         if (self.terminal_status) |status| status.presentation.invalidate();
                         if (action == .send or action == .retry or action == .create) self.uncertain = !(response.value.case1.notSent orelse false);
+                        if (action == .newChild) {
+                            const not_sent = response.value.case1.notSent orelse false;
+                            // A preflight rejection clears only this new command's
+                            // uncertainty, never an already saved recovery draft.
+                            const has_draft = if (self.state()) |s| s.draft != null else false;
+                            if (!not_sent) self.uncertain = true else if (!has_draft) {
+                                self.uncertain = false;
+                                self.command_creation = false;
+                            }
+                        }
                         if (action == .configure) self.settings_uncertain = true;
                         response.deinit();
                     } else success: {
                         var s = response.value.case0.snapshot;
+                        const command_creation = self.commandCreationDraft();
                         if (action == .newer) {
                             if (!self.acceptNewer(s)) {
                                 response.deinit();
@@ -1804,7 +1842,7 @@ const Model = struct {
                             try self.acceptOlder(s);
                             self.forward_view = false;
                         }
-                        if (navigation or action == .latest or (action == .older and !automatic_older) or action == .send or action == .retry) {
+                        if (navigation or action == .latest or (action == .older and !automatic_older) or action == .send or (action == .retry and !command_creation)) {
                             // A down gesture during manual :older still means
                             // return live after that page replacement finishes.
                             const return_at_bottom = action == .older and self.latest_wanted;
@@ -1821,13 +1859,14 @@ const Model = struct {
                             self.brief_view = false;
                             self.tools_view = false;
                             self.task_form = false;
+                            self.command_creation = false;
                             self.rex_view = false;
                             self.model_picker = false;
                             self.scroll = 0;
                             self.focus = .prompt;
                             self.uncertain = false;
                             self.settings_uncertain = s.settingsPending orelse false;
-                            try self.editor.set(if (s.draft) |draft| draft.text else "");
+                            try self.editor.set(if (s.draft) |draft| (if (draft.kind == .task) "" else draft.text) else "");
                             if (self.terminal_status) |status| status.presentation = .{};
                         }
                         if (action == .tasks or action == .hosts or action == .models) self.filter.clear();
@@ -1846,6 +1885,10 @@ const Model = struct {
                                 self.task_form = false;
                             }
                         }
+                        if (action == .newChild) {
+                            self.uncertain = false;
+                            self.command_creation = false;
+                        }
                         // Only a fresh observation updates the indicator: action
                         // ACKs and older pages can carry cached display fields.
                         if (action == .poll or action == .latest) {
@@ -1862,15 +1905,19 @@ const Model = struct {
                                 }
                             };
                         }
-                        if (self.snapshot == null and s.draft != null) try self.editor.set(s.draft.?.text);
+                        if (self.snapshot == null and s.draft != null and s.draft.?.kind != .task) try self.editor.set(s.draft.?.text);
                         if (action == .send or action == .retry or action == .discard) {
                             self.uncertain = false;
-                            if (!self.context_draft) {
+                            if (!self.context_draft and !command_creation) {
                                 self.task_form = false;
                                 try self.editor.set("");
                                 self.scroll = 0;
                             }
                         }
+                        if (action == .send or action == .retry or action == .discard) self.command_creation = false;
+                        if (!self.task_form) if (s.draft) |d| {
+                            if (d.kind == .task) self.command_creation = true;
+                        };
                         self.context_draft = if (s.draft) |d| d.kind == .instructions else false;
                         if ((action == .older and !automatic_older) or action == .latest) self.scroll = 0;
                         if (action != .poll or self.state() == null or !std.mem.eql(u8, self.state().?.notice, s.notice)) self.note(s.notice);
@@ -2579,10 +2626,10 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     try model.beginTaskForm(null);
     try std.testing.expect(model.task_form);
     try model.editor.set("{\"title\":\"Unsubmitted\"}");
-    try model.beginManagedForm("2");
+    try model.newChild("2");
     try std.testing.expectEqualStrings("{\"title\":\"Unsubmitted\"}", model.editor.text.items);
     bridge.pending = .{ .version = 1, .id = "pending", .action = .create };
-    try model.beginManagedForm("2");
+    try model.newChild("2");
     try std.testing.expectEqualStrings("{\"title\":\"Unsubmitted\"}", model.editor.text.items);
     bridge.pending = null;
     try model.command.appendSlice(a, "cancel");
@@ -2591,12 +2638,10 @@ test "paste is atomic literal data and layout uses bounded grapheme-safe surface
     try std.testing.expectEqualStrings("", model.editor.text.items);
     try std.testing.expect(bridge.pending == null);
 
-    try model.beginManagedForm("9007199254740992");
-    try std.testing.expect(!model.task_form);
-    try model.beginManagedForm("2");
-    try std.testing.expect(model.task_form);
-    try std.testing.expect(std.mem.indexOf(u8, model.editor.text.items, "\"managedParentChatId\":\"2\"") != null);
-    model.task_form = false;
+    try model.newChild("");
+    try model.newChild("   ");
+    try std.testing.expect(!model.task_form and bridge.pending == null);
+    try std.testing.expect(std.mem.startsWith(u8, model.notice[0..model.notice_len], "Usage: :new-child PROBLEM"));
     // Hub inspection keeps the hub color but cannot edit or mutate a task.
     model.snapshot.?.value.case0.snapshot.draft = null;
     model.snapshot.?.value.case0.snapshot.chatId = "2";
@@ -4273,6 +4318,9 @@ const SelectionTestPipe = struct {
     }
     fn reply(self: *@This(), model: *Model, ctx: *fw.EventContext, snapshot: ?wire.TuiSnapshot) !void {
         const response: wire.TuiResponse = if (snapshot) |s| .{ .case0 = .{ .version = 1, .id = self.bridge.pending.?.id, .ok = true, .snapshot = s } } else .{ .case1 = .{ .version = 1, .id = self.bridge.pending.?.id, .ok = false, .@"error" = "older unavailable", .notSent = true } };
+        try self.respond(model, ctx, response);
+    }
+    fn respond(self: *@This(), model: *Model, ctx: *fw.EventContext, response: wire.TuiResponse) !void {
         const bytes = try std.json.Stringify.valueAlloc(std.testing.allocator, response, .{});
         defer std.testing.allocator.free(bytes);
         const file: std.Io.File = .{ .handle = self.peer_write, .flags = .{ .nonblocking = false } };
@@ -4610,4 +4658,186 @@ test "newer intent waits behind already dispatched oldest prefetch" {
     try pipe.reply(&model, &ctx, next);
     try std.testing.expectEqual(@as(?i64, 101), model.selected_message);
     try std.testing.expectEqual(0, model.scrollback.pages.items.len);
+}
+
+test "new-child command never edits prompt state and rejects every non-writable scope or unresolved request" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "ready", "form", "draft", "uncertain", "settings", "hub-task", "inspection", "selected", "pending", "queued" }) |guard| {
+        var pipe = try SelectionTestPipe.init();
+        defer pipe.deinit();
+        var model = try testChatModel(a, &pipe.bridge);
+        defer model.deinit();
+        var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
+        defer ctx.cmds.deinit(a);
+        try model.issue(.poll);
+        try pipe.reply(&model, &ctx, model.state().?); // Pin bridge identity.
+        try model.editor.set("before");
+        const prompt = "  UNSENT 界\nexact bytes  ";
+        try model.editor.replace(prompt);
+        model.editor.cursor = 4;
+        model.editor.mode = .visual;
+        model.editor.anchor = 2;
+        model.scroll = 7;
+        const prior = model.editor;
+        if (std.mem.eql(u8, guard, "form")) model.task_form = true;
+        if (std.mem.eql(u8, guard, "draft")) model.snapshot.?.value.case0.snapshot.draft = .{ .kind = .task, .requestId = "saved", .text = "preview", .clipped = false, .saved = true };
+        if (std.mem.eql(u8, guard, "uncertain")) model.uncertain = true;
+        if (std.mem.eql(u8, guard, "settings")) model.settings_uncertain = true;
+        if (std.mem.eql(u8, guard, "hub-task")) model.snapshot.?.value.case0.snapshot.chatId = "2";
+        if (std.mem.eql(u8, guard, "inspection")) model.snapshot.?.value.case0.snapshot.inspectParentChatId = "2";
+        if (std.mem.eql(u8, guard, "selected")) model.selected_message = 10;
+        if (std.mem.eql(u8, guard, "pending")) pipe.bridge.pending = .{ .version = 1, .id = "read", .action = .poll };
+        if (std.mem.eql(u8, guard, "queued")) model.queued_send = true;
+        const sequence = pipe.bridge.sequence;
+        try model.command.appendSlice(a, "new-child 2 numeric first word is the problem  ");
+        try model.ex(&ctx);
+        try std.testing.expectEqualStrings(prompt, model.editor.text.items);
+        try std.testing.expectEqualDeep(prior, model.editor);
+        try std.testing.expectEqual(7, model.scroll);
+        if (std.mem.eql(u8, guard, "ready")) {
+            try std.testing.expectEqual(Action.newChild, pipe.bridge.pending.?.action);
+            try std.testing.expectEqualStrings("2 numeric first word is the problem  ", pipe.bridge.pending.?.text.?);
+            try std.testing.expect(model.locked() and model.command_creation and !model.task_form);
+            try pipe.reply(&model, &ctx, model.state().?);
+            try std.testing.expect(!model.command_creation and !model.uncertain);
+            try std.testing.expectEqualDeep(prior, model.editor);
+            try std.testing.expectEqual(7, model.scroll);
+            try model.openChild("3"); // Recovery opens, never navigates or owns prompt.
+            try std.testing.expectEqual(Action.childOpen, pipe.bridge.pending.?.action);
+            try pipe.reply(&model, &ctx, model.state().?);
+            try std.testing.expectEqualDeep(prior, model.editor);
+            try std.testing.expectEqual(7, model.scroll);
+        } else try std.testing.expectEqual(sequence, pipe.bridge.sequence);
+    }
+}
+
+test "command creation lost ACK retry discard and reconnect preserve prompt but legacy forms still clear" {
+    const a = std.testing.allocator;
+    for ([_][]const u8{ "retry", "discard", "reconnect-retry", "reconnect-discard", "legacy-retry", "legacy-discard", "not-sent", "not-sent-draft" }) |outcome| {
+        var pipe = try SelectionTestPipe.init();
+        defer pipe.deinit();
+        var model = try testChatModel(a, &pipe.bridge);
+        defer model.deinit();
+        var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
+        defer ctx.cmds.deinit(a);
+        const recovered = std.mem.startsWith(u8, outcome, "reconnect");
+        const legacy = std.mem.startsWith(u8, outcome, "legacy");
+        if (recovered) {
+            var next = model.state().?;
+            next.draft = .{ .kind = .task, .requestId = "saved", .text = "TASK PREVIEW IS NOT A PROMPT", .clipped = false, .saved = true };
+            model.snapshot.?.deinit();
+            model.snapshot = null;
+            try model.issue(.poll);
+            // Construct an independent snapshot after freeing the original.
+            next.hubId = "hub";
+            next.chatId = "1";
+            next.hubChatId = "1";
+            next.title = "Hub";
+            next.model = "mock";
+            next.tools = "offline";
+            next.preview = "";
+            next.notice = "";
+            next.entries = &.{};
+            try pipe.reply(&model, &ctx, next);
+            try std.testing.expectEqualStrings("", model.editor.text.items);
+        } else {
+            try model.issue(.poll);
+            try pipe.reply(&model, &ctx, model.state().?);
+        }
+        const prompt = "  exact unsent\n界  ";
+        try model.editor.replace(prompt);
+        model.editor.cursor = 3;
+        model.editor.mode = .visual_line;
+        model.editor.anchor = 1;
+        model.scroll = 5;
+        model.history_browsing = true;
+        const prior = model.editor;
+        if (legacy) {
+            model.task_form = true;
+            model.snapshot.?.value.case0.snapshot.draft = .{ .kind = .task, .requestId = "saved", .text = "legacy form", .clipped = false, .saved = true };
+        } else if (!recovered) {
+            try model.newChild("child problem");
+            if (std.mem.eql(u8, outcome, "not-sent-draft")) {
+                model.uncertain = true;
+                model.snapshot.?.value.case0.snapshot.draft = .{ .kind = .task, .requestId = "saved", .text = "existing", .clipped = false, .saved = true };
+            }
+            const not_sent = std.mem.startsWith(u8, outcome, "not-sent");
+            try pipe.respond(&model, &ctx, .{ .case1 = .{ .version = 1, .id = pipe.bridge.pending.?.id, .ok = false, .@"error" = "creation unconfirmed", .notSent = if (not_sent) true else null } });
+            try std.testing.expectEqualDeep(prior, model.editor);
+            try std.testing.expectEqual(5, model.scroll);
+            if (not_sent) {
+                try std.testing.expectEqual(std.mem.eql(u8, outcome, "not-sent-draft"), model.uncertain);
+                try std.testing.expectEqual(std.mem.eql(u8, outcome, "not-sent-draft"), model.command_creation);
+                continue;
+            }
+            try std.testing.expect(model.uncertain and model.command_creation);
+        }
+        try model.issue(if (std.mem.endsWith(u8, outcome, "discard")) .discard else .retry);
+        var next = model.state().?;
+        next.draft = null;
+        try pipe.reply(&model, &ctx, next);
+        try std.testing.expect(!model.uncertain and !model.command_creation and !model.task_form);
+        if (legacy) {
+            try std.testing.expectEqualStrings("", model.editor.text.items);
+            try std.testing.expectEqual(0, model.scroll);
+        } else {
+            try std.testing.expectEqualStrings(prompt, model.editor.text.items);
+            try std.testing.expectEqualDeep(prior, model.editor);
+            try std.testing.expectEqual(5, model.scroll);
+            try std.testing.expect(model.history_browsing);
+        }
+    }
+}
+
+test "new-child command bounded UTF-8 problem refuses truncated Enter and missing argument" {
+    const a = std.testing.allocator;
+    var pipe = try SelectionTestPipe.init();
+    defer pipe.deinit();
+    var model = try testChatModel(a, &pipe.bridge);
+    defer model.deinit();
+    var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
+    defer ctx.cmds.deinit(a);
+    try model.issue(.poll);
+    try pipe.reply(&model, &ctx, model.state().?);
+    try model.editor.replace("unsent prompt");
+    const prior = model.editor;
+    for ([_][]const u8{ "new-child", "new-child   " }) |cmd| {
+        try model.command.appendSlice(a, cmd);
+        try model.ex(&ctx);
+        try std.testing.expect(pipe.bridge.pending == null and !model.task_form);
+        try std.testing.expect(std.mem.startsWith(u8, model.notice[0..model.notice_len], "Usage:"));
+    }
+    model.command_mode = true;
+    try model.press(&ctx, .{ .codepoint = 0, .text = "new-child " });
+    for (0..1024) |_| try model.press(&ctx, .{ .codepoint = 0xe9, .text = "é" });
+    try std.testing.expectEqual(2058, model.command.items.len);
+    try model.press(&ctx, .{ .codepoint = 'x', .text = "x" });
+    try std.testing.expect(model.command_overflow);
+    try model.press(&ctx, .{ .codepoint = vaxis.Key.enter });
+    try std.testing.expect(pipe.bridge.pending == null and model.command_mode);
+    try model.press(&ctx, .{ .codepoint = vaxis.Key.backspace });
+    try model.press(&ctx, .{ .codepoint = 0xe9, .text = "é" });
+    try std.testing.expect(!model.command_overflow);
+    try model.press(&ctx, .{ .codepoint = vaxis.Key.enter });
+    try std.testing.expectEqual(2048, pipe.bridge.pending.?.text.?.len);
+    try pipe.reply(&model, &ctx, model.state().?);
+    try std.testing.expectEqualDeep(prior, model.editor);
+    model.command_mode = true;
+    try model.press(&ctx, .{ .codepoint = 0, .text = "new-child " });
+    for ([_][]const u8{ "bad\nline", "bad\rline", "bad\x00line", "\xff" }) |text| try model.press(&ctx, .{ .codepoint = 0, .text = text });
+    try std.testing.expectEqualStrings("new-child ", model.command.items);
+    try Model.event(&model, &ctx, .paste_start);
+    try model.press(&ctx, .{ .codepoint = 0, .text = "paste does not execute" });
+    try Model.event(&model, &ctx, .paste_end);
+    try std.testing.expectEqualStrings("new-child ", model.command.items);
+    try model.press(&ctx, .{ .codepoint = vaxis.Key.escape });
+    model.command_mode = true;
+    const large: [257]u8 = @splat('x');
+    try model.press(&ctx, .{ .codepoint = 0, .text = &large });
+    try std.testing.expect(model.command_overflow and model.command.items.len == 0);
+    try model.press(&ctx, .{ .codepoint = vaxis.Key.enter });
+    try std.testing.expect(pipe.bridge.pending == null);
+    try model.press(&ctx, .{ .codepoint = vaxis.Key.escape });
+    try std.testing.expect(!model.command_overflow and !model.command_mode);
+    try std.testing.expectEqualDeep(prior, model.editor);
 }

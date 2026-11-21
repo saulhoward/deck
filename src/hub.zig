@@ -119,7 +119,7 @@ pub fn validCommandArgs(command: []const u8, raw: std.json.Value) bool {
     if (std.mem.eql(u8, command, "admit")) return contracts.validAdmitArgs(args) and safePiId(args.object.get("chatId").?) and units(args.object.get("requestId").?, 200) and units(args.object.get("text").?, 200000);
     if (std.mem.eql(u8, command, "create_managed_child")) {
         if (!contracts.validCreateManagedChildArgs(args)) return false;
-        return safePiId(args.object.get("parentChatId").?) and units(args.object.get("requestId").?, 200) and @import("task_brief.zig").title(args.object.get("title").?.string) and @import("task_brief.zig").fields(args);
+        return safePiId(args.object.get("parentChatId").?) and units(args.object.get("requestId").?, 200) and (if (args.object.get("title")) |title| @import("task_brief.zig").title(title.string) else managed_child.problemBrief(args)) and @import("task_brief.zig").fields(args);
     }
     if (std.mem.eql(u8, command, "create_task_brief")) {
         if (!contracts.validCreateTaskBriefArgs(args)) return false;
@@ -542,9 +542,12 @@ test "HTTP subagent reads validate scope before forwarding and fence corrupt nes
 
 test "HTTP managed child mutations validate scope before forwarding and fence corrupt ACKs" {
     try testHttpFixtures(@embedFile("managed_children.test.json"), &.{
-        "child open exact ACK",                                            "child open reused ACK",                                   "child open missing hub",                          "child open invalid hub \"hub\"",
-        "child open refuses {\"machineId\":\"override\"}",                 "child open refuses {\"childId\":\"9007199254740992\"}",   "child open ACK rejects {\"parentChatId\":\"1\"}", "child open nested ACK rejects {\"chatId\":\"2\"}",
-        "child open nested ACK rejects {\"taskId\":\"9007199254740992\"}", "child open nested ACK rejects {\"private\":\"PRIVATE\"}",
+        "problem-only requires description",                       "problem-only rejects null title",                  "problem-only rejects machine override",
+        "problem-only ACK exact",                                  "problem-only ACK missing description",             "problem-only ACK trimmed problem",
+        "child open exact ACK",                                    "child open reused ACK",                            "child open missing hub",
+        "child open invalid hub \"hub\"",                          "child open refuses {\"machineId\":\"override\"}",  "child open refuses {\"childId\":\"9007199254740992\"}",
+        "child open ACK rejects {\"parentChatId\":\"1\"}",         "child open nested ACK rejects {\"chatId\":\"2\"}", "child open nested ACK rejects {\"taskId\":\"9007199254740992\"}",
+        "child open nested ACK rejects {\"private\":\"PRIVATE\"}",
     });
 }
 

@@ -28,14 +28,14 @@ async function fixture() {
     // Keep the lost-ACK case stale until its explicit retry. A fast successful
     // background read must not hide the disconnected rendering path.
     if (flags.offlineReadsAfterCreate && chats.some(c => c.chatId === "3") && (command === "status" || command === "history")) { response.destroy(); return; }
-    if (command === "status") result = { hubId: hub, hubGuard: 1, ...(flags.managed ? { managedChildren: 1 } : {}), ...(flags.managedOpen ? { managedChildOpen: 1 } : {}), ...(flags.phase1 ? { taskBrief: 1, hostInventory: 1 } : {}), ...(flags.noRex ? {} : { rexOpen: 1 }), rexStartup: 1, mainChatId: "1", chatId: flags.badSelect ? "1" : chat.chatId, binding: chat, tools: "offline", activity: { scheduling: "running", tasks: [{ record: { otherTaskText: "OTHER_TASK_CONTENT" }, state: {} }], submissions: [] } };
+    if (command === "status") result = { hubId: hub, hubGuard: 1, ...(flags.managed ? { managedChildren: 1, managedChildProblem: 1 } : {}), ...(flags.managedOpen ? { managedChildOpen: 1 } : {}), ...(flags.phase1 ? { taskBrief: 1, hostInventory: 1 } : {}), ...(flags.noRex ? {} : { rexOpen: 1 }), rexStartup: 1, mainChatId: "1", chatId: flags.badSelect ? "1" : chat.chatId, binding: chat, tools: "offline", activity: { scheduling: "running", tasks: [{ record: { otherTaskText: "OTHER_TASK_CONTENT" }, state: {} }], submissions: [] } };
     else if (command === "history") result = { items: [{ id: Number(chat.chatId) * 100, kind: "deck.input", data: { text: `history for ${chat.chatId}` } }], next: String(Number(chat.chatId) * 100) };
     else if (command === "list_hosts") result = { sampledAtMs: 1, items: [{ machineId: "a".repeat(32), kind: "local", rex: true, connection: "local" }, { machineId: "b".repeat(32), kind: "worker", rex: true, connection: "offline" }] };
     else if (command === "list_chats") result = flags.badList ? { items: [chats[1], chats[0]] } : flags.sparse && !args.after ? { items: [], next: "1" } : { items: chats.filter((c) => Number(c.chatId) > Number(args.after ?? 0)) };
     else if (command === "create_managed_child") {
       const parent = chats.find(c => c.chatId === args.parentChatId)!;
       const brief = { ...(args.problem === undefined ? {} : { problem: args.problem }), ...(args.description === undefined ? {} : { description: args.description }) };
-      if (!chats.some(c => c.chatId === "3")) chats.push({ chatId: "3", kind: "task", title: args.title, machineId: parent.machineId, cwd: parent.cwd, managedParentChatId: parent.chatId, brief });
+      if (!chats.some(c => c.chatId === "3")) chats.push({ chatId: "3", kind: "task", title: args.title ?? "DS003", agentName: "DS003", machineId: parent.machineId, cwd: parent.cwd, managedParentChatId: parent.chatId, brief });
       if (flags.loseCreate || flags.loseCreateOnce) { flags.loseCreateOnce = false; response.destroy(); return; }
       flags.offlineReadsAfterCreate = false;
       result = { chatId: "3", parentChatId: flags.badManagedAck ? "1" : args.parentChatId, brief };
@@ -431,25 +431,29 @@ test("managed creation refuses an old hub and locked task clients before drafts/
   } finally { await f.close(); }
 });
 
-test("real PTY: managed composer preserves unsubmitted form and displays persistent parent separately from captured children", { skip: !binary, timeout: 30_000 }, async () => {
+test("real PTY: new-child preserves a legacy active form then creates a self-parented problem with an unrelated unsent prompt", { skip: !binary, timeout: 30_000 }, async () => {
   const f = await fixture(); f.flags.managed = true; f.flags.phase1 = true; f.flags.noRex = true;
   try {
-    const form = { title: "Managed", managedParentChatId: "2", problem: "KEEP_MY_PROBLEM", description: "KEEP_DESCRIPTION" };
+    const command = (text: string) => [{ keys: text }, { wait: "client idle" }, { keys: "\r" }];
     const child = spawn("python3", [resolve("scripts/tui-pty-test.py"), binary!, "hub", "--tui", "--port", String(f.port)], { env: f.local.env, stdio: ["pipe", "pipe", "pipe"] });
     let out = "", errors = ""; child.stdout.on("data", c => out += String(c)); child.stderr.on("data", c => errors += String(c));
     child.stdin.end(JSON.stringify([
-      { wait: "history for 1" }, { keys: "\x1b" }, { keys: ":new-child 2" }, { wait: "client idle" }, { keys: "\r" }, { wait: "TASK BRIEF" }, { keys: "\x1b" }, { keys: "cc" },
-      { keys: "\x1b[200~" + JSON.stringify(form) + "\x1b[201~" }, { wait: "KEEP_DESCRIPTION" }, { keys: "\x1b" },
-      { keys: ":new-child 1" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Resolve the current task form" }, { capture: "preserved" },
-      { keys: ":send" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Managed child 3 created" },
-      { keys: ":tasks" }, { wait: "client idle" }, { keys: "\r" }, { wait: "managed child of 2" }, { keys: "\x1b" },
-      { keys: ":select 3" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Read-only task inspection" },
-      { keys: ":brief" }, { wait: "client idle" }, { keys: "\r" }, { wait: "KEEP_MY_PROBLEM" }, { keys: "\x1b" }, { keys: ":q\r" },
+      { wait: "history for 1" }, { keys: "\x1b" }, ...command(":new"), { wait: "TASK BRIEF" }, { keys: "i" },
+      { keys: '\x1b[200~{"title":"UNSUBMITTED_FORM"}\x1b[201~' }, { keys: "\x1b" },
+      ...command(":new-child not allowed while form active"), { wait: "Resolve the current task form" }, { capture: "form" },
+      ...command(":cancel"), { wait: "Unsubmitted task form cleared" }, { keys: "iUNSENT_PROMPT" }, { keys: "\x1b" },
+      ...command(":new-child 2 KEEP_MY_PROBLEM"), { wait: "3 created" }, { capture: "preserved" },
+      { keys: "cc" }, { keys: "\x1b" }, ...command(":tasks"), { wait: "managed child of 1" }, { keys: "\x1b" },
+      ...command(":select 3"), { wait: "Read-only task inspection" },
+      ...command(":new-child READONLY_REFUSED"), { wait: "Read-only task inspection" },
+      ...command(":brief"), { wait: "KEEP_MY_PROBLEM" }, { keys: "\x1b" }, { keys: ":q\r" },
     ]));
     const [code] = await once(child, "exit"); assert.equal(code, 0, errors + out);
-    assert.match(JSON.parse(out).screens.preserved, /KEEP_MY_PROBLEM/);
+    const screens = JSON.parse(out).screens;
+    assert.match(screens.form, /UNSUBMITTED_FORM/); assert.match(screens.preserved, /UNSENT_PROMPT/);
+    assert.doesNotMatch(screens.preserved, /TASK BRIEF/);
     const creates = f.requests.filter(r => r.command === "create_managed_child"); assert.equal(creates.length, 1);
-    assert.deepEqual(creates[0].args, { requestId: creates[0].args.requestId, title: form.title, parentChatId: "2", problem: form.problem, description: form.description });
+    assert.deepEqual(creates[0].args, { requestId: creates[0].args.requestId, parentChatId: "1", problem: "2 KEEP_MY_PROBLEM", description: "" });
     assert.ok(!f.requests.some(r => ["admit", "rex_open", "create_task", "create_task_brief"].includes(r.command)));
   } finally { await f.close(); }
 });
@@ -568,32 +572,27 @@ test("own-parent creation and childOpen do not grant read-only inspectors or for
   } finally { await f.close(); }
 });
 
-for (const loseOpen of [false, true]) test(`real PTY: registered parent :new-child defaults to self, refuses spoofed parent and ${loseOpen ? "recovers lost open explicitly" : "opens scoped child"} without switching chats`, { skip: !binary, timeout: 30_000 }, async () => {
+for (const loseOpen of [false, true]) test(`real PTY: required new-child problem self-parents and ${loseOpen ? "recovers lost open explicitly" : "opens scoped child"} while preserving unsent prompt`, { skip: !binary, timeout: 30_000 }, async () => {
   const f = await fixture(); Object.assign(f.flags, { managed: true, managedOpen: true, parentRex: true, phase1: true, loseManagedOpenOnce: loseOpen });
   try {
-    const form = { title: "PTYChild", managedParentChatId: "2", problem: "KEEP_PROBLEM", description: "KEEP_DESCRIPTION" };
     const command = (text: string) => [{ keys: text }, { wait: "client idle" }, { keys: "\r" }];
     const steps: object[] = [
-      { wait: "history for 2" }, { wait: "Rex startup registered" }, { keys: "\x1b" },
-      ...command(":new-child 1"), { wait: ":new-child can only use this agent as parent" },
-      ...command(":new-child"), { wait: "TASK BRIEF" }, { wait: '"managedParentChatId":"2"' },
-      { keys: "\x1b" }, { keys: "cc" }, { keys: "\x1b[200~" + JSON.stringify({ ...form, managedParentChatId: "1" }) + "\x1b[201~" }, { wait: "KEEP_DESCRIPTION" }, { keys: "\x1b" },
-      ...command(":send"), { wait: "form must create a managed child of this agent" }, { capture: "spoof" },
-      { keys: "cc" }, { keys: "\x1b[200~" + JSON.stringify(form) + "\x1b[201~" }, { wait: "KEEP_DESCRIPTION" }, { keys: "\x1b" },
-      ...command(":new-child"), { wait: "Resolve the current task form" }, { capture: "preserved" },
-      ...command(":send"), { wait: "Child 3 created" },
+      { wait: "history for 2" }, { wait: "Rex startup registered" }, { keys: "UNSENT_EXACT_PROMPT" }, { keys: "\x1b" },
+      ...command(":new-child"), { wait: "Usage: :new-child PROBLEM" },
+      ...command(":new-child   "), { wait: "Usage: :new-child PROBLEM" }, { capture: "usage" },
+      ...command(":new-child 1 KEEP_PROBLEM"), { wait: "Child 3 created" }, { capture: "preserved" },
     ];
     if (loseOpen) steps.push({ wait: "same-session Rex open unconfirmed" }, ...command(":retry"), { wait: "No pending draft to retry" }, ...command(":child-open 3"), { wait: "Child 3 TUI opening" });
     else steps.push({ wait: "Child TUI opening" });
-    steps.push({ wait: "history for 2" }, { keys: ":q\r" });
+    steps.push({ wait: "history for 2" }, { capture: "opened" }, { keys: ":q!\r" });
     const child = spawn("python3", [resolve("scripts/tui-pty-test.py"), binary!, "agent", "--tui", "--port", String(f.port), "--task", "2", "--hub-id", hub, "--rex-allocation", hub], { env: { ...f.local.env, DECK_NODE: process.execPath, REX_BLOCK: `block:${hub}` } });
     const closed = once(child, "close"); let out = "", errors = "";
     child.stdout.on("data", c => out += String(c)); child.stderr.on("data", c => errors += String(c)); child.stdin.end(JSON.stringify(steps));
     assert.equal((await closed)[0], 0, errors + out);
     const screens = JSON.parse(out).screens;
-    for (const screen of [screens.spoof, screens.preserved]) { assert.match(screen, /KEEP_PROBLEM/); assert.match(screen, /KEEP_DESCRIPTION/); }
+    for (const screen of [screens.usage, screens.preserved, screens.opened]) { assert.match(screen, /UNSENT_EXACT_PROMPT/); assert.doesNotMatch(screen, /TASK BRIEF/); }
     const creates = f.requests.filter(r => r.command === "create_managed_child"); assert.equal(creates.length, 1);
-    assert.deepEqual(creates[0].args, { requestId: creates[0].args.requestId, parentChatId: "2", title: form.title, problem: form.problem, description: form.description });
+    assert.deepEqual(creates[0].args, { requestId: creates[0].args.requestId, parentChatId: "2", problem: "1 KEEP_PROBLEM", description: "" });
     const opens = f.requests.filter(r => r.command === "open_managed_child"); assert.equal(opens.length, loseOpen ? 2 : 1);
     assert.ok(opens.every(r => r.args.chatId === "2" && r.args.childId === "3" && r.args.port === f.port));
     if (loseOpen) assert.notEqual(opens[0].args.requestId, opens[1].args.requestId);
@@ -619,20 +618,102 @@ test("plain task client creates only its own child and opens the same-session ro
   } finally { await f.close(); }
 });
 
-test("real PTY: failed parent Rex preflight preserves editable child form without a saved/uncertain mutation", { skip: !binary, timeout: 30_000 }, async () => {
+test("real PTY: failed new-child parent Rex preflight preserves editable unsent prompt without mutation uncertainty", { skip: !binary, timeout: 30_000 }, async () => {
   const f = await fixture(); Object.assign(f.flags, { managed: true, managedOpen: true, phase1: true });
   try {
     const child = spawn("python3", [resolve("scripts/tui-pty-test.py"), binary!, "agent", "--tui", "--port", String(f.port), "--task", "2", "--hub-id", hub, "--rex-allocation", hub], { env: { ...f.local.env, DECK_NODE: process.execPath, REX_BLOCK: `block:${hub}` } });
     const closed = once(child, "close"); let out = "", errors = ""; child.stdout.on("data", c => out += String(c)); child.stderr.on("data", c => errors += String(c));
     child.stdin.end(JSON.stringify([
-      { wait: "history for 2" }, { keys: "\x1b" }, { keys: ":new-child" }, { wait: "client idle" }, { keys: "\r" }, { wait: "TASK BRIEF" },
-      { keys: "PRESERVED_TITLE" }, { keys: "\x1b" }, { keys: ":send" }, { wait: "client idle" }, { keys: "\r" },
-      { wait: "Parent has no confirmed Rex allocation" }, { capture: "preserved" }, { keys: "i" }, { keys: "_EDITABLE" }, { wait: "_EDITABLE" },
-      { keys: "\x1b" }, { keys: ":cancel" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Unsubmitted task form cleared" }, { keys: ":q\r" },
+      { wait: "history for 2" }, { keys: "PRESERVED_PROMPT" }, { keys: "\x1b" }, { keys: ":new-child The child problem" }, { wait: "client idle" }, { keys: "\r" },
+      { wait: "Parent has no confirmed Rex allocation" }, { capture: "preserved" }, { keys: "A_EDITABLE" }, { wait: "_EDITABLE" },
+      { keys: "\x1b" }, { keys: ":q!\r" },
     ]));
-    assert.equal((await closed)[0], 0, errors + out); assert.match(JSON.parse(out).screens.preserved, /PRESERVED_TITLE/);
-    assert.doesNotMatch(JSON.parse(out).screens.preserved, /LOCKED/);
+    assert.equal((await closed)[0], 0, errors + out); assert.match(JSON.parse(out).screens.preserved, /PRESERVED_PROMPT/);
+    assert.doesNotMatch(JSON.parse(out).screens.preserved, /LOCKED|TASK BRIEF/);
     assert.ok(!f.requests.some(r => r.command.startsWith("create_") || ["open_managed_child", "rex_open", "admit"].includes(r.command)));
+    assert.deepEqual(await new DraftStore(hub, f.local.env.DECK_CLIENT_STATE_DIRECTORY).list(), []);
+  } finally { await f.close(); }
+});
+
+for (const recovery of ["retry", "discard", "reconnect-retry", "reconnect-discard"] as const) test(`real PTY: new-child lost creation ACK ${recovery} preserves unrelated prompt and exact saved identity`, { skip: !binary, timeout: 30_000 }, async () => {
+  const f = await fixture(); Object.assign(f.flags, { managed: true, noRex: true, phase1: true, loseCreateOnce: true });
+  const command = (text: string) => [{ keys: text }, { wait: "client idle" }, { keys: "\r" }];
+  const run = async (steps: object[]) => {
+    const child = spawn("python3", [resolve("scripts/tui-pty-test.py"), binary!, "hub", "--tui", "--port", String(f.port)], { env: { ...f.local.env, DECK_NODE: process.execPath } });
+    const closed = once(child, "close"); let out = "", errors = "";
+    child.stdout.on("data", c => out += String(c)); child.stderr.on("data", c => errors += String(c)); child.stdin!.end(JSON.stringify(steps));
+    assert.equal((await closed)[0], 0, errors + out);
+    return JSON.parse(out).screens;
+  };
+  try {
+    const reconnect = recovery.startsWith("reconnect"); const discard = recovery.endsWith("discard");
+    const problem = "  Exact child problem 界 with trailing space  ";
+    const steps: object[] = [
+      { wait: "history for 1" }, { keys: "UNSENT_BEFORE_CREATE" }, { keys: "\x1b" },
+      ...command(":new-child " + problem), { wait: "request outcome unconfirmed" }, { wait: "LOCKED" }, { capture: "lost" },
+    ];
+    if (!reconnect) steps.push(...command(discard ? ":discard" : ":retry"), { wait: discard ? "Draft discarded locally" : "3 created" }, { capture: "resolved" });
+    steps.push({ keys: ":q!\r" });
+    const screens = await run(steps);
+    assert.match(screens.lost, /UNSENT_BEFORE_CREATE/); assert.doesNotMatch(screens.lost, /TASK BRIEF/);
+    if (reconnect) {
+      assert.equal((await new DraftStore(hub, f.local.env.DECK_CLIENT_STATE_DIRECTORY).list()).length, 1);
+      const next = await run([
+        { wait: "Saved task" }, { wait: "LOCKED" }, { capture: "reconnected" }, { keys: "\x1b" },
+        ...command(discard ? ":discard" : ":retry"), { wait: discard ? "Draft discarded locally" : "3 created" },
+        { keys: "iRECONNECTED_EDITABLE" }, { wait: "RECONNECTED_EDITABLE" }, { capture: "resolved" }, { keys: "\x1b" }, { keys: ":q!\r" },
+      ]);
+      assert.doesNotMatch(next.reconnected.split("\n").slice(34, 37).join("\n"), /Exact child problem|UNSENT_BEFORE_CREATE/);
+      assert.doesNotMatch(next.resolved, /LOCKED|TASK BRIEF/);
+    } else {
+      assert.match(screens.resolved, /UNSENT_BEFORE_CREATE/);
+      assert.doesNotMatch(screens.resolved, /LOCKED|TASK BRIEF/);
+    }
+    const creates = f.requests.filter(r => r.command === "create_managed_child");
+    assert.equal(creates.length, discard ? 1 : 2);
+    assert.deepEqual(creates[0].args, { requestId: creates[0].args.requestId, parentChatId: "1", problem, description: "" });
+    if (!discard) assert.deepEqual(creates[1].args, creates[0].args);
+    assert.ok(!f.requests.some(r => ["admit", "rex_open", "open_managed_child", "create_task", "create_task_brief"].includes(r.command)));
+    assert.deepEqual(await new DraftStore(hub, f.local.env.DECK_CLIENT_STATE_DIRECTORY).list(), []);
+  } finally { await f.close(); }
+});
+
+test("real PTY: new-child accepts 2048 UTF-8 bytes and refuses truncated overflow until corrected", { skip: !binary, timeout: 30_000 }, async () => {
+  const f = await fixture(); Object.assign(f.flags, { managed: true, noRex: true, phase1: true });
+  try {
+    const problem = "é".repeat(1024);
+    const child = spawn("python3", [resolve("scripts/tui-pty-test.py"), binary!, "hub", "--tui", "--port", String(f.port)], { env: { ...f.local.env, DECK_NODE: process.execPath } });
+    const closed = once(child, "close"); let out = "", errors = "";
+    child.stdout.on("data", c => out += String(c)); child.stderr.on("data", c => errors += String(c));
+    child.stdin!.end(JSON.stringify([
+      { wait: "history for 1" }, { keys: "UNCHANGED_PROMPT" }, { keys: "\x1b" }, { keys: ":new-child " },
+      ...Array.from({ length: 32 }, () => ({ keys: "é".repeat(32) })), { keys: "x" },
+      { wait: "Command limit exceeded" }, { keys: "\r" }, { wait: "Nothing submitted" }, { capture: "overflow" },
+      { keys: "\x7fé" }, { wait: "client idle" }, { keys: "\r" }, { wait: "3 created" }, { capture: "created" }, { keys: ":q!\r" },
+    ]));
+    assert.equal((await closed)[0], 0, errors + out);
+    for (const screen of Object.values(JSON.parse(out).screens) as string[]) assert.match(screen, /UNCHANGED_PROMPT/);
+    const creates = f.requests.filter(r => r.command === "create_managed_child"); assert.equal(creates.length, 1);
+    assert.deepEqual(creates[0].args, { requestId: creates[0].args.requestId, parentChatId: "1", problem, description: "" });
+    assert.equal(Buffer.byteLength(creates[0].args.problem, "utf8"), 2048);
+    assert.ok(!f.requests.some(r => ["admit", "rex_open", "create_task", "create_task_brief"].includes(r.command)));
+  } finally { await f.close(); }
+});
+
+for (const whitespace of ["\u3000", "\u00a0", "\ufeff"]) test(`real PTY: new-child Unicode-only whitespace ${whitespace.codePointAt(0)!.toString(16)} is usage, not a fenced bridge`, { skip: !binary, timeout: 15_000 }, async () => {
+  const f = await fixture(); Object.assign(f.flags, { managed: true, phase1: true, noRex: true });
+  try {
+    const child = spawn("python3", [resolve("scripts/tui-pty-test.py"), binary!, "hub", "--tui", "--port", String(f.port)], { env: { ...f.local.env, DECK_NODE: process.execPath } });
+    const closed = once(child, "close"); let out = "", errors = "";
+    child.stdout.on("data", c => out += String(c)); child.stderr.on("data", c => errors += String(c));
+    child.stdin.end(JSON.stringify([
+      { wait: "history for 1" }, { keys: "PRESERVED_PROMPT" }, { keys: "\x1b" }, { keys: ":new-child " + whitespace },
+      { wait: "client idle" }, { keys: "\r" }, { wait: "Usage: :new-child PROBLEM" },
+      { keys: "A_EDITABLE" }, { wait: "PRESERVED_PROMPT_EDITABLE" }, { capture: "editable" }, { keys: "\x1b" }, { keys: ":q!\r" },
+    ]));
+    assert.equal((await closed)[0], 0, errors + out);
+    assert.doesNotMatch(JSON.parse(out).screens.editable, /LOCKED|fenced|TASK BRIEF/);
+    assert.ok(!f.requests.some(r => r.command.startsWith("create_") || ["admit", "rex_open", "open_managed_child"].includes(r.command)));
     assert.deepEqual(await new DraftStore(hub, f.local.env.DECK_CLIENT_STATE_DIRECTORY).list(), []);
   } finally { await f.close(); }
 });

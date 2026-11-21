@@ -51,7 +51,7 @@ test("managed child IPC creates only an idle ownerless task and projects exact b
   try {
     const parent = await f.runtime.createTask("Parent", binding), parentChatId = String(parent.id);
     const create = t.mock.method(f.runtime, "createManagedChild"), admit = t.mock.method(f.runtime, "admit"), rex = t.mock.method(f.runtime, "openTerminal");
-    const root = result<StatusSnapshot>(await f.channel.call("status")); assert.equal(root.managedChildren, 1);
+    const root = result<StatusSnapshot>(await f.channel.call("status")); assert.equal(root.managedChildren, 1); assert.equal(root.managedChildProblem, 1);
     const brief = { problem: "  Exact problem 🧪\nsecond line  ", description: "Description\r\n  retained 日本語 " };
     const args = { requestId: randomUUID(), parentChatId, title: "  Child 日本語  ", ...brief };
     const ack = result<CreateManagedChildAck>(await f.channel.call("create_managed_child", args));
@@ -137,7 +137,7 @@ test("only canonical pinned task dispatch advertises managed actions; create sco
     const parent = await f.runtime.createTask("Parent", binding), parentId = String(parent.id);
     const call = (command: string, args: object, pin?: string) => dispatch(f.runtime, { version: 1, id: randomUUID(), command, args, hubId: f.runtime.hubId }, undefined, true, pin);
     const status = await call("status", { chatId: parentId }, parentId) as StatusSnapshot;
-    assert.equal(status.managedChildren, 1); assert.equal(status.managedChildOpen, 1);
+    assert.equal(status.managedChildren, 1); assert.equal(status.managedChildOpen, 1); assert.equal(status.managedChildProblem, 1);
     const args = { parentChatId: parentId, requestId: randomUUID(), title: "Scoped" };
     for (const pin of [undefined, String(f.runtime.main.id)]) await assert.rejects(call("create_managed_child", args, pin), { code: "invalid" });
     const created = await call("create_managed_child", args, parentId) as CreateManagedChildAck;
@@ -150,10 +150,36 @@ test("only canonical pinned task dispatch advertises managed actions; create sco
     const captured = (await namedChildren(f.runtime, parentId))[0]!, owned = await f.runtime.chat(captured.chatId);
     // A valid captured read must not imply parent scope capability.
     const viewed = await call("subagent_view", { chatId: parentId, childId: captured.chatId, operation: "status" }, parentId) as { result: StatusSnapshot };
-    assert.equal(viewed.result.managedChildren, undefined); assert.equal(viewed.result.managedChildOpen, undefined);
+    assert.equal(viewed.result.managedChildren, undefined); assert.equal(viewed.result.managedChildOpen, undefined); assert.equal(viewed.result.managedChildProblem, undefined);
     await owned.commit(async tx => { Object.assign(await tx.doc(ChatDoc, owned.id), { kind: "task", managedParentChatId: parentId }); }, context);
     const forged = await call("status", { chatId: captured.chatId }, captured.chatId) as StatusSnapshot;
-    assert.equal(forged.managedChildren, undefined); assert.equal(forged.managedChildOpen, undefined);
+    assert.equal(forged.managedChildren, undefined); assert.equal(forged.managedChildOpen, undefined); assert.equal(forged.managedChildProblem, undefined);
     await assert.rejects(call("create_managed_child", { parentChatId: captured.chatId, requestId: randomUUID(), title: "Not independent" }, captured.chatId), { code: "invalid" });
+  } finally { await f.close(); }
+});
+
+
+test("problem-only IPC preserves the pinned parent, returns exact brief ACKs and exposes the generated canonical title through reads", async t => {
+  const f = await fixture();
+  try {
+    const parent = await f.runtime.createTask("Parent", binding), parentChatId = String(parent.id);
+    const args = { parentChatId, requestId: randomUUID(), problem: "  Own exact problem 🧪\n", description: "" };
+    const create = t.mock.method(f.runtime, "createManagedChild");
+    const call = (pin?: string) => dispatch(f.runtime, { version: 1, id: randomUUID(), hubId: f.runtime.hubId, command: "create_managed_child", args }, undefined, true, pin);
+    for (const pin of [undefined, String(f.runtime.main.id)]) await assert.rejects(call(pin), { code: "invalid" });
+    assert.equal(create.mock.callCount(), 0);
+    const ack = await call(parentChatId) as CreateManagedChildAck;
+    const brief = { problem: args.problem, description: "" };
+    assert.deepEqual(ack, { chatId: ack.chatId, parentChatId, brief });
+    assert.deepEqual(create.mock.calls[0]!.arguments, [parentChatId, undefined, args.requestId, brief]);
+    const status = result<StatusSnapshot>(await f.channel.call("status", { chatId: ack.chatId }));
+    assert.equal(status.managedChildProblem, 1); assert.equal(status.binding!.title, status.binding!.agentName);
+    assert.equal(status.binding!.agentNameAlgorithm, "wintermute-v1"); assert.deepEqual(status.binding!.brief, brief);
+    assert.deepEqual(result(await f.channel.call("create_managed_child", args)), ack);
+    await f.reopen();
+    assert.deepEqual(result(await f.channel.call("create_managed_child", args)), ack);
+    assert.deepEqual(result<StatusSnapshot>(await f.channel.call("status", { chatId: ack.chatId })).binding, status.binding);
+    assert.equal((await f.runtime.listChats()).items.length, 3);
+    assert.deepEqual((await f.runtime.history(ack.chatId)).items, []); assert.equal(f.faux.state.callCount, 0); assert.deepEqual(f.effects, []);
   } finally { await f.close(); }
 });

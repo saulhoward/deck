@@ -17,8 +17,8 @@ export function validForm(value: unknown): value is TaskCreationForm {
 }
 // Shared by plain/TUI recovery: managed requests never send decorative or stale
 // host/cwd fields, and keep their original parent rather than current selection.
-export function taskCreationArgs(value: TaskBrief & { requestId: string; title: string; machineId?: string; cwd?: string; managedParentChatId?: string }): Record<string, unknown> {
-  return { requestId: value.requestId, title: value.title, ...(value.managedParentChatId !== undefined ? { parentChatId: value.managedParentChatId } : { machineId: value.machineId, cwd: value.cwd }), ...briefFields(value) };
+export function taskCreationArgs(value: TaskBrief & { requestId: string; title?: string; machineId?: string; cwd?: string; managedParentChatId?: string }): Record<string, unknown> {
+  return { requestId: value.requestId, ...(value.title === undefined ? {} : { title: value.title }), ...(value.managedParentChatId !== undefined ? { parentChatId: value.managedParentChatId } : { machineId: value.machineId, cwd: value.cwd }), ...briefFields(value) };
 }
 export function parseTaskForm(text: string): TaskCreationForm {
   try { const value: unknown = JSON.parse(text); if (validForm(value)) return value; } catch { /* Payload-free diagnostics. */ }

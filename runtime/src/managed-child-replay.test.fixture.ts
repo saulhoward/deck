@@ -1,6 +1,7 @@
 // Subprocess crash windows; never shipped in the installed runtime payload.
 import { writeFile, rename } from "node:fs/promises";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
+import { ChatDoc } from "./chat-doc.js";
 import { setup } from "./managed-child.test.support.js";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 const [kind, path] = process.argv.slice(2) as [string, string];
@@ -11,9 +12,10 @@ async function checkpoint(value: object) {
   await rename(`${path}.checkpoint.tmp`, `${path}.checkpoint`);
 }
 const parent = await runtime.createTask("Parent", f.options.binding, "parent"), parentId = String(parent.id);
-const child = await runtime.createManagedChild(parentId, "Managed", "create-managed", { problem: "Own problem", description: "Own immutable task" }), childId = String(child.id);
-if (kind === "create") {
-  await checkpoint({ parentId, childId }); await new Promise(() => {});
+const child = await runtime.createManagedChild(parentId, kind === "problem" ? undefined : "Managed", "create-managed", { problem: "Own problem", description: kind === "problem" ? "" : "Own immutable task" }), childId = String(child.id);
+if (kind === "create" || kind === "problem") {
+  const metadata = await runtime.harness.snapshot(ChatDoc, child.id, context);
+  await checkpoint({ parentId, childId, metadata }); await new Promise(() => {});
 } else {
   const admit = runtime.admit.bind(runtime);
   runtime.admit = async (...args) => {
