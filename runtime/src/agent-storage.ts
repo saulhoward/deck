@@ -5,6 +5,7 @@ import { link, lstat, mkdir, open, readdir, rm } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { privateJson, privateOwner } from "./launcher-client.js";
 import { validAgentHereRecord, type AgentHereRecord, validRexBootstrapRecord, validRexBootstrapIndex, validRexUuid, type RexBootstrapRecord, type RexBootstrapIndex } from "./generated/contracts.js";
+import { validSafePiId } from "./mutation-contracts.js";
 import { validResolvedTarget } from "./rex-open-contracts.js";
 export function missing(error: unknown): boolean { return (error as NodeJS.ErrnoException).code === "ENOENT"; }
 export async function privateDirectory(path: string, create = false) {
@@ -23,6 +24,7 @@ export async function bootstrapRecord(clientRoot: string, id: string, currentPro
   if (!validRexBootstrapRecord(record) || record.id !== id || record.draftRoot !== clientRoot || !validResolvedTarget(record.target) || !record.cwd.startsWith("/") || record.cwd.includes("\0") || !record.client.startsWith("/") || !record.draftRoot.startsWith("/")) throw new Error("Invalid native bootstrap record");
   if (await new StartupFiles(root).read("here.json") !== undefined) throw new Error("Conflicting creation provenance");
   if (currentProcess && (!record.binding || record.binding.pid !== process.ppid || record.binding.blockId !== process.env.REX_BLOCK)) throw new Error("Bootstrap is not this managed terminal");
+  if (record.here && (!validSafePiId(record.here.chatId) || !record.binding || record.here.process.pid !== record.binding.pid || [record.here.process, record.here.terminal].some(p => ![p.tty, p.executable].every(path => path.startsWith("/") && !path.includes("\0") && Buffer.byteLength(path) <= 4096)) || (record.claim && record.claim.chatId !== record.here.chatId) || (currentProcess && record.binding.sessionId !== process.env.REX_SESSION))) throw new Error("Invalid current-terminal Rex proof");
   return record;
 }
 export type StartupRecord = RexBootstrapRecord | AgentHereRecord;
@@ -72,7 +74,7 @@ export class StartupFiles {
     await privateDirectory(this.directory);
     try { return await privateJson(join(this.directory, name), 64 * 1024); } catch (error) { if (missing(error)) return undefined; throw error; }
   }
-  async publish(name: string, value: unknown): Promise<void> {
+  async publish(name: string, value: unknown, exclusive = false): Promise<void> {
     await privateDirectory(this.directory);
     const bytes = JSON.stringify(value);
     if (Buffer.byteLength(bytes) > 64 * 1024) throw new Error("Startup draft exceeds bounds");
@@ -82,7 +84,7 @@ export class StartupFiles {
       try { await file.writeFile(bytes); await file.sync(); } finally { await file.close(); }
       try { await link(tmp, join(this.directory, name)); }
       catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST" || exclusive) throw error;
         if (JSON.stringify(await this.read(name)) !== bytes) throw new Error("Startup draft identity conflict; original retained");
       }
       const directory = await open(this.directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);

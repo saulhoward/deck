@@ -2,6 +2,7 @@ import { messageContent } from "./message-content.js";
 import { validMessageContentArgs } from "./message-content-contracts.js";
 import { subagentView } from "./subagent-view.js";
 import { validSubagentViewArgs } from "./subagent-view-contracts.js";
+import { AgentDoc } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { Readable, Writable } from "node:stream";
 import { ChatDoc } from "./chat-doc.js";
@@ -60,6 +61,7 @@ export async function dispatch(runtime: DeckRuntime, request: Record<string, unk
       const chat = args.chatId === undefined ? runtime.main : await runtime.chat(text(args.chatId, "chatId"));
       const saved = await runtime.harness.snapshot(ChatDoc, chat.id, context);
       const model = (await chat.agent(context)).model;
+      const savedAgent = await runtime.harness.snapshot(AgentDoc, chat.id, context);
       const record = await runtime.harness.commit(tx => tx.conversation(chat.id), context);
       const managed = (!taskClient || pinnedTaskId === String(chat.id)) && independentDeckChat(record, saved, runtime.main.id);
       let inventory: { toolInventory?: import("./generated/contracts.js").ToolInventory; toolInventoryStatus: "ready" | "unavailable" };
@@ -69,7 +71,7 @@ export async function dispatch(runtime: DeckRuntime, request: Record<string, unk
       // Project Deck metadata without rewriting retained documents. Pi model
       // parameters and global inspection records remain compatible opaque data.
       const binding = saved && { ...agentNameFields(saved), machineId: saved.machineId, cwd: saved.cwd, kind: saved.kind, title: saved.title, ...(saved.parentChatId === undefined ? {} : { parentChatId: saved.parentChatId }), ...(saved.ownerTaskId === undefined ? {} : { ownerTaskId: saved.ownerTaskId }), ...(saved.managedParentChatId === undefined ? {} : { managedParentChatId: saved.managedParentChatId }), ...(saved.brief ? { brief: saved.brief } : {}) };
-      return { ...inventory, ...(runtime.authentication ? { authentication: runtime.authentication } : {}), ...(!taskClient && runtime.localMachineId ? { machineId: runtime.localMachineId } : {}), implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, modelSettings: 1, taskBrief: 1, ...(managed ? { managedChildren: 1, managedChildOpen: 1, managedChildProblem: 1 } : {}), ...(taskClient ? {} : { hostInventory: 1, rexAdopt: 1 }), rexStartup: 1, rexOpen: runtime.rexClient && runtime.localFiles ? 1 : 0, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding, ...(taskClient ? {} : { activity: await runtime.harness.inspect(context) }), provider: model?.provider, model: taskClient && model ? { provider: model.provider, modelId: model.modelId } : model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
+      return { ...inventory, ...(runtime.authentication ? { authentication: runtime.authentication } : {}), ...(!taskClient && runtime.localMachineId ? { machineId: runtime.localMachineId } : {}), implementation: runtime.implementation, hubId: runtime.hubId, hubGuard: 1, modelSettings: 1, taskBrief: 1, ...(args.rexHereAdopt === 1 && managed && saved?.kind === "task" && savedAgent?.cwd === saved.cwd && runtime.supportsHereAdoption(saved.machineId) ? { rexHereAdopt: 1 } : {}), ...(managed ? { managedChildren: 1, managedChildOpen: 1, managedChildProblem: 1 } : {}), ...(taskClient ? {} : { hostInventory: 1, rexAdopt: 1 }), rexStartup: 1, rexOpen: runtime.rexClient && runtime.localFiles ? 1 : 0, mainChatId: String(runtime.main.id), chatId: String(chat.id), binding, ...(taskClient ? {} : { activity: await runtime.harness.inspect(context) }), provider: model?.provider, model: taskClient && model ? { provider: model.provider, modelId: model.modelId } : model, tools: runtime.localFiles ? "native-files + bash" : "offline" };
     }
     case "model_settings":
     case "set_model_settings": {

@@ -16,6 +16,11 @@ fn safeId(value: V) bool {
 fn number(value: V) f64 {
     return if (value == .integer) @floatFromInt(value.integer) else value.float;
 }
+pub fn validInspectionQuery(value: V) bool {
+    if (!contracts.validRexInspectionQuery(value)) return false;
+    const bootstrap = field(value, "bootstrap");
+    return bootstrap == .null or (is(field(bootstrap, "kind"), "here") and @import("mcp_profiles.zig").absolute(field(bootstrap, "root").string) and equal(field(bootstrap, "blockId"), field(field(value, "scope"), "blockId")));
+}
 pub fn validArgs(command: []const u8, args: V) bool {
     if (std.mem.eql(u8, command, "open_managed_child")) {
         return contracts.validOpenManagedChildArgs(args) and @import("managed_child.zig").precedes(field(args, "chatId"), field(args, "childId"));

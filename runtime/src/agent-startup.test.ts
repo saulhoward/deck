@@ -166,8 +166,8 @@ for (const { remote, upgrading, live = false, interrupted = false } of [{ remote
     const registrationAtAttach = remote ? await readFile(join(root, "hub", "rex-workers.json")) : undefined;
     const attachedText = "New input from my current terminal";
     // A real invoking PTY, outside Rex and deliberately in a different cwd. An
-    // ambient unrelated REX_BLOCK must not become startup/allocation authority.
-    const here = spawn("python3", [resolve("scripts/tui-pty-test.py"), deck!, "agent", ...flags, "--resume", task.agentName, "--here"], { cwd: hubWork, env: { ...env, PATH: `${root}/bin:${process.env.PATH}`, REX_BLOCK: "block:11111111-1111-4111-8111-111111111111" } });
+    // absence of BOTH Rex hints selects the outside-Rex attachment path.
+    const here = spawn("python3", [resolve("scripts/tui-pty-test.py"), deck!, "agent", ...flags, "--resume", task.agentName, "--here"], { cwd: hubWork, env: { ...env, PATH: `${root}/bin:${process.env.PATH}`, REX_SESSION: undefined, REX_BLOCK: undefined } });
     let hereOut = "", hereErr = ""; here.stdout!.on("data", b => { hereOut += String(b); }); here.stderr!.on("data", b => { hereErr += String(b); });
     const hereClosed = once(here, "close");
     here.stdin!.end(JSON.stringify([{ wait: "Connecting to the selected hub" }, { wait: message }, { capture: "history" }, { keys: attachedText }, { keys: "\r" }, { wait: "Input admitted" }, { keys: "\u0003" }]));
@@ -183,11 +183,20 @@ for (const { remote, upgrading, live = false, interrupted = false } of [{ remote
     if (remote) assert.deepEqual(await readFile(join(root, "hub", "rex-workers.json")), registrationAtAttach);
     const createFlags = remote ? flags : ["--local", "--port", String(port), "--rex", "/definitely-unavailable-rex"];
     const createHere = async (steps: object[], formOnly = false) => {
-      const driver = spawn("python3", [resolve("scripts/tui-pty-test.py"), deck!, "agent", ...createFlags, "--here"], { cwd: work, env: { ...env, PATH: `${root}/bin:${process.env.PATH}`, ...(formOnly ? { DECK_TEST_FORM_ONLY: "1" } : {}), REX_BLOCK: "block:11111111-1111-4111-8111-111111111111" } });
+      const driver = spawn("python3", [resolve("scripts/tui-pty-test.py"), deck!, "agent", ...createFlags, "--here"], { cwd: work, env: { ...env, PATH: `${root}/bin:${process.env.PATH}`, ...(formOnly ? { DECK_TEST_FORM_ONLY: "1" } : {}), REX_SESSION: undefined, REX_BLOCK: undefined } });
       let out = "", err = ""; driver.stdout!.on("data", b => { out += b; }); driver.stderr!.on("data", b => { err += b; });
       const closed = once(driver, "close"); driver.stdin!.end(JSON.stringify(steps));
       assert.equal((await closed)[0], 0, err); return JSON.parse(out);
     };
+    // A partial ambient Rex identity is not an outside-Rex fallback. Refuse
+    // before any task, startup, allocation or worker registration is changed.
+    const partialStarts = await readdir(join(client, "startups"));
+    const partialTasks = await hubCommand(port, "list_chats", {}, status.hubId);
+    const partial = JSON.parse(await invoke("python3", [resolve("scripts/agent-here-refusal-pty-test.py"), deck!, "agent", ...flags, "--here"], work, { ...env, PATH: `${root}/bin:${process.env.PATH}`, REX_BLOCK: "block:11111111-1111-4111-8111-111111111111" }));
+    assert.notEqual(partial.exitCode, 0); assert.match(partial.output, /agent startup refused/);
+    assert.deepEqual(await readdir(join(client, "startups")), partialStarts);
+    assert.deepEqual(await hubCommand(port, "list_chats", {}, status.hubId), partialTasks);
+    assert.deepEqual(await hubCommand(port, "rex_status", { chatId: task.chatId }, status.hubId), reopened);
     const beforeCreate = await readdir(join(client, "startups"));
     assert.equal((await createHere([{ wait: "Create a task" }, { wait: "Nothing created" }, { keys: "Cancel without creating" }, { keys: "\u0003" }], true)).restored, true);
     assert.equal((await hubCommand(port, "list_chats", {}, status.hubId) as any).items.length, 2);

@@ -27,7 +27,7 @@ try {
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error();
   if (bootstrapId && (!allocationId || !clientState)) throw new Error();
-  if (hereStartup && (!attachMachine || !clientState || bootstrapId)) throw new Error();
+  if (hereStartup && ((!attachMachine && !allocationId) || !clientState || bootstrapId)) throw new Error();
   if (attachMachine && (allocationId || bootstrapId || !validRexUuid(hubId) || !chatId)) throw new Error();
   if (workerSocket && !attachMachine) taskScope(hubId, chatId, allocationId, process.env.REX_BLOCK);
   if (allocationId && (!hubId || !validMutationArgs("rex_startup", { chatId, allocationId, blockId: process.env.REX_BLOCK }))) throw new Error();
@@ -38,9 +38,9 @@ const stop = () => { abort.abort(); decoder.destroy(); };
 process.stdin.on("end", stop); process.stdin.on("error", stop); process.stdout.on("error", stop);
 const scope = workerSocket && !attachMachine ? taskScope(hubId, chatId, allocationId, process.env.REX_BLOCK) : undefined;
 const bootstrap = bootstrapId ? await bootstrapRecord(clientState!, bootstrapId).catch(() => undefined) : undefined;
-if (bootstrapId && (!bootstrap || bootstrap.hubId !== hubId || bootstrap.claim?.chatId !== chatId || bootstrap.claim?.allocationId !== allocationId || bootstrap.workerSocket !== workerSocket || bootstrap.port !== port)) process.exit(2);
+if (bootstrapId && (!bootstrap || bootstrap.here || bootstrap.hubId !== hubId || bootstrap.claim?.chatId !== chatId || bootstrap.claim?.allocationId !== allocationId || bootstrap.workerSocket !== workerSocket || bootstrap.port !== port)) process.exit(2);
 const here = hereStartup ? await hereRecord(clientState!, hereStartup).catch(() => undefined) : undefined;
-if (hereStartup && (!here || here.hubId !== hubId || here.machineId !== attachMachine || here.workerSocket !== workerSocket || here.port !== port)) process.exit(2);
+if (hereStartup && (!here || here.hubId !== hubId || (attachMachine !== undefined && here.machineId !== attachMachine) || here.workerSocket !== workerSocket || here.port !== port)) process.exit(2);
 // Transport authority never follows the renderer selection into a child.
 const attachedChatId = chatId;
 const session = attachMachine && workerSocket
@@ -51,7 +51,7 @@ let hubChatId: string | undefined, inspectParentChatId: string | undefined;
 try {
   // Before any renderer snapshot or input: exact allocation-bound historical
   // registration. Failure closes this helper; there is no startup retry loop.
-  if (allocationId) await session.registerStartup(allocationId, process.env.REX_BLOCK);
+  if (allocationId) await session.registerStartup(allocationId, process.env.REX_BLOCK, here ? { machineId: here.machineId, cwd: here.cwd } : undefined);
   if (attachMachine) await session.registerAttachment(attachMachine, here?.cwd);
   const startup = bootstrap ?? here;
   if (startup) {

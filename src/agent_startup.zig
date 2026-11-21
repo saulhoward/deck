@@ -27,7 +27,9 @@ const help =
     \\The chat stays empty until you send a message.
     \\Detach never stops work. Uncertain input requires explicit :retry / :discard.
     \\--resume resolves a name on this worker, never creates a new task.
-    \\--here creates or resumes in this terminal without a Rex task allocation.
+    \\--here creates or resumes here; inside Rex it registers this verified block
+    \\and client, without opening/moving a terminal. Prior allocations are refused.
+    \\Outside Rex it stays allocation-free. Partial/invalid Rex context is refused.
     \\It preserves the saved task workspace and requires attachment support on the hub.
     \\Advanced direct/legacy clients retain --tui, --no-tui and --launch-from.
     \\
@@ -95,8 +97,15 @@ fn selectedHub(o: Options, env: ?[]const u8) !?[]const u8 {
     if (!forward.remoteEndpoint(value) and !@import("rex_endpoint.zig").valid(value)) return error.InvalidHubEndpoint;
     return value;
 }
+fn hereRex(native: Native) !bool {
+    const session = native.environ.getPosix("REX_SESSION");
+    const block = native.environ.getPosix("REX_BLOCK");
+    if (session == null and block == null) return false;
+    if (session == null or block == null or !wire.validRexSessionId(.{ .string = session.? }) or !wire.validRexBlockId(.{ .string = block.? })) return error.InvalidHereRexContext;
+    return true;
+}
 fn localTarget(native: Native, a: std.mem.Allocator, cwd: []const u8, o: Options, cancelled: *std.atomic.Value(bool)) !wire.RexOpenTarget {
-    const result = try @import("rex_resolve.zig").resolve(native, a, cwd, try std.json.Stringify.valueAlloc(a, wire.RexTargetOptions{ .executable = o.rex, .server = o.server }, .{}), cancelled);
+    const result = try @import("rex_resolve.zig").resolve(native, a, cwd, try std.json.Stringify.valueAlloc(a, wire.RexTargetOptions{ .executable = o.rex, .server = o.server orelse (if (o.here and try hereRex(native)) native.environ.getPosix("REX_SERVER") else null) }, .{}), cancelled);
     if (!result.ok) return error.LocalRexUnavailable;
     return (try wire.parseRexOpenTarget(a, result.output)).value;
 }
@@ -104,7 +113,9 @@ fn control(native: Native, a: std.mem.Allocator, cwd: []const u8, kind: []const 
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(a, &.{ try @import("runtime_paths.zig").node(native, a), try @import("runtime_paths.zig").entry(native, a, null, "agent-control-main.js"), kind, selected, action, root });
     if (value) |v| try argv.append(a, v);
-    return @import("shell.zig").runArgvCaptured(native, a, cwd, argv.items, 15, cancelled);
+    const adoption = std.mem.eql(u8, action, "here-adopt");
+    const rex_context: ?@import("shell.zig").RexContext = if (adoption) .{ .session = native.environ.getPosix("REX_SESSION") orelse return error.InvalidHereRexContext, .block = native.environ.getPosix("REX_BLOCK") orelse return error.InvalidHereRexContext } else null;
+    return @import("shell.zig").runArgvCapturedContext(native, a, cwd, argv.items, if (adoption) 30 else 15, cancelled, rex_context);
 }
 fn ready(native: Native, a: std.mem.Allocator, cwd: []const u8, kind: []const u8, selected: []const u8, root: []const u8, cancelled: *std.atomic.Value(bool)) !Ready {
     const result = try control(native, a, cwd, kind, selected, root, "ready", null, cancelled);
@@ -284,7 +295,7 @@ fn wizard(init: std.process.Init, a: std.mem.Allocator, root: []const u8, id: []
         try native.io.sleep(.fromMilliseconds(50), .awake);
     }
     const binding = record.binding orelse return error.BootstrapLaunchUnconfirmed;
-    if (binding.pid != std.c.getpid() or !std.mem.eql(u8, binding.blockId, native.environ.getPosix("REX_BLOCK") orelse return error.InvalidBootstrap) or record.claim != null) return error.InvalidBootstrap;
+    if (record.here != null or binding.pid != std.c.getpid() or !std.mem.eql(u8, binding.blockId, native.environ.getPosix("REX_BLOCK") orelse return error.InvalidBootstrap) or record.claim != null) return error.InvalidBootstrap;
     const result = (try @import("agent_form.zig").run(init, record, a)) orelse return;
     if (result != .rex) return error.InvalidBootstrap;
     const scope = result.rex;
@@ -300,23 +311,68 @@ fn hereRecovery(native: Native, a: std.mem.Allocator, root: []const u8, worker_p
     if (o.mode != .recover and o.mode != .discard) return false;
     const path = try std.fs.path.join(a, &.{ try @import("rex_bootstrap.zig").path(native, a, root, o.value.?), "here.json" });
     const bytes = @import("mcp_profiles.zig").readPrivate(native, a, path, 16 * 1024) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+    if (bytes) |value| return hereRecoveryScope(native, a, root, worker_path, o, (try wire.parseAgentHereRecord(a, value)).value);
+    const registration = @import("rex_bootstrap.zig").load(native, a, root, o.value.?) catch |err| switch (err) {
         error.FileNotFound => return false,
         else => return err,
     };
-    const record = (try wire.parseAgentHereRecord(a, bytes)).value;
+    if (registration.here == null) return false;
+    return hereRecoveryScope(native, a, root, worker_path, o, registration);
+}
+fn hereRecoveryScope(native: Native, a: std.mem.Allocator, root: []const u8, worker_path: []const u8, o: Options, record: anytype) !bool {
     const c = try connection(native, a, worker_path);
     var directory = try storage.openDirectory(native, worker_path, false);
     defer directory.close(native.io);
     const machine = (try @import("state.zig").load(native.io, a, directory)).value.machine_id;
     if (!std.mem.eql(u8, record.id, o.value.?) or !std.mem.eql(u8, record.draftRoot, root) or !std.mem.eql(u8, record.hubId, c.hubId orelse return error.InvalidBootstrap) or !std.mem.eql(u8, record.machineId, machine) or !std.mem.eql(u8, record.workerSocket orelse return error.InvalidBootstrap, c.rexClient.socket)) return error.InvalidBootstrap;
-    return true; // Creation-only recovery uses its installed helper, never Rex.
+    return true; // HERE recovery uses the installed helper, never an older pinned renderer.
 }
-fn attach(init: std.process.Init, a: std.mem.Allocator, root: []const u8, port: []const u8, socket: ?[]const u8, scope: wire.AgentAttachment, startup_id: ?[]const u8) !void {
+fn attach(init: std.process.Init, a: std.mem.Allocator, root: []const u8, port: []const u8, socket: ?[]const u8, scope: wire.AgentAttachment, startup_id: ?[]const u8, allocation_id: ?[]const u8) !void {
     var args: std.ArrayList([]const u8) = .empty;
-    try args.appendSlice(a, &.{ "--tui", "--port", port, "--hub-id", scope.hubId, "--task", scope.chatId, "--attach-machine", scope.machineId, "--client-state", root });
+    try args.appendSlice(a, &.{ "--tui", "--port", port, "--hub-id", scope.hubId, "--task", scope.chatId, "--client-state", root });
+    if (allocation_id) |id| try args.appendSlice(a, &.{ "--rex-allocation", id }) else try args.appendSlice(a, &.{ "--attach-machine", scope.machineId });
     if (socket) |value| try args.appendSlice(a, &.{ "--worker-socket", value });
     if (startup_id) |id| try args.appendSlice(a, &.{ "--here-startup", id });
     try @import("tui.zig").run(init, args.items);
+}
+// Registration belongs to native launcher startup, never to the task renderer.
+// The exact private proof and a single-send fence survive uncertain replies.
+fn attachHere(init: std.process.Init, a: std.mem.Allocator, root: []const u8, cwd: []const u8, o: Options, kind: []const u8, endpoint: []const u8, worker_path: ?[]const u8, client: []const u8, target: ?wire.RexOpenTarget, scope: wire.AgentAttachment, startup_id: ?[]const u8, cancelled: *std.atomic.Value(bool)) !void {
+    const native: Native = .{ .io = init.io, .environ = init.minimal.environ };
+    const c = if (worker_path) |path| try connection(native, a, path) else null;
+    const socket = if (c) |conn| conn.rexClient.socket else null;
+    const port = try std.fmt.allocPrint(a, "{d}", .{o.port});
+    if (!try hereRex(native)) return attach(init, a, root, port, socket, scope, startup_id, null);
+    const context_read = try control(native, a, cwd, kind, endpoint, root, "here-context", scope.chatId, cancelled);
+    if (!context_read.result.ok or context_read.stderr.len != 0) {
+        try std.Io.File.stderr().writeStreamingAll(native.io, context_read.stderr);
+        return error.HereRexRegistrationRefused;
+    }
+    const context = (try wire.parseRexHereContext(a, context_read.stdout)).value;
+    if (!std.mem.eql(u8, context.hubId, scope.hubId) or !std.mem.eql(u8, context.machineId, scope.machineId) or !std.mem.eql(u8, context.chatId, scope.chatId) or !@import("mcp_profiles.zig").absolute(context.cwd)) return error.InvalidHubIdentity;
+    const base: wire.RexBootstrapRecord = .{ .version = 1, .id = try uuid(native, a), .hubId = scope.hubId, .machineId = scope.machineId, .cwd = context.cwd, .client = if (c) |conn| conn.rexClient.executable else client, .draftRoot = root, .port = o.port, .workerSocket = socket, .target = target orelse try localTarget(native, a, cwd, o, cancelled) };
+    const record = try @import("rex_here.zig").capture(native, a, base, scope.chatId, cancelled);
+    if ((try std.json.Stringify.valueAlloc(a, record, .{})).len > 16 * 1024) return error.HereProofTooLarge;
+    var starts = try storage.directory(native, try std.fs.path.join(a, &.{ root, "startups" }));
+    defer starts.close(native.io);
+    var directory = try storage.directory(native, try @import("rex_bootstrap.zig").path(native, a, root, record.id));
+    defer directory.close(native.io);
+    try storage.save(native, a, directory, "record.json", record);
+    try storage.save(native, a, starts, try std.fmt.allocPrint(a, "{s}.json", .{record.id}), wire.RexBootstrapIndex{ .version = 1, .id = record.id, .hubId = record.hubId, .machineId = record.machineId });
+    const result = try control(native, a, cwd, kind, endpoint, root, "here-adopt", record.id, cancelled);
+    if (!result.result.ok or result.stderr.len != 0) {
+        try std.Io.File.stderr().writeStreamingAll(native.io, result.stderr);
+        try std.Io.File.stderr().writeStreamingAll(native.io, try std.fmt.allocPrint(a, "deck: Rex registration unconfirmed; saved startup {s}. Inspect the task allocation before any explicit recovery. No replacement, terminal opening or input replayed.\n", .{record.id}));
+        return error.HereRexRegistrationUnconfirmed;
+    }
+    const result_scope = (try wire.parseAgentWizardReady(a, result.stdout)).value;
+    const saved = try @import("rex_bootstrap.zig").load(native, a, root, record.id);
+    const claim = saved.claim orelse return error.HereRexRegistrationUnconfirmed;
+    if (!std.mem.eql(u8, scope.chatId, result_scope.chatId) or !std.mem.eql(u8, claim.chatId, scope.chatId) or !std.mem.eql(u8, claim.allocationId, result_scope.allocationId)) return error.HereRexRegistrationUnconfirmed;
+    return attach(init, a, root, port, socket, scope, startup_id, result_scope.allocationId);
 }
 pub fn run(init: std.process.Init, args: []const []const u8) !void {
     const native: Native = .{ .io = init.io, .environ = init.minimal.environ };
@@ -327,6 +383,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     if (args.len == 4 and std.mem.eql(u8, args[0], "--wizard") and std.mem.eql(u8, args[2], "--client-state")) return wizard(init, a, args[3], args[1]);
     const o = try options(args);
     if (o.here and (std.c.isatty(0) != 1 or std.c.isatty(1) != 1)) return error.InteractiveTerminalRequired;
+    const here_rex = o.here and try hereRex(native);
     const selected = try selectedHub(o, native.environ.getPosix("DECK_HUB_REX_HOST"));
     const cwd = try std.process.currentPathAlloc(native.io, a);
     const root = try @import("state.zig").clientDirectory(native, a, o.directory);
@@ -353,10 +410,10 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
                 try std.Io.File.stderr().writeStreamingAll(native.io, "deck: upgrade deferred; listing through the verified pinned client without changing the worker\n");
                 break :blk try workerDirectory(native, a, root, hub, executable, remote.value, o.port, client, cwd, &cancelled, false);
             };
-            // Here is an explicitly selected client of the existing launcher,
-            // not a Rex allocation under the worker's executable pin. Verify
-            // old pins as usual, but run the installed renderer without changing
-            // the daemon/client pins or asking a legacy client to parse --here.
+            // HERE uses the installed renderer without changing daemon/client
+            // pins. Outside Rex it remains an attachment. Inside Rex the proof
+            // records this actual native process separately from the approved
+            // launch wrapper; an unsupported worker refuses adoption.
             if (!o.here) if (selected_worker.reuse_client) |saved_client| {
                 here_recovery = try hereRecovery(native, a, root, selected_worker.directory, o);
                 if (!here_recovery) return worker_client.replace(native, a, saved_client, args);
@@ -367,6 +424,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
     const kind: []const u8 = if (worker_path != null) "worker" else "local";
     const endpoint = worker_path orelse port;
     const connected = try ready(native, a, cwd, kind, endpoint, root, &cancelled);
+    if (here_rex and target == null) target = try localTarget(native, a, cwd, o, &cancelled);
     if (o.here and o.mode == .@"resume") {
         if (worker_path) |path| if (try @import("worker_handoff.zig").load(native, a, path)) |pending| if (pending.phase != .deferred) return error.WorkerUpgradeUnconfirmed;
         const result = try control(native, a, cwd, kind, endpoint, root, "attach", o.value, &cancelled);
@@ -377,7 +435,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
         const attachment = (try wire.parseAgentAttachment(a, result.stdout)).value;
         if (!std.mem.eql(u8, attachment.hubId, connected.hubId) or !std.mem.eql(u8, attachment.machineId, connected.machineId) or (std.fmt.parseInt(u64, attachment.chatId, 10) catch return error.InvalidHubIdentity) > 9007199254740991) return error.InvalidHubIdentity;
         // No startup/creation lock is held for the lifetime of this renderer.
-        return attach(init, a, root, port, if (worker_path) |path| (try connection(native, a, path)).rexClient.socket else null, attachment, null);
+        return attachHere(init, a, root, cwd, o, kind, endpoint, worker_path, client, target, attachment, null, &cancelled);
     }
     const starts_path = try std.fs.path.join(a, &.{ root, "startups" });
     var starts = try storage.directory(native, starts_path);
@@ -428,6 +486,10 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
         return;
     }
     if (o.here) {
+        if (here_rex) {
+            const base: wire.RexBootstrapRecord = .{ .version = 1, .id = try uuid(native, a), .hubId = connected.hubId, .machineId = connected.machineId, .cwd = cwd, .client = client, .draftRoot = root, .port = o.port, .target = target.? };
+            _ = try @import("rex_here.zig").capture(native, a, base, "1", &cancelled); // Read-only; no task identity reserved.
+        }
         const prepared = try control(native, a, cwd, kind, endpoint, root, "prepare", null, &cancelled);
         if (!prepared.result.ok) {
             try std.Io.File.stderr().writeStreamingAll(native.io, prepared.stderr);
@@ -445,7 +507,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
             if (created != .here) return error.InvalidBootstrap;
             launch_lock.close(native.io);
             lock_held = false;
-            return attach(init, a, root, port, record.workerSocket, created.here, record.id);
+            return attachHere(init, a, root, cwd, o, kind, endpoint, worker_path, client, target, created.here, record.id, &cancelled);
         }
         // The helper has closed before this read. No durable form means it
         // could not have dispatched creation; retain every uncertain draft.

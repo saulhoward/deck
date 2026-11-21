@@ -11,12 +11,13 @@ import type { ExecutionEnv } from "@earendil-works/pi-durable/env";
 import { instructionSnapshot, projectInstructionTask } from "./instructions-view.js";
 import { projectProgress } from "./progress.js";
 import { configurationIdle, importingInstructions, instructionHash, instructionImport, IMPORT_KIND, InstructionRequest, InstructionSourceDoc, type InstructionImportResult } from "./instruction-import.js";
+import { rexSocketPath } from "./rex-endpoint.js";
 import { RexInspector } from "./rex-inspection.js";
 import { rexReconciliation, RexReconcileRequest, allocationRequest, type ReconcileResult } from "./rex-reconciliation.js";
 import { validOpenManagedChildArgs, validOpenArgs, validAdoptArgs, validResolvedTarget } from "./rex-open-contracts.js";
 import { validRexAllocationPlan, validRexAllocationReceiptQuery, type OpenManagedChildArgs, type OpenManagedChildAck, type RexOpenArgs, type RexOpenAck, type RexAdoptArgs, type RexAdoptAck, type RexStatusSnapshot, type ChatListPage, type ActivitySnapshot } from "./generated/contracts.js";
 import { prefixUnits } from "./view-text.js";
-import { REX_KIND, rexAllocation, RexDoc, RexRequest, rexCoherent, rexTarget, rexUuid, rexBlock, rexStartup, type RexInput, type RexTarget, type RexResult } from "./rex-allocation.js";
+import { REX_KIND, rexAllocation, RexDoc, RexRequest, RexHereBlock, rexHereBlockConflict, rexCoherent, rexTarget, rexUuid, rexBlock, rexStartup, type RexInput, type RexTarget, type RexResult } from "./rex-allocation.js";
 import { bindImplementation, checkCompatibility, defaultImplementation, stampImplementation } from "./compatibility.js";
 import { nativeFiles, type HostFiles } from "./host-files.js";
 import { foregroundSubagent } from "./subagent.js";
@@ -146,6 +147,9 @@ export class DeckRuntime {
   get localFiles() { return !!this.config.host; }
   get localMachineId() { return this.config.machineId; }
   get rexClient() { return this.config.rexClient; }
+  supportsHereAdoption(machineId: string): boolean {
+    return !!this.rexClient && !!this.config.host && (machineId === this.localMachineId || !!this.config.host.rexClientFor?.(machineId));
+  }
   get authentication() { return this.config.authentication; }
 
   static async open(path: string, options: RuntimeOptions): Promise<DeckRuntime> {
@@ -584,11 +588,24 @@ export class DeckRuntime {
         if (expectedBinding && (current.machineId !== expectedBinding.machineId || current.cwd !== expectedBinding.cwd)) throw new DeckError("settings_changed", "Saved Rex worker/cwd changed");
         if (!this.localFiles) throw new DeckError("offline", "Rex allocation requires the assigned native worker");
         const doc = await tx.doc(RexDoc, chat.id);
-        if (doc.taskId && !replacement) throw new DeckError("conflict", "This chat already has a Rex allocation attempt; use explicit open/reopen for a new attempt");
+        if (doc.taskId && (!replacement || saved.bootstrap?.kind === "here")) throw new DeckError("conflict", "This chat already has a Rex allocation attempt; use explicit open/reopen for a new attempt");
         if (replacement && doc.taskId !== replacement.priorTaskId) throw new DeckError("conflict", "Rex attempt changed; inspect before opening again");
         if (doc.taskId && (await tx.task(doc.taskId as TaskId))?.state.status !== "terminal") throw new DeckError("busy", "Rex creation is still pending; inspect status before another attempt");
         signal?.throwIfAborted();
+        // Exact request replay returned above, before touching the global fence.
+        // The private native HERE record still authorizes only its pinned chat;
+        // this reservation prevents competing canonical allocations across roots.
+        const blockKey = saved.bootstrap?.kind === "here" ? createHash("sha256").update(JSON.stringify([current.machineId, rexSocketPath(saved.server), saved.hostId, saved.instanceId, saved.bootstrap.blockId])).digest("hex") : undefined;
+        const claimHash = createHash("sha256").update(JSON.stringify([hash, requestId])).digest("hex");
+        const block = blockKey ? await tx.doc(RexHereBlock, blockKey, claimHash) : undefined;
+        if (block && (block.hash !== claimHash || block.taskId)) throw new DeckError("conflict", "This Rex block already has an adoption reservation; no replacement or replay");
+        if (saved.bootstrap?.kind === "here") {
+          const conflict = await rexHereBlockConflict(tx, current.machineId, saved, saved.bootstrap.blockId);
+          if (conflict) throw new DeckError("conflict", conflict === "limit" ? "Rex allocation history exceeds the safe adoption scan limit" : "This Rex block already has a canonical allocation or bootstrap claim");
+          signal?.throwIfAborted();
+        }
         const taskId = await this.createTerminalAllocation(tx, chat.id, current, saved, replacement?.sessionId);
+        if (block) block.taskId = taskId;
         receipt.taskId = taskId;
         return taskId;
       }, context);
@@ -608,7 +625,7 @@ export class DeckRuntime {
     return taskId;
   }
 
-  // First claim of an already-running, native-provenanced wizard block. The
+  // First claim of an already-running, native-provenanced wizard or HERE block. The
   // native worker checks its private record, exact process and saved task host.
   // Exact retries retrieve the same Pi allocation task; they do not re-adopt.
   async adoptTerminal(args: RexAdoptArgs): Promise<RexAdoptAck> {
@@ -622,7 +639,7 @@ export class DeckRuntime {
     const taskId = await this.allocateTerminal(args.chatId, args.requestId, target, undefined, { machineId: binding.machineId, cwd: binding.cwd });
     const task = await this.harness.getTask(taskId, context);
     const input = task?.input as RexInput | undefined;
-    if (!input?.plan.allocationId || input.plan.bootstrap?.id !== args.bootstrap.id || input.plan.bootstrap.blockId !== args.bootstrap.blockId) throw new DeckError("conflict", "Bootstrap admission unconfirmed");
+    if (!input?.plan.allocationId || input.plan.bootstrap?.id !== args.bootstrap.id || input.plan.bootstrap.blockId !== args.bootstrap.blockId || input.plan.bootstrap.kind !== args.bootstrap.kind) throw new DeckError("conflict", "Bootstrap admission unconfirmed");
     return { version: 1, hubId: this.hubId, chatId: args.chatId, requestId: args.requestId, taskId: String(taskId), allocationId: input.plan.allocationId };
   }
 
@@ -658,7 +675,7 @@ export class DeckRuntime {
       if (sample.status !== "sampled" || !sample.observation) throw new DeckError("conflict", "Rex inspection unavailable or changed; no new terminal requested");
       const state = sample.observation.state;
       if (state === "running") return ack(doc.taskId, "reused");
-      if (state === "exited" || state === "missing_terminal") sessionId = doc.binding.sessionId;
+      if (state === "exited" || state === "client_exited" || state === "missing_terminal") sessionId = doc.binding.sessionId;
       else if (state !== "missing_session") throw new DeckError("conflict", "Rex terminal is pending, unavailable or inconclusive; no new terminal requested");
     }
     const taskId = await this.allocateTerminal(args.chatId, args.requestId, saved, undefined, undefined, { priorTaskId: doc?.taskId ?? 0, ...(sessionId ? { sessionId } : {}) });
@@ -710,7 +727,7 @@ export class DeckRuntime {
       }
       const sample = await this.inspectTerminal(args.chatId);
       if (sample.status !== "sampled" || sample.taskId !== String(before.parentRex.taskId) || !sample.observation
-        || !["running", "exited", "missing_terminal"].includes(sample.observation.state)
+        || !["running", "exited", "client_exited", "missing_terminal"].includes(sample.observation.state)
         || sample.observation.scope.sessionId !== binding.sessionId) throw new DeckError("conflict", "Parent Rex session is unavailable or unconfirmed; no child terminal requested");
       let reuse = false;
       if (before.childRex?.taskId) {
@@ -725,7 +742,7 @@ export class DeckRuntime {
         if (before.childRex.binding) {
           const childSample = await this.inspectTerminal(args.childId);
           if (childSample.status !== "sampled" || !childSample.observation || childSample.observation.scope.sessionId !== binding.sessionId
-            || !["running", "exited", "missing_terminal"].includes(childSample.observation.state)) throw new DeckError("conflict", "Child Rex state is unconfirmed; no new terminal requested");
+            || !["running", "exited", "client_exited", "missing_terminal"].includes(childSample.observation.state)) throw new DeckError("conflict", "Child Rex state is unconfirmed; no new terminal requested");
           reuse = childSample.observation.state === "running";
         } else if (task.state.outcome.status !== "completed" || (task.state.outcome.result as RexResult)?.status !== "not_allocated") throw new DeckError("conflict", "Previous child Rex allocation is unconfirmed; inspect/reconcile before an explicit new attempt");
       }
@@ -761,7 +778,7 @@ export class DeckRuntime {
     const chat = await this.chat(id);
     const doc = await this.harness.snapshot(RexDoc, chat.id, context);
     const task = doc?.taskId ? await this.harness.getTask(doc.taskId as TaskId, context) : undefined;
-    let status: RexStatusSnapshot["status"] = "unallocated";
+    let status: RexStatusSnapshot["status"] = doc?.taskId ? "uncertain" : "unallocated";
     if (task) {
       status = "pending";
       if (task.state.status === "terminal") {
@@ -773,7 +790,7 @@ export class DeckRuntime {
     // Like other live views these reads are samples, not an atomic health lease.
     // A binding commit observed after our document sample needs another read.
     if (status === "allocated" && !doc?.binding) status = "pending";
-    return { version: 1, hubId: this.hubId, chatId: id, taskId: task ? String(task.id) : null, status, binding: doc?.binding ?? null, previousBinding: doc?.previousBinding ?? null, bestEffort: true };
+    return { version: 1, hubId: this.hubId, chatId: id, taskId: doc?.taskId ? String(doc.taskId) : null, status, binding: doc?.binding ?? null, previousBinding: doc?.previousBinding ?? null, bestEffort: true };
   }
 
   // Explicit internal provenance repair only. Never creates/replaces Rex objects.

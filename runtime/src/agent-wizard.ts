@@ -28,6 +28,7 @@ function title(problem: string): string {
   return value || "New task";
 }
 export async function startupDraft(record: StartupRecord, files: StartupFiles): Promise<AgentStartupDraft | undefined> {
+  if (!isHere(record) && record.here) throw new Error("HERE adoption is not a creation form");
   const form = await files.read("form.json");
   if (form === undefined) return;
   if (!validAgentStartupDraft(form) || (isHere(record) ? form.adoptionId !== undefined || form.inputId !== undefined : !form.adoptionId) || form.bootstrapId !== record.id || form.hubId !== record.hubId || form.machineId !== record.machineId || form.cwd !== record.cwd || !form.problem.trim() || !validBriefBinding(form.title, form.cwd) || !validBrief(briefFields(form))) throw new Error("Invalid exact startup draft; nothing replayed");
@@ -49,7 +50,7 @@ export class AgentWizard {
   private ready: AgentWizardResponse["ready"];
   private attachment: AgentWizardResponse["attachment"];
   constructor(readonly record: StartupRecord, readonly files: StartupFiles, private readonly transport: WizardTransport) {
-    if (!isHere(record) && !record.binding) throw new Error("Bootstrap has no verified terminal");
+    if (!isHere(record) && (record.here || !record.binding)) throw new Error("Bootstrap has no verified terminal");
     if (isHere(record)) this.notice = "Nothing created. Create & attach saves the brief; no Rex terminal or input is created.";
   }
   private async creation(form: AgentStartupDraft): Promise<string> {

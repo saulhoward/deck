@@ -160,7 +160,7 @@ fn process(value: Value) !struct { state: State, exit: ?i64 } {
     return if (child != .null or foreground != .null) .{ .state = .running, .exit = null } else if (code != null) .{ .state = .exited, .exit = code } else .{ .state = .pending, .exit = null };
 }
 fn failure(err: anyerror) State {
-    return if (err == error.BindingConflict) .conflict else .inconclusive;
+    return if (err == error.BindingConflict or err == error.ProcessConflict or err == error.InvalidBootstrap or err == error.NotForeground) .conflict else .inconclusive;
 }
 fn objects(native: Native, allocator: std.mem.Allocator, cwd: []const u8, query: Query, cancelled: *std.atomic.Value(bool)) !Observation {
     var observation = Observation{ .version = 1, .scope = query.scope, .state = .inconclusive, .exitCode = null, .revision = null };
@@ -201,6 +201,39 @@ fn objects(native: Native, allocator: std.mem.Allocator, cwd: []const u8, query:
     }
     return observation;
 }
+// Private provenance is mandatory for here-mode queries; never silently fall
+// back to the ordinary terminal-root liveness check if a record is unreadable.
+fn legacyMode(native: Native, a: std.mem.Allocator, bootstrap: wire.RexBootstrapClaim) !void {
+    try @import("rex_bootstrap.zig").mode(try @import("rex_bootstrap.zig").load(native, a, bootstrap.root, bootstrap.id), bootstrap);
+}
+fn hereRecord(native: Native, a: std.mem.Allocator, query: Query) !wire.RexBootstrapRecord {
+    const claim = query.bootstrap orelse return error.BindingConflict;
+    const record = try @import("rex_bootstrap.zig").load(native, a, claim.root, claim.id);
+    try @import("rex_bootstrap.zig").mode(record, claim);
+    const here = record.here orelse return error.BindingConflict;
+    const owner = record.claim orelse return error.BindingConflict;
+    const b = record.binding orelse return error.BindingConflict;
+    if (!std.mem.eql(u8, owner.chatId, here.chatId) or !std.mem.eql(u8, claim.blockId, b.blockId) or
+        !std.mem.eql(u8, query.executable, record.target.executable) or !std.mem.eql(u8, query.scope.server, record.target.server) or
+        !std.mem.eql(u8, query.scope.hostId, record.target.hostId) or !std.mem.eql(u8, query.scope.instanceId, record.target.instanceId) or
+        !std.mem.eql(u8, query.scope.sessionId, b.sessionId) or !std.mem.eql(u8, query.scope.windowId, b.windowId) or !std.mem.eql(u8, query.scope.blockId, b.blockId)) return error.BindingConflict;
+    return record;
+}
+fn herePresence(native: Native, a: std.mem.Allocator, query: Query, observation: *Observation, cancelled: *std.atomic.Value(bool)) !void {
+    const record = try hereRecord(native, a, query);
+    // An unstable/conflicting session sample must never become client_exited.
+    switch (observation.state) {
+        .running, .pending, .exited => {},
+        else => return,
+    }
+    switch (try @import("rex_here.zig").verify(native, a, record, cancelled)) {
+        .running => {
+            if (observation.state != .running) return error.BindingConflict;
+        },
+        .exited => observation.state = .client_exited,
+    }
+    observation.exitCode = null;
+}
 pub fn inspect(native: Native, allocator: std.mem.Allocator, cwd: []const u8, encoded: []const u8, cancelled: *std.atomic.Value(bool)) !shell.Result {
     if (encoded.len > 16 * 1024) return .{ .ok = false, .code = "invalid", .output = "invalid" };
     const parsed = wire.parseRexInspectionQuery(allocator, encoded) catch return .{ .ok = false, .code = "invalid", .output = "invalid" };
@@ -214,6 +247,21 @@ pub fn inspect(native: Native, allocator: std.mem.Allocator, cwd: []const u8, en
             observation.state = failure(err);
             break :blk observation;
         };
+        if (query.bootstrap) |bootstrap| {
+            if (bootstrap.kind != null) {
+                herePresence(native, allocator, query, &observation, cancelled) catch |err| {
+                    observation.state = failure(err);
+                    observation.exitCode = null;
+                };
+            } else {
+                // A stripped here marker must not silently fall back to shell
+                // liveness. Queries without any bootstrap remain unchanged.
+                legacyMode(native, allocator, bootstrap) catch |err| {
+                    observation.state = failure(err);
+                    observation.exitCode = null;
+                };
+            }
+        }
         switch (identity(native, allocator, cwd, query, cancelled)) {
             .same => {},
             .changed => observation.state = .identity_changed,

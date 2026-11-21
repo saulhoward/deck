@@ -23,6 +23,11 @@ pub fn load(native: Native, a: std.mem.Allocator, client_root: []const u8, id: [
     const value = (try wire.parseRexBootstrapRecord(a, bytes)).value;
     if (!std.mem.eql(u8, value.id, id) or !std.mem.eql(u8, value.draftRoot, client_root) or !@import("mcp_profiles.zig").absolute(value.cwd) or !@import("mcp_profiles.zig").absolute(value.client) or !@import("mcp_profiles.zig").absolute(value.draftRoot) or !@import("mcp_profiles.zig").absolute(value.target.executable) or !@import("rex_endpoint.zig").valid(value.target.server)) return error.InvalidBootstrap;
     if (value.workerSocket) |socket| if (!@import("mcp_profiles.zig").absolute(socket) or socket.len > 100) return error.InvalidBootstrap;
+    if (value.here) |here| {
+        const binding = value.binding orelse return error.InvalidBootstrap;
+        if (binding.pid != here.process.pid) return error.InvalidBootstrap;
+        if (value.claim) |claim| if (!std.mem.eql(u8, claim.chatId, here.chatId)) return error.InvalidBootstrap;
+    }
     return value;
 }
 fn cli(native: Native, a: std.mem.Allocator, cwd: []const u8, target: wire.RexOpenTarget, suffix: []const []const u8, cancelled: *std.atomic.Value(bool)) !shell.Captured {
@@ -44,7 +49,7 @@ fn process(native: Native, a: std.mem.Allocator, record: wire.RexBootstrapRecord
     return child.pid;
 }
 pub fn launch(native: Native, a: std.mem.Allocator, record: wire.RexBootstrapRecord, cancelled: *std.atomic.Value(bool)) !wire.RexBootstrapBinding {
-    if (record.binding != null or record.claim != null) return error.InvalidBootstrap;
+    if (record.binding != null or record.claim != null or record.here != null) return error.InvalidBootstrap;
     const root = try path(native, a, record.draftRoot, record.id);
     var dir = try storage.directory(native, root);
     defer dir.close(native.io);
@@ -71,6 +76,11 @@ pub fn launch(native: Native, a: std.mem.Allocator, record: wire.RexBootstrapRec
     try storage.save(native, a, dir, "record.json", saved);
     return binding;
 }
+/// Never interpret an unfamiliar/stripped mode as the legacy wizard path.
+pub fn mode(record: wire.RexBootstrapRecord, claim: wire.RexBootstrapClaim) !void {
+    if (claim.kind) |kind| if (!std.mem.eql(u8, kind, "here")) return error.InvalidBootstrap;
+    if ((claim.kind != null) != (record.here != null)) return error.InvalidBootstrap;
+}
 pub fn adopt(native: Native, a: std.mem.Allocator, cwd: []const u8, machine: []const u8, plan: wire.RexAllocationPlan, cancelled: *std.atomic.Value(bool)) !shell.Result {
     const bootstrap = plan.bootstrap orelse return error.InvalidBootstrap;
     const root = try path(native, a, bootstrap.root, bootstrap.id);
@@ -80,6 +90,8 @@ pub fn adopt(native: Native, a: std.mem.Allocator, cwd: []const u8, machine: []c
     defer held.close(native.io);
     var record = try load(native, a, bootstrap.root, bootstrap.id);
     const binding = record.binding orelse return error.BootstrapLaunchUnconfirmed;
+    try mode(record, bootstrap);
+    if (record.here) |here| if (!std.mem.eql(u8, here.chatId, plan.chatId)) return error.InvalidBootstrap;
     if (plan.allocationId == null or plan.clientState == null or !std.mem.eql(u8, plan.clientState.?, record.draftRoot) or !std.mem.eql(u8, record.hubId, plan.hubId) or !std.mem.eql(u8, record.machineId, machine) or !std.mem.eql(u8, record.cwd, cwd) or !std.mem.eql(u8, record.client, plan.client) or record.port != plan.port or
         !std.mem.eql(u8, record.target.executable, plan.executable) or !std.mem.eql(u8, record.target.server, plan.server) or !std.mem.eql(u8, record.target.hostId, plan.hostId) or !std.mem.eql(u8, record.target.instanceId, plan.instanceId) or !std.mem.eql(u8, binding.blockId, bootstrap.blockId)) return error.InvalidBootstrap;
     if ((record.workerSocket == null) != (plan.workerSocket == null)) return error.InvalidBootstrap;
@@ -87,10 +99,14 @@ pub fn adopt(native: Native, a: std.mem.Allocator, cwd: []const u8, machine: []c
     if (plan.sessionId) |sid| if (!std.mem.eql(u8, sid, binding.sessionId)) return error.InvalidBootstrap;
     if (record.claim) |claim| if (!std.mem.eql(u8, claim.chatId, plan.chatId) or !std.mem.eql(u8, claim.allocationId, plan.allocationId.?)) return error.BootstrapAlreadyClaimed;
     try identity(native, a, record.target, cancelled);
-    if (try process(native, a, record, binding, cancelled) != binding.pid) return error.BootstrapNotRunning;
+    if (record.here == null and try process(native, a, record, binding, cancelled) != binding.pid) return error.BootstrapNotRunning;
     const query: wire.RexInspectionQuery = .{ .executable = plan.executable, .scope = .{ .server = plan.server, .hostId = plan.hostId, .instanceId = plan.instanceId, .sessionId = binding.sessionId, .windowId = binding.windowId, .blockId = binding.blockId } };
     const inspected = try @import("rex_inspect.zig").inspect(native, a, cwd, try std.json.Stringify.valueAlloc(a, query, .{}), cancelled);
     if (!inspected.ok or (try wire.parseRexInspectionObservation(a, inspected.output)).value.state != .running or cancelled.load(.acquire)) return error.BootstrapNotRunning;
+    // The ordinary sample proves coherent Rex membership. Here mode must ALSO
+    // prove the old Deck client, not merely the shell which survives its detach.
+    // No inspection claim is sent yet: admission is what creates that claim.
+    if (record.here != null and try @import("rex_here.zig").verify(native, a, record, cancelled) != .running) return error.BootstrapNotRunning;
     record.claim = .{ .chatId = plan.chatId, .allocationId = plan.allocationId.? };
     try storage.save(native, a, dir, "record.json", record);
     const creation: wire.RexCreation = .{ .version = 1, .server = plan.server, .hostId = plan.hostId, .instanceId = plan.instanceId, .sessionId = binding.sessionId, .windowId = binding.windowId, .blockId = binding.blockId, .chatId = plan.chatId, .hubId = plan.hubId, .allocationId = plan.allocationId, .readiness = "not_checked" };

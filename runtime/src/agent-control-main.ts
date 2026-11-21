@@ -1,5 +1,6 @@
 // Readiness/list/resume for the native launcher. The endpoint is already
 // selected and pinned; this helper never falls back or starts a runtime.
+import { hereContext, hereTransport, currentHereRecord, adoptHere, inspectHereRegistration } from "./here-adoption.js";
 import { randomUUID } from "node:crypto";
 import { hubCommand } from "./hub-client.js";
 import { launcherCommand, rexLauncherTarget } from "./launcher-client.js";
@@ -12,7 +13,7 @@ import { DraftStore } from "./drafts.js";
 import { attachedCommand } from "./attached-client.js";
 const [kind, selected, action, root, value, ...extra] = process.argv.slice(2);
 async function main() {
-  if (extra.length || !selected || !root?.startsWith("/") || !["local", "worker"].includes(kind ?? "") || !["ready", "prepare", "upgrade-ready", "list", "resume", "attach", "drafts", "discard", "discard-startup", "recover"].includes(action ?? "") || ((action === "resume" || action === "attach" || action === "discard" || action === "discard-startup" || action === "recover") !== (value !== undefined))) throw new Error("Invalid agent launch options");
+  if (extra.length || !selected || !root?.startsWith("/") || !["local", "worker"].includes(kind ?? "") || !["ready", "prepare", "upgrade-ready", "list", "resume", "attach", "drafts", "discard", "discard-startup", "recover", "here-context", "here-adopt"].includes(action ?? "") || ((action === "here-context" || action === "here-adopt" || action === "resume" || action === "attach" || action === "discard" || action === "discard-startup" || action === "recover") !== (value !== undefined))) throw new Error("Invalid agent launch options");
   const port = kind === "local" ? Number(selected) : 52800;
   const remote = kind === "worker" ? await rexLauncherTarget(selected) : undefined;
   const status = remote ? undefined : await hubCommand(port, "status");
@@ -28,6 +29,16 @@ async function main() {
     const result = await hubCommand(port, "list_chats", { limit: 25, ...(after ? { after } : {}) }, hubId) as ChatListPage;
     return { items: result.items.filter((row: any) => row.kind === "task" && !row.parentChatId && row.machineId === machineId), ...(result.next ? { next: result.next } : {}) };
   };
+  if (action === "here-context" || action === "here-adopt") {
+    const endpoint = { hubId, machineId, port: remote?.hubPort ?? port, ...(remote ? { workerSocket: remote.socket } : {}) };
+    const signal = AbortSignal.timeout(25_000), transport = hereTransport(endpoint, signal);
+    if (action === "here-context") process.stdout.write(JSON.stringify(await hereContext(endpoint, value!, transport)));
+    else {
+      const record = await currentHereRecord(root, value!, endpoint);
+      process.stdout.write(JSON.stringify(await adoptHere(record, new StartupFiles(bootstrapPath(root, record.id)), transport, { signal })));
+    }
+    return;
+  }
   const first = await page(); // Actual scoped relay handshake, not a PID file.
   if (action === "ready") { process.stdout.write(JSON.stringify({ hubId, machineId })); return; }
   const store = new LauncherDrafts({hubId, machineId}, root);
@@ -43,7 +54,12 @@ async function main() {
     return;
   }
   if (action === "drafts") {
-    for (const index of indexes) process.stdout.write(`${index.id} startup (inspect original creation form, or --recover ID --confirm; no automatic replay)\n`);
+    for (const index of indexes) {
+      const record = await startupRecord(root, index.id).catch(error => { if (missing(error)) return undefined; throw error; });
+      process.stdout.write(record && "here" in record && record.here
+        ? `${index.id} here-registration (task ${record.here.chatId}; --recover ID --confirm reads status only; no registration replay)\n`
+        : `${index.id} startup (inspect original creation form, or --recover ID --confirm; no automatic replay)\n`);
+    }
     for (const draft of await store.list()) process.stdout.write(`${draft.args.requestId} ${draft.command}\n`);
     return;
   }
@@ -57,7 +73,7 @@ async function main() {
       const record = await startupRecord(root, id).catch(error => { if (missing(error)) return undefined; throw error; });
       if (record && (record.hubId !== hubId || record.machineId !== machineId || record.draftRoot !== root)) throw new Error("Invalid startup scope");
       await files.publish("discarded.json", { version: 1 }).catch(error => { if (!missing(error)) throw error; });
-      if (record) {
+      if (record && !("here" in record && record.here)) {
         const form = await startupDraft(record, files);
         if (form?.inputId) await new DraftStore(hubId, root).remove(form.inputId);
       }
@@ -71,6 +87,12 @@ async function main() {
     if (!index) throw new Error("Unresolved startup ID not found on this worker");
     const record = await startupRecord(root, index.id);
     if (record.hubId !== hubId || record.machineId !== machineId || record.draftRoot !== root || record.workerSocket !== remote?.socket || (!remote && record.port !== port)) throw new Error("Invalid startup scope");
+    if ("here" in record && record.here) {
+      const signal = AbortSignal.timeout(15_000);
+      const observed = await inspectHereRegistration(record, hereTransport({ hubId, machineId, port: remote?.hubPort ?? port, ...(remote ? { workerSocket: remote.socket } : {}) }, signal));
+      process.stdout.write(`HERE registration for task ${record.here.chatId}: sampled ${observed.status}${observed.taskId ? ` (allocation task ${observed.taskId})` : ""}. This is retained metadata, not current client health or proof that an earlier attempt never applied. No registration or input replayed; private evidence retained. Inspect/reconcile an uncertain allocation before an explicit open. --discard ID --confirm removes only the local index, never the allocation or its block reservation.\n`);
+      return;
+    }
     recoveredChat = await new AgentWizard(record, new StartupFiles(bootstrapPath(root, record.id)), wizardTransport(record, new AbortController().signal)).recoverCreation();
   }
   const tasks = first.items; let after = first.next;
@@ -107,7 +129,7 @@ async function main() {
 }
 void main().catch(error => {
   // No nested transport/provider diagnostics or request bodies.
-  const allowed = error instanceof Error && /^(Invalid agent|Local hub lacks|Task name|Task listing|Task attachment|Unresolved launcher)/.test(error.message);
+  const allowed = error instanceof Error && /^(Invalid agent|Local hub lacks|Task name|Task listing|Task attachment|Unresolved launcher|HERE )/.test(error.message);
   process.stderr.write(allowed ? `${error.message}\n` : "Selected hub/worker unavailable or request outcome unconfirmed; exact saved drafts retained. No fallback or automatic replay.\n");
   process.exitCode = 1;
 });

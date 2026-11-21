@@ -31,7 +31,7 @@ export async function launcherTarget(directory:string):Promise<LauncherTarget> {
     return {hubId:c.hubId,machineId:c.machineId,socket:c.rexClient.socket};
   }catch{throw new Error("Invalid or unapproved worker launcher configuration; no connection attempted");}
 }
-export async function rexLauncherTarget(directory: string): Promise<LauncherTarget> {
+export async function rexLauncherTarget(directory: string): Promise<LauncherTarget & { hubPort: number }> {
   try {
     if (!isAbsolute(directory) || /[\0\r\n]/.test(directory)) throw new Error();
     const info = await lstat(directory); privateOwner(info); if (!info.isDirectory()) throw new Error();
@@ -40,7 +40,7 @@ export async function rexLauncherTarget(directory: string): Promise<LauncherTarg
     if (!config || typeof config !== "object" || !("version" in config) || config.version !== 1 || !("machine_id" in config) || !validMachineIdentity(config.machine_id) ||
         !validRexWorkerConnection(connection) || !connection.hubId || connection.pendingSession || !validRexClient(connection.rexClient) ||
         connection.rexClient.socket !== `/tmp/deck-rex-${process.getuid?.()}-${config.machine_id}/client.sock`) throw new Error();
-    return { hubId: connection.hubId, machineId: config.machine_id, socket: connection.rexClient.socket };
+    return { hubId: connection.hubId, machineId: config.machine_id, socket: connection.rexClient.socket, hubPort: connection.hubPort };
   } catch { throw new Error("Automatic Rex worker is not ready; no connection attempted"); }
 }
 export async function launcherCommand(target:LauncherTarget,request:LauncherRequest,signal?:AbortSignal):Promise<unknown> {

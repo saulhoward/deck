@@ -1,9 +1,10 @@
 import { isAbsolute } from "node:path";
 import { rexSocketPath } from "./rex-endpoint.js";
-import { AgentDoc, defineDoc, defineDocFamily, defineExtension, defineTask, type TaskId, type Tx, type ConversationId } from "@earendil-works/pi-durable";
+import { AgentDoc, defineDoc, defineDocFamily, defineExtension, defineTask, type TaskId, type Tx, type ConversationId, type Cursor } from "@earendil-works/pi-durable";
+import { RECONCILE_KIND, type ReconcileResult } from "./rex-reconciliation.js";
 import { ChatDoc, type Binding } from "./chat-doc.js";
 import type { HostFiles } from "./host-files.js";
-import { validRexUuid, validRexBlockId, validRexCreation, validRexBootstrapClaim, type RexAllocationPlan } from "./generated/contracts.js";
+import { validRexUuid, validRexBlockId, validRexCreation, validRexBootstrapClaim, validRexAllocationPlan, type RexAllocationPlan } from "./generated/contracts.js";
 
 export const REX_KIND = "deck.rex-allocation";
 export type RexTarget = Pick<RexAllocationPlan, "executable" | "server" | "hostId" | "instanceId" | "client" | "port" | "workerSocket" | "bootstrap" | "clientState">;
@@ -25,6 +26,39 @@ export const rexBlock = validRexBlockId;
 // records/receipts. Never replay an accepted operation to implement replacement.
 export const RexDoc = defineDoc<RexMetadata>({ kind: "deck.rex", version: 1, scope: "conversation", history: "latest", fork: "initial", initial: () => ({ taskId: 0 }), checkpointWhen: () => true });
 export const RexRequest = defineDocFamily<{ hash: string; taskId: number }, string>({ kind: "deck.rex-request", version: 1, scope: "conversation", history: "latest", fork: "initial", family: true, initial: (hash) => ({ hash, taskId: 0 }), checkpointWhen: () => true });
+// Session-wide, durable HERE reservation. A lost/uncertain native proof leaves
+// this fence intact; another chat/root must never claim the same Rex block.
+export const RexHereBlock = defineDocFamily<{ hash: string; taskId: number }, string>({ kind: "deck.rex-here-block", version: 1, scope: "session", family: true, initial: hash => ({ hash, taskId: 0 }), checkpointWhen: () => true });
+// The HERE index alone cannot cover ordinary creates/wizards or pre-feature
+// allocations. Read canonical immutable intents and completed proofs in the same
+// admission transaction, including reconciliations whose bindings have since
+// moved out of RexDoc.binding/previousBinding. Never acquire RexDoc for a scan:
+// tx.doc creates absent documents (even for legacy/corrupt allocation records).
+// Historical proof is a permanent conflict, not a claim about current liveness.
+export async function rexHereBlockConflict(tx: Pick<Tx, "scanTasks">, machineId: string, target: RexTarget, blockId: string): Promise<"allocated" | "limit" | undefined> {
+  const server = rexSocketPath(target.server);
+  const sameScope = (value: Pick<RexTarget, "server" | "hostId" | "instanceId">) => typeof value?.server === "string" && rexSocketPath(value.server) === server && value.hostId === target.hostId && value.instanceId === target.instanceId;
+  const sameBlock = (value: RexBinding | undefined) => value?.machineId === machineId && value.blockId === blockId && sameScope(value);
+  let pages = 0;
+  for (const kind of [REX_KIND, RECONCILE_KIND]) {
+    let cursor: Cursor | undefined;
+    do {
+      if (++pages > 100) return "limit"; // Incomplete evidence is never permission.
+      const page = await tx.scanTasks({ kind }, 100, cursor);
+      for (const task of page.items) {
+        if (kind === REX_KIND) {
+          const input = task.input as RexInput | undefined;
+          if (input?.binding?.machineId === machineId && validRexAllocationPlan(input.plan) && sameScope(input.plan) && input.plan.bootstrap?.blockId === blockId) return "allocated";
+        }
+        if ((task.state.status === "terminal" || task.state.status === "completing") && task.state.outcome.status === "completed") {
+          const result = task.state.outcome.result as RexResult | ReconcileResult | undefined;
+          if (((kind === REX_KIND && result?.status === "allocated") || (kind === RECONCILE_KIND && result?.status === "reconciled")) && "binding" in result && sameBlock(result.binding)) return "allocated";
+        }
+      }
+      cursor = page.next;
+    } while (cursor);
+  }
+}
 const uuid = rexUuid;
 const absolute = (value: unknown): value is string => typeof value === "string" && Buffer.byteLength(value) <= 4096 && isAbsolute(value) && !value.includes("\0");
 export function rexTarget(value: RexTarget): RexTarget {

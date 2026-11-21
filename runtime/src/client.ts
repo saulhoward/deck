@@ -430,7 +430,7 @@ async function main() {
           create(form.managedParentChatId);
           if (mode === "task") {
             const rex = await command("rex_status", { chatId: selected }), binding = object(status.binding), terminal = object(rex.binding);
-            if (rex.status !== "allocated" || terminal.chatId !== selected || terminal.machineId !== binding.machineId || terminal.cwd !== binding.cwd) throw new Error("Parent has no confirmed Rex allocation; open the parent in Rex first. No child created and no new-session fallback.");
+            if (rex.status !== "allocated" || terminal.chatId !== selected || terminal.machineId !== binding.machineId || terminal.cwd !== binding.cwd) throw new Error("Parent has no confirmed Rex allocation; start/resume it with --here inside Rex, or open it in Rex first. No child created and no new-session fallback.");
           }
           if (form.machineId) {
             if (status.hostInventory !== 1) throw new Error("Hub lacks registered-host inventory");

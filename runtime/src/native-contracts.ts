@@ -1,3 +1,4 @@
+import { validInspectionQuery } from "./rex-open-contracts.js";
 import * as wire from "./generated/contracts.js";
 import { validCallPlan, validRpcReply } from "./mcp-contracts.js";
 
@@ -34,7 +35,7 @@ export function validNativeRequest(value: unknown): value is wire.NativeRequest 
       switch (operation) {
         case "mcp_call": return wire.validMachineIdentity(value.machineId) && validCallPlan(plan);
         case "rex_allocate": return wire.validRexAllocationPlan(plan) && safeId(plan.chatId);
-        case "rex_inspect": return wire.validRexInspectionQuery(plan);
+        case "rex_inspect": return validInspectionQuery(plan);
         case "rex_resolve": return wire.validRexTargetOptions(plan);
         case "rex_allocation_receipt": return wire.validRexAllocationReceiptQuery(plan) && safeId(plan.operationId) && bytes(plan.request, 128 * 1024);
       }

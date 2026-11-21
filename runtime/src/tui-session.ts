@@ -128,7 +128,7 @@ export class TuiSession {
   private inventorySampleAt = 0;
   private userImport: string | undefined;
   constructor(private readonly command: Command, private readonly selected?: string, private readonly expectedHub?: string, private readonly draftRoot?: string, private readonly port = 52800) {}
-  async registerStartup(allocationId: string, blockId: string | undefined) {
+  async registerStartup(allocationId: string, blockId: string | undefined, expectedBinding?: { machineId: string; cwd: string }) {
     if (this.state || this.startupBlocked) throw new Error("Rex startup cannot be replayed in this client");
     this.startupBlocked = true;
     const args = { chatId: this.selected, allocationId, blockId };
@@ -136,6 +136,7 @@ export class TuiSession {
     this.mode = "task";
     await this.initialize();
     if (this.chatId === this.hubChatId) throw new Error("Rex task startup cannot target the hub chat");
+    if (expectedBinding && (this.binding?.machineId !== expectedBinding.machineId || this.binding.cwd !== expectedBinding.cwd)) throw new Error("Created task worker/workspace changed; no input enabled");
     if (!this.supportsStartup) throw new Error("Hub lacks Rex startup capability; no input enabled");
     const page = this.renderHistory(await this.history());
     this.state!.entries = page.entries; this.before = page.next; this.state!.hasOlder = !!page.next;
@@ -404,7 +405,7 @@ export class TuiSession {
     // abandon an already saved creation identity. The runtime rechecks at open.
     if (!this.supportsManagedOpen) throw new Error("Hub lacks same-session child opening; no child requested");
     const status = await this.command("rex_status", { chatId: this.chatId }, this.hubId);
-    if (status.status !== "allocated" || !status.binding || status.binding.chatId !== this.chatId || status.binding.machineId !== this.binding?.machineId || status.binding.cwd !== this.binding?.cwd) throw new Error("Parent has no confirmed Rex allocation; open the parent in Rex first. No child created and no new-session fallback.");
+    if (status.status !== "allocated" || !status.binding || status.binding.chatId !== this.chatId || status.binding.machineId !== this.binding?.machineId || status.binding.cwd !== this.binding?.cwd) throw new Error("Parent has no confirmed Rex allocation; start/resume it with --here inside Rex, or open it in Rex first. No child created and no new-session fallback.");
   }
   private async observeUserImport() {
     if (!this.userImport) return;

@@ -5,11 +5,11 @@ import { AgentDoc, type TaskId } from "@earendil-works/pi-durable";
 import { ChatDoc } from "./chat-doc.js";
 import { DeckError } from "./deck-error.js";
 import type { DeckRuntime } from "./deck.js";
-import { validResolvedTarget, validTargetOptions } from "./rex-open-contracts.js";
+import { validResolvedTarget, validTargetOptions, validInspectionQuery } from "./rex-open-contracts.js";
 import { rexSocketPath } from "./rex-endpoint.js";
 import type { RexOpenTarget, RexTargetOptions } from "./generated/contracts.js";
 import { REX_KIND, RexDoc, sameRexBinding, rexCoherent, type RexInput, type RexBinding } from "./rex-allocation.js";
-import { validRexAllocationPlan, validRexInspectionQuery, validRexInspectionObservation, validRexInspectionSnapshot, type RexInspectionQuery, type RexInspectionObservation, type RexInspectionSnapshot } from "./generated/contracts.js";
+import { validRexAllocationPlan, validRexInspectionObservation, validRexInspectionSnapshot, type RexInspectionQuery, type RexInspectionObservation, type RexInspectionSnapshot } from "./generated/contracts.js";
 import type { HostFiles } from "./host-files.js";
 import { RECONCILE_KIND, reconciledBinding } from "./rex-reconciliation.js";
 
@@ -83,8 +83,8 @@ export class RexInspector {
       if (input.plan.chatId !== id || input.plan.hubId !== runtime.hubId || (input.plan.allocationId ?? undefined) !== doc.allocationId || metadata.machineId !== input.binding.machineId || metadata.cwd !== input.binding.cwd || before.agentCwd !== metadata.cwd || binding.machineId !== metadata.machineId || binding.cwd !== metadata.cwd) return finish("conflict");
       const scope = { server: binding.server, hostId: binding.hostId, instanceId: binding.instanceId, sessionId: binding.sessionId, windowId: binding.windowId, blockId: binding.blockId };
       if (scope.server !== input.plan.server || scope.hostId !== input.plan.hostId || scope.instanceId !== input.plan.instanceId) return finish("conflict");
-      const query: RexInspectionQuery = { executable: input.plan.executable, scope };
-      if (!validRexInspectionQuery(query) || Buffer.byteLength(JSON.stringify(query)) > 16 * 1024) return finish("conflict");
+      const query: RexInspectionQuery = { executable: input.plan.executable, scope, ...(input.plan.bootstrap?.kind === "here" ? { bootstrap: input.plan.bootstrap } : {}) };
+      if (!validInspectionQuery(query) || Buffer.byteLength(JSON.stringify(query)) > 16 * 1024) return finish("conflict");
       if (signal?.aborted) return finish("cancelled");
       if (!this.host) return finish("unavailable");
       const readId = this.readId();
@@ -93,7 +93,7 @@ export class RexInspector {
         const result = await this.host.call(input.binding, readId, "rex_inspect", { plan: JSON.stringify(query) }, signal);
         if (result.ok && result.code === "rex_inspected" && !result.truncated && Buffer.byteLength(result.output) <= 16 * 1024) {
           const value: unknown = JSON.parse(result.output);
-          if (validRexInspectionObservation(value) && Object.entries(scope).every(([key, expected]) => value.scope[key as keyof typeof scope] === expected) && ((value.state === "exited") === (value.exitCode !== null))) observation = value;
+          if (validRexInspectionObservation(value) && (value.state !== "client_exited" || query.bootstrap?.kind === "here") && Object.entries(scope).every(([key, expected]) => value.scope[key as keyof typeof scope] === expected) && ((value.state === "exited") === (value.exitCode !== null))) observation = value;
         } else if (!result.ok && (result.code === "offline" || result.code === "busy")) observation.state = "unavailable";
       } catch { /* Read failure is inconclusive, never absence; do not expose diagnostics. */ }
       if (signal?.aborted) return finish("cancelled");

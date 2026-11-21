@@ -64,7 +64,7 @@ pub fn validRequest(allocator: std.mem.Allocator, v: V) bool {
         return args_json.value == .object and @import("mcp_schema.zig").boundedJson(args_json.value);
     }
     if (eq(operation, "rex_allocate")) return wire.validRexAllocationPlan(plan) and safe(field(plan, "chatId"));
-    if (eq(operation, "rex_inspect")) return wire.validRexInspectionQuery(plan);
+    if (eq(operation, "rex_inspect")) return @import("rex_open.zig").validInspectionQuery(plan);
     if (eq(operation, "rex_resolve")) return wire.validRexTargetOptions(plan);
     return wire.validRexAllocationReceiptQuery(plan) and safe(field(plan, "operationId")) and text(field(plan, "request")).len <= 128 * 1024;
 }

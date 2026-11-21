@@ -2,8 +2,14 @@ import * as wire from "./generated/contracts.js";
 import { rexSocketPath } from "./rex-endpoint.js";
 import { validSafePiId, type ReplyContext } from "./mutation-contracts.js";
 
+export function validBootstrapClaim(value: unknown): value is wire.RexBootstrapClaim {
+  return wire.validRexBootstrapClaim(value) && value.root.startsWith("/") && !value.root.includes("\0") && Buffer.byteLength(value.root) <= 4096;
+}
+export function validInspectionQuery(value: unknown): value is wire.RexInspectionQuery {
+  return wire.validRexInspectionQuery(value) && (value.bootstrap === undefined || (value.bootstrap.kind === "here" && validBootstrapClaim(value.bootstrap) && value.bootstrap.blockId === value.scope.blockId));
+}
 export function validAdoptArgs(value: unknown): value is wire.RexAdoptArgs {
-  return wire.validRexAdoptArgs(value) && validSafePiId(value.chatId) && validResolvedTarget(value.target) && value.bootstrap.root.startsWith("/") && !value.bootstrap.root.includes("\0") && Buffer.byteLength(value.bootstrap.root) <= 4096;
+  return wire.validRexAdoptArgs(value) && validSafePiId(value.chatId) && validResolvedTarget(value.target) && validBootstrapClaim(value.bootstrap);
 }
 export function validOpenArgs(value: unknown): value is wire.RexOpenArgs {
   if (!wire.validRexOpenArgs(value) || !validSafePiId(value.chatId)) return false;

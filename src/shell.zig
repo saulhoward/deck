@@ -19,19 +19,26 @@ pub fn runObserved(native: Native, allocator: std.mem.Allocator, cwd: []const u8
 // Shared owned-process runner. Raw mode is for bounded native CLI JSON, not a
 // model tool: malformed/truncated/lossy output cannot become a trusted result.
 pub fn runArgv(native: Native, allocator: std.mem.Allocator, cwd: []const u8, argv: []const []const u8, seconds: u32, cancelled: *std.atomic.Value(bool), progress: ?Progress, raw: bool) !Result {
-    return runOwned(native, allocator, cwd, argv, seconds, cancelled, progress, raw, null);
+    return runOwned(native, allocator, cwd, argv, seconds, cancelled, progress, raw, null, null);
 }
 pub const Captured = struct { result: Result, stdout: []const u8, stderr: []const u8 };
 const Capture = struct { streams: [2]std.array_list.Managed(u8) };
 // Separate bounded channels are needed to recognize an exact native error, never
 // a diagnostic-looking string in stdout. Neither channel is retained as a receipt.
 pub fn runArgvCaptured(native: Native, allocator: std.mem.Allocator, cwd: []const u8, argv: []const []const u8, seconds: u32, cancelled: *std.atomic.Value(bool)) !Captured {
+    return runArgvCapturedContext(native, allocator, cwd, argv, seconds, cancelled, null);
+}
+// Only the launcher helper needs these two validated lookup hints. Never pass
+// ambient Rex routing/focus, credentials or loader settings to raw CLI tools.
+pub const RexContext = struct { session: []const u8, block: []const u8 };
+pub fn runArgvCapturedContext(native: Native, allocator: std.mem.Allocator, cwd: []const u8, argv: []const []const u8, seconds: u32, cancelled: *std.atomic.Value(bool), context: ?RexContext) !Captured {
+    if (context) |c| if (!@import("generated/contracts.zig").validRexSessionId(.{ .string = c.session }) or !@import("generated/contracts.zig").validRexBlockId(.{ .string = c.block })) return error.InvalidArguments;
     var capture = Capture{ .streams = .{ .init(allocator), .init(allocator) } };
     defer for (&capture.streams) |*stream| stream.deinit();
-    const result = try runOwned(native, allocator, cwd, argv, seconds, cancelled, null, true, &capture);
+    const result = try runOwned(native, allocator, cwd, argv, seconds, cancelled, null, true, &capture, context);
     return .{ .result = result, .stdout = try allocator.dupe(u8, capture.streams[0].items), .stderr = try allocator.dupe(u8, capture.streams[1].items) };
 }
-fn runOwned(native: Native, allocator: std.mem.Allocator, cwd: []const u8, argv: []const []const u8, seconds: u32, cancelled: *std.atomic.Value(bool), progress: ?Progress, raw: bool, capture: ?*Capture) !Result {
+fn runOwned(native: Native, allocator: std.mem.Allocator, cwd: []const u8, argv: []const []const u8, seconds: u32, cancelled: *std.atomic.Value(bool), progress: ?Progress, raw: bool, capture: ?*Capture, context: ?RexContext) !Result {
     const io = native.io;
     if (!std.fs.path.isAbsolute(cwd) or argv.len == 0 or seconds == 0 or seconds > 300) return error.InvalidArguments;
     if (cancelled.load(.acquire)) return .{ .ok = false, .output = "Cancelled before spawn", .code = "cancelled" };
@@ -46,6 +53,10 @@ fn runOwned(native: Native, allocator: std.mem.Allocator, cwd: []const u8, argv:
         var clean = std.process.Environ.Map.init(allocator);
         errdefer clean.deinit();
         for ([_][]const u8{ "PATH", "HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "LC_ALL", "TERM", "XDG_STATE_HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_RUNTIME_DIR", "REX_RUNTIME_DIR" }) |key| if (env.get(key)) |value| try clean.put(key, value);
+        if (context) |c| {
+            try clean.put("REX_SESSION", c.session);
+            try clean.put("REX_BLOCK", c.block);
+        }
         env.deinit();
         env = clean;
     }
@@ -157,4 +168,20 @@ fn runOwned(native: Native, allocator: std.mem.Allocator, cwd: []const u8, argv:
     }
     if (raw) return .{ .ok = exit_code == 0 and std.mem.eql(u8, reason, "ok") and !lossy and !truncated, .output = try allocator.dupe(u8, tail[0..used]), .code = if (lossy or truncated) "invalid_output" else if (std.mem.eql(u8, reason, "ok") and exit_code != 0) "exit_nonzero" else reason, .exitCode = exit_code, .truncated = truncated };
     return .{ .ok = exit_code == 0 and std.mem.eql(u8, reason, "ok"), .output = try std.fmt.allocPrint(allocator, "exitCode={d} status={s} truncated={} lossyUtf8={}\n{s}", .{ exit_code, reason, truncated, lossy, tail[0..used] }), .code = if (std.mem.eql(u8, reason, "ok") and exit_code != 0) "exit_nonzero" else reason, .exitCode = exit_code, .truncated = truncated };
+}
+
+test "raw launcher context forwards only full Rex hints and never routing or injection settings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var env: [7:null]?[*:0]u8 = .{ @constCast("PATH=/usr/bin:/bin"), @constCast("REX_SESSION=ambient"), @constCast("REX_BLOCK=ambient"), @constCast("REX_SERVER=https://untrusted.invalid"), @constCast("BASH_ENV=/untrusted"), @constCast("NODE_OPTIONS=--require=/untrusted"), @constCast("OPENAI_API_KEY=fixture-only") };
+    const native: Native = .{ .io = std.testing.io, .environ = .{ .block = .{ .slice = &env } } };
+    var cancelled = std.atomic.Value(bool).init(false);
+    const context: RexContext = .{ .session = "session:00000000-0000-4000-8000-000000000001", .block = "block:00000000-0000-4000-8000-000000000001" };
+    const plain = try runArgvCaptured(native, a, "/", &.{"/usr/bin/env"}, 2, &cancelled);
+    try std.testing.expect(plain.result.ok and std.mem.indexOf(u8, plain.stdout, "REX_") == null);
+    const here = try runArgvCapturedContext(native, a, "/", &.{"/usr/bin/env"}, 2, &cancelled, context);
+    try std.testing.expect(here.result.ok and std.mem.indexOf(u8, here.stdout, context.session) != null and std.mem.indexOf(u8, here.stdout, context.block) != null);
+    for ([_][]const u8{ "REX_SERVER", "BASH_ENV", "NODE_OPTIONS", "OPENAI_API_KEY", "ambient" }) |forbidden| try std.testing.expect(std.mem.indexOf(u8, here.stdout, forbidden) == null);
+    try std.testing.expectError(error.InvalidArguments, runArgvCapturedContext(native, a, "/", &.{"/never-execute"}, 2, &cancelled, .{ .session = "short", .block = context.block }));
 }

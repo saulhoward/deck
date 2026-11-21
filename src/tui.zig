@@ -2401,7 +2401,7 @@ pub fn run(init: std.process.Init, args: []const []const u8) !void {
         }
         try forwarded.appendSlice(init.gpa, &.{ key, args[i] });
     }
-    if (here_startup != null and (attach_machine == null or bootstrap_id != null)) return error.InvalidAllocation;
+    if (here_startup != null and ((attach_machine == null and allocation_id == null) or client_state == null or bootstrap_id != null)) return error.InvalidAllocation;
     if (attach_machine != null and (allocation_id != null or bootstrap_id != null or hub_id == null or chat_id == null)) return error.InvalidAllocation;
     if (attach_machine != null and !wire.validRexUuid(.{ .string = hub_id.? })) return error.InvalidHub;
     if ((worker_socket != null or bootstrap_id != null) and allocation_id == null and attach_machine == null) return error.InvalidAllocation;
