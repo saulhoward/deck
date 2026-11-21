@@ -31,8 +31,8 @@ const help =
     \\Chat j/k, gg/G        scroll / oldest loaded / latest
     \\Ctrl-U/D, Ctrl-B/F    half / full page (Normal mode)
     \\Ctrl-P / Ctrl-N       select message: older / newer; newest → prompt
-    \\Click message        select without changing the unsent prompt
-    \\Selected v / l       full message in $EDITOR / Leaf (read-only copy)
+    \\Click message        select on release; dragging does not select
+    \\Selected v / l       full message in nvim / Leaf (read-only copy)
     \\Selected Esc         return to Normal prompt, keep scroll position
     \\Mouse wheel          scroll chat in any editing mode
     \\Shift-drag           terminal selection; use terminal Copy/Paste
@@ -591,6 +591,9 @@ const Model = struct {
     external_edit: bool = false,
     message_view: ?struct { entry_id: i64, viewer: @import("tui_message_viewer.zig").Kind } = null,
     selected_message: ?i64 = null,
+    // A press is only a candidate. Never lock the prompt or prefetch until an
+    // unmodified release proves a stationary click, not terminal text selection.
+    message_click: ?struct { id: i64, mouse: vaxis.Mouse, width: u16, height: u16 } = null,
     selection_reveal: bool = false,
     selection_older: bool = false, // One boundary traversal, not a queue of keys.
     newer_anchor: ?i64 = null,
@@ -722,8 +725,24 @@ const Model = struct {
             // vxfw can batch a resize followed by a click before the next draw.
             if (@min(512, window.width) != self.message_frame_width or @min(120, window.height) != self.message_frame_height) return null;
         }
-        if (mouse.type != .press or mouse.button != .left or mouse.mods.shift or mouse.mods.ctrl or mouse.mods.alt or mouse.col < 0 or mouse.row < 0 or mouse.col >= self.message_hit_width or mouse.row >= self.message_hit_height) return null;
+        if (mouse.button != .left or mouse.mods.shift or mouse.mods.ctrl or mouse.mods.alt or mouse.col < 0 or mouse.row < 0 or mouse.col >= self.message_hit_width or mouse.row >= self.message_hit_height) return null;
         return self.message_hits[@intCast(mouse.row)];
+    }
+    fn messageClick(self: *Model, mouse: vaxis.Mouse) ?i64 {
+        const pending = self.message_click;
+        self.message_click = null;
+        if (!self.mouse_tracking or !self.chatVisible() or self.command_mode or self.paste_mode) return null;
+        // Any motion/drag cancels, even within a cell or back to the origin.
+        if (mouse.type != .press and mouse.type != .release) return null;
+        const id = self.messageHit(mouse) orelse return null;
+        if (mouse.type == .press) {
+            self.message_click = .{ .id = id, .mouse = mouse, .width = self.message_frame_width, .height = self.message_frame_height };
+        } else if (pending) |gesture| {
+            if (id == gesture.id and mouse.col == gesture.mouse.col and mouse.row == gesture.mouse.row and
+                mouse.xoffset == gesture.mouse.xoffset and mouse.yoffset == gesture.mouse.yoffset and
+                self.message_frame_width == gesture.width and self.message_frame_height == gesture.height) return id;
+        }
+        return null;
     }
     fn cancelNewer(self: *Model) void {
         self.newer_anchor = null;
@@ -732,6 +751,7 @@ const Model = struct {
         self.newer_budget = 0;
     }
     fn clearSelection(self: *Model, normal: bool) void {
+        self.message_click = null;
         // Esc must not let the next ordinary poll perform the very forward jump
         // it just cancelled, even when the old selected page looked live.
         if (normal and self.newer_anchor != null) self.forward_view = true;
@@ -788,6 +808,7 @@ const Model = struct {
         self.older_budget = 4;
     }
     fn selectMessage(self: *Model, id: i64, reveal: bool) void {
+        self.message_click = null;
         if (!self.containsMessage(id)) return;
         self.cancelNewer();
         self.selected_message = id;
@@ -854,7 +875,7 @@ const Model = struct {
             } else if (self.bridge.pending != null) {
                 self.note("Wait for the in-flight request before opening this message; press v/l again after its reply.");
             } else {
-                self.message_view = .{ .entry_id = self.selected_message.?, .viewer = if (key.matches('v', .{})) .editor else .leaf };
+                self.message_view = .{ .entry_id = self.selected_message.?, .viewer = if (key.matches('v', .{})) .nvim else .leaf };
                 ctx.quit = true;
             }
         } else if (key.matches(':', .{})) {
@@ -878,6 +899,7 @@ const Model = struct {
         }
     }
     fn resetHistory(self: *Model) void {
+        self.message_click = null;
         self.cancelNewer();
         self.message_hit_height = 0;
         self.newest_visible_message = null;
@@ -893,6 +915,7 @@ const Model = struct {
         self.older_check_rows = null;
     }
     fn scrollChat(self: *Model, up: bool, amount: usize) void {
+        self.message_click = null;
         self.cancelNewer();
         self.message_hit_height = 0;
         self.selection_reveal = false;
@@ -1502,6 +1525,7 @@ const Model = struct {
         self.command.clearRetainingCapacity();
     }
     fn press(self: *Model, ctx: *fw.EventContext, key: vaxis.Key) !void {
+        self.message_click = null;
         if (self.paste_mode) {
             if (self.selected_message == null and !self.reject_paste and !self.paste_overflow) {
                 const text = if (key.matches(vaxis.Key.enter, .{})) "\r" else if (key.matches('j', .{ .ctrl = true })) "\n" else if (key.matches(vaxis.Key.tab, .{})) "    " else key.text orelse "";
@@ -1958,6 +1982,7 @@ const Model = struct {
                 ctx.consumeAndRedraw();
             },
             .paste_start => {
+                self.message_click = null;
                 if (self.terminal_status) |status| status.presentation.acknowledge();
                 self.paste_mode = true;
                 self.leader = false;
@@ -1986,13 +2011,22 @@ const Model = struct {
                 ctx.consumeAndRedraw();
             },
             .paste => self.note("Clipboard replies ignored; use terminal bracketed paste."),
+            .focus_out, .mouse_leave => self.message_click = null,
             .mouse => |mouse| {
-                if (self.terminal_status) |status| status.presentation.acknowledge();
+                const clicked = self.messageClick(mouse);
+                if (!self.mouse_tracking) return;
+                // Like typing, pointer gestures get a quiet polling interval.
+                // Do not start a background page refresh between down/up or
+                // repeatedly repaint history while the user is dragging text.
+                self.ticks = 0;
                 if (self.tools_view) {
-                    if (mouse.button == .wheel_up) self.tools_scroll -|= 3 else if (mouse.button == .wheel_down) self.tools_scroll = @min(self.tools_max, self.tools_scroll + 3);
+                    if (mouse.button == .wheel_up) self.tools_scroll -|= 3 else if (mouse.button == .wheel_down) self.tools_scroll = @min(self.tools_max, self.tools_scroll + 3) else return;
                 } else if (self.chatVisible() and !self.command_mode and !self.paste_mode) {
-                    if (mouse.button == .wheel_up) self.scrollChat(true, 3) else if (mouse.button == .wheel_down) self.scrollChat(false, 3) else if (self.messageHit(mouse)) |id| self.selectMessage(id, false);
-                }
+                    if (mouse.button == .wheel_up) self.scrollChat(true, 3) else if (mouse.button == .wheel_down) self.scrollChat(false, 3) else if (clicked) |id| self.selectMessage(id, false) else return;
+                } else return;
+                // Press/drag/modified reports have no selection, editor, read or
+                // redraw effects. The terminal owns text selection and copying.
+                if (self.terminal_status) |status| status.presentation.acknowledge();
                 ctx.consumeAndRedraw();
             },
             else => {},
@@ -2007,6 +2041,7 @@ const Model = struct {
         const w = @min(512, ctx.max.width orelse 80);
         // vxfw Surface multiplies u16 dimensions; stay below 65,536 cells.
         const h = @min(120, ctx.max.height orelse 24);
+        if (w != self.message_frame_width or h != self.message_frame_height or !self.chatVisible()) self.message_click = null;
         self.message_frame_width = w;
         self.message_frame_height = h;
         var surface = try fw.Surface.init(ctx.arena, self.widget(), .{ .width = w, .height = h });
@@ -2176,12 +2211,18 @@ const Model = struct {
             self.message_hits[y] = row.entry_id;
             if (row.entry_id) |id| self.newest_visible_message = id;
             const selected_row = row.entry_id != null and row.entry_id == self.selected_message;
-            if (selected_row) for (0..layout.main) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = Theme.message_selection });
-            if (row.user and !selected_row) for (0..layout.main) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = Theme.user });
+            if (row.user) for (0..layout.main) |x| surface.writeCell(@intCast(x), @intCast(y), .{ .style = Theme.user });
+            if (selected_row) {
+                var border_style = Theme.message_border;
+                if (row.user) border_style.bg = Theme.user.bg;
+                surface.writeCell(0, @intCast(y), .{ .char = .{ .grapheme = "│", .width = 1 }, .style = border_style });
+            }
             var speaker_style = row.speaker_style;
             if (row.user) speaker_style.bg = Theme.user.bg;
-            if (selected_row) speaker_style = Theme.message_selection;
-            if (row.speaker) |speaker| lineLimit(ctx, surface, layout.x -| 2, @intCast(y), speaker, speaker_style, null, 0, layout.x);
+            if (selected_row) speaker_style.fg = base.fg;
+            // Reserve column zero even with a forced sidebar at tiny widths.
+            // Keep the marker at the same position before/after selection.
+            if (row.speaker) |speaker| lineLimit(ctx, surface, @max(1, layout.x -| 2), @intCast(y), speaker, speaker_style, null, 0, layout.x);
             if (row.cells) |cells| {
                 var x = layout.x;
                 for (cells) |original| {
@@ -2191,12 +2232,16 @@ const Model = struct {
                         cell.style.fg = dim.fg;
                         cell.style.bg = base.bg;
                     }
-                    if (selected_row) cell.style = Theme.message_selection;
+                    if (selected_row) cell.style.fg = base.fg;
                     if (x + cell.char.width > layout.x + layout.body) break;
                     surface.writeCell(x, @intCast(y), cell);
                     x += cell.char.width;
                 }
-            } else lineLimit(ctx, surface, layout.x, @intCast(y), row.text, if (selected_row) Theme.message_selection else row.style, null, 0, layout.x + layout.body);
+            } else {
+                var style = row.style;
+                if (selected_row) style.fg = base.fg;
+                lineLimit(ctx, surface, layout.x, @intCast(y), row.text, style, null, 0, layout.x + layout.body);
+            }
         }
         for (shown, 0..) |row, i| lineLimit(ctx, surface, layout.x, @intCast(visible.len + i), row.text, dim, null, 0, layout.x + layout.body);
         if (away) {
@@ -2204,7 +2249,7 @@ const Model = struct {
             lineLimit(ctx, surface, 1, upper - 1, history_notice, accent, null, 0, right);
         }
         const sending = if (self.bridge.pending) |pending| pending.action == .send else false;
-        const mode = if (self.selected_message != null) "SELECT MESSAGE · Ctrl-P/N · v editor / l Leaf · Esc" else if (self.readOnly()) "READ ONLY" else if (self.queued_send) "SEND QUEUED" else if (sending) "SENDING" else if (s != null and s.?.draft != null and !s.?.draft.?.saved) "LOCKED UNSAVED" else if (s != null and s.?.draft != null and s.?.draft.?.clipped) "SAVED PREVIEW" else if (s != null and s.?.draft != null and s.?.draft.?.saved) "SAVED LOCKED" else if (self.locked()) "LOCKED" else "";
+        const mode = if (self.selected_message != null) "SELECT MESSAGE · Ctrl-P/N · v nvim / l Leaf · Esc" else if (self.readOnly()) "READ ONLY" else if (self.queued_send) "SEND QUEUED" else if (sending) "SENDING" else if (s != null and s.?.draft != null and !s.?.draft.?.saved) "LOCKED UNSAVED" else if (s != null and s.?.draft != null and s.?.draft.?.clipped) "SAVED PREVIEW" else if (s != null and s.?.draft != null and s.?.draft.?.saved) "SAVED LOCKED" else if (self.locked()) "LOCKED" else "";
         for (0..layout.main) |x| surface.writeCell(@intCast(x), upper, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = Theme.rule });
         for (0..w) |x| surface.writeCell(@intCast(x), h - 3, .{ .char = .{ .grapheme = "─", .width = 1 }, .style = Theme.rule });
         const border = try std.fmt.allocPrint(ctx.arena, " {s}{s} ", .{ if (self.task_form) "TASK BRIEF " else "", mode });
@@ -2326,9 +2371,7 @@ pub fn selected(args: []const []const u8, terminal: bool) !bool {
 
 fn messageViewError(err: anyerror) []const u8 {
     return switch (err) {
-        error.EditorNotSet => "Set $EDITOR to view messages in an editor; prompt unchanged.",
-        error.InvalidEditor => "$EDITOR has invalid quoting or arguments; prompt unchanged.",
-        error.EditorUnavailable => "Configured $EDITOR executable is unavailable; prompt unchanged.",
+        error.NvimUnavailable => "nvim is unavailable on PATH; no viewer opened.",
         error.LeafUnavailable => "Leaf is unavailable on PATH; install https://github.com/RivoLink/leaf.",
         error.ViewerRexContext => "Cannot verify this terminal's Rex session/block; no viewer opened.",
         error.ViewerRexUnavailable => "Local Rex is unavailable or changed identity; no viewer opened.",
@@ -4113,7 +4156,7 @@ test "select message keyboard mode locks exact unsent editor state and all promp
     try std.testing.expect(bridge.pending.?.action == .send and !model.queued_send);
 }
 
-test "message mouse hit map matches full panels and markdown colors through resize" {
+test "message clicks wait for release and paint only a left border, preserving markdown and panel backgrounds" {
     const a = std.testing.allocator;
     var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
     var model = try testChatModel(a, &bridge);
@@ -4134,7 +4177,7 @@ test "message mouse hit map matches full panels and markdown colors through resi
         const draw_ctx = selectionTestDraw(arena.allocator(), width, 40);
         model.scroll = 0;
         model.clearSelection(false);
-        _ = try Model.draw(&model, draw_ctx);
+        const plain = try Model.draw(&model, draw_ctx);
         const layout = Theme.Layout.init(width, null);
         var hit_row: ?usize = null;
         for (model.message_hits[0..model.message_hit_height], 0..) |id, y| if (id == 11) {
@@ -4144,7 +4187,14 @@ test "message mouse hit map matches full panels and markdown colors through resi
         const y = hit_row.?;
         // Both outer margins belong to the panel, not the sidebar separator.
         for ([_]i16{ 0, @intCast(layout.main - 1) }) |x| {
-            try Model.event(&model, &event_ctx, .{ .mouse = selectionTestMouse(x, @intCast(y)) });
+            var mouse = selectionTestMouse(x, @intCast(y));
+            event_ctx.redraw = false;
+            try Model.event(&model, &event_ctx, .{ .mouse = mouse });
+            try std.testing.expect(model.selected_message == null and !event_ctx.redraw);
+            // Ordinary redraws while held must not turn the press into a click.
+            _ = try Model.draw(&model, draw_ctx);
+            mouse.type = .release;
+            try Model.event(&model, &event_ctx, .{ .mouse = mouse });
             try std.testing.expectEqual(@as(?i64, 11), model.selected_message);
             try std.testing.expectEqual(Editor.Mode.insert, model.editor.mode);
             try std.testing.expectEqual(5, model.editor.cursor);
@@ -4152,12 +4202,14 @@ test "message mouse hit map matches full panels and markdown colors through resi
             try std.testing.expect(colored.cursor == null);
             for (model.message_hits[0..model.message_hit_height], 0..) |id, row| {
                 for (0..layout.main) |col| {
-                    const style = colored.buffer[row * width + col].style;
+                    const cell = colored.buffer[row * width + col];
+                    var expected = plain.buffer[row * width + col];
                     if (id == 11) {
-                        try std.testing.expectEqualDeep(Theme.orange.fg, style.bg);
-                        try std.testing.expectEqualDeep(vaxis.Color{ .rgb = .{ 0, 0, 0 } }, style.fg);
-                        try std.testing.expect(!style.reverse);
-                    } else try std.testing.expect(!std.meta.eql(Theme.orange.fg, style.bg));
+                        expected.style.fg = if (col == 0) Theme.orange.fg else base.fg;
+                        if (col == 0) expected.char = .{ .grapheme = "│", .width = 1 };
+                    }
+                    try std.testing.expect(!std.meta.eql(Theme.orange.fg, cell.style.bg));
+                    try std.testing.expectEqualDeep(expected, cell);
                 }
             }
             // Fresh end proof restores the exact prior editing mode/cursor.
@@ -4169,7 +4221,10 @@ test "message mouse hit map matches full panels and markdown colors through resi
             try std.testing.expect(model.selected_message == null and model.editor.mode == .insert);
         }
         for ([_][2]i16{ .{ @intCast(layout.main), @intCast(y) }, .{ 0, @intCast(model.message_hit_height) }, .{ 0, 37 }, .{ 0, 39 }, .{ -1, 0 }, .{ 0, -1 } }) |point| {
-            try Model.event(&model, &event_ctx, .{ .mouse = selectionTestMouse(point[0], point[1]) });
+            var mouse = selectionTestMouse(point[0], point[1]);
+            try Model.event(&model, &event_ctx, .{ .mouse = mouse });
+            mouse.type = .release;
+            try Model.event(&model, &event_ctx, .{ .mouse = mouse });
             try std.testing.expect(model.selected_message == null);
         }
         var modified = selectionTestMouse(0, @intCast(y));
@@ -4192,6 +4247,119 @@ test "message mouse hit map matches full panels and markdown colors through resi
         try std.testing.expectEqual(0, model.message_hit_height);
     }
     try std.testing.expectEqualStrings("  preserved unsent\ntext  ", model.editor.text.items);
+}
+
+test "selection border and speaker stay distinct with a narrow forced sidebar" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    var model = try testChatModel(a, &bridge);
+    defer model.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    model.sidebar_override = true;
+    model.snapshot.?.value.case0.snapshot.entries = &.{
+        .{ .id = 10, .role = .user, .text = "User" },
+        .{ .id = 11, .role = .assistant, .text = "Answer" },
+    };
+    for (20..27) |width| {
+        const draw_ctx = selectionTestDraw(arena.allocator(), @intCast(width), 24);
+        const layout = Theme.Layout.init(@intCast(width), true);
+        model.clearSelection(false);
+        const plain = try Model.draw(&model, draw_ctx);
+        for ([_]i64{ 10, 11 }) |selected_id| {
+            model.selectMessage(selected_id, false);
+            const surface = try Model.draw(&model, draw_ctx);
+            var saw_speaker = false;
+            for (model.message_hits[0..model.message_hit_height], 0..) |id, row| {
+                for (0..width) |col| {
+                    var expected = plain.buffer[row * width + col];
+                    if (id == selected_id and col < layout.main) {
+                        expected.style.fg = if (col == 0) Theme.orange.fg else base.fg;
+                        if (col == 0) expected.char = .{ .grapheme = "│", .width = 1 };
+                        if (col == @max(1, layout.x -| 2) and !std.mem.eql(u8, expected.char.grapheme, " ")) saw_speaker = true;
+                    }
+                    try std.testing.expectEqualDeep(expected, surface.buffer[row * width + col]);
+                }
+            }
+            try std.testing.expect(saw_speaker);
+        }
+    }
+}
+
+test "message mouse drags modifiers stale releases and context changes never steal text selection" {
+    const a = std.testing.allocator;
+    const Case = enum { drag, motion, return_to_origin, moved_release, pixel_release, shift_press, shift_release, ctrl_release, alt_release, right_button, stray_release, key, paste, focus, leave, scroll, resize, stale_hit, dialog, disabled };
+    for ([_]bool{ false, true }) |already_selected| for (std.meta.tags(Case)) |case| {
+        var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+        var model = try testChatModel(a, &bridge);
+        defer model.deinit();
+        var arena = std.heap.ArenaAllocator.init(a);
+        defer arena.deinit();
+        var ctx: fw.EventContext = .{ .io = std.testing.io, .alloc = a, .cmds = .empty };
+        defer ctx.cmds.deinit(a);
+        model.snapshot.?.value.case0.snapshot.entries = &.{
+            .{ .id = 10, .role = .user, .text = "Select these words with the terminal mouse" },
+            .{ .id = 11, .role = .assistant, .text = "Existing selection must not change" },
+        };
+        try model.editor.set("  keep exact draft 界  ");
+        model.editor.cursor = 5;
+        model.editor.mode = .insert;
+        if (already_selected) model.selectMessage(11, false);
+        const draw_ctx = selectionTestDraw(arena.allocator(), 100, 40);
+        _ = try Model.draw(&model, draw_ctx);
+        var y: i16 = 0;
+        while (model.message_hits[@intCast(y)] != 10) : (y += 1) {}
+        var mouse = selectionTestMouse(15, y);
+        if (case == .shift_press) mouse.mods.shift = true;
+        if (case != .stray_release) try Model.event(&model, &ctx, .{ .mouse = mouse });
+        try std.testing.expectEqual(@as(?i64, if (already_selected) 11 else null), model.selected_message);
+        try std.testing.expect(!model.older_wanted and !model.newer_wanted and bridge.pending == null);
+        var release = selectionTestMouse(15, y);
+        release.type = .release;
+        switch (case) {
+            .drag, .motion, .return_to_origin => {
+                mouse.type = if (case == .motion) .motion else .drag;
+                if (case == .return_to_origin) mouse.col += 3;
+                try Model.event(&model, &ctx, .{ .mouse = mouse });
+                mouse.col = 15;
+                try Model.event(&model, &ctx, .{ .mouse = mouse });
+            },
+            .moved_release => release.col += 1,
+            .pixel_release => release.xoffset += 1,
+            .shift_press, .stray_release => {},
+            .shift_release => release.mods.shift = true,
+            .ctrl_release => release.mods.ctrl = true,
+            .alt_release => release.mods.alt = true,
+            .right_button => {
+                mouse.button = .right;
+                try Model.event(&model, &ctx, .{ .mouse = mouse });
+            },
+            .key => try model.press(&ctx, .{ .codepoint = vaxis.Key.f12 }),
+            .paste => try Model.event(&model, &ctx, .paste_start),
+            .focus => try Model.event(&model, &ctx, .focus_out),
+            .leave => try Model.event(&model, &ctx, .mouse_leave),
+            .scroll => model.scrollChat(true, 1),
+            .resize => {
+                _ = try Model.draw(&model, selectionTestDraw(arena.allocator(), 90, 40));
+                _ = try Model.draw(&model, draw_ctx);
+            },
+            .stale_hit => model.message_hits[@intCast(y)] = 11,
+            .dialog => model.help_visible = true,
+            .disabled => model.mouse_tracking = false,
+        }
+        try Model.event(&model, &ctx, .{ .mouse = release });
+        // Even a subsequent unmodified release at the original position cannot
+        // revive a drag or a cancelled candidate.
+        release = selectionTestMouse(15, y);
+        release.type = .release;
+        try Model.event(&model, &ctx, .{ .mouse = release });
+        try std.testing.expectEqual(@as(?i64, if (already_selected) 11 else null), model.selected_message);
+        try std.testing.expect(model.message_click == null);
+        try std.testing.expectEqualStrings("  keep exact draft 界  ", model.editor.text.items);
+        try std.testing.expectEqual(5, model.editor.cursor);
+        try std.testing.expectEqual(Editor.Mode.insert, model.editor.mode);
+        try std.testing.expect(bridge.pending == null and !model.older_wanted and !model.newer_wanted);
+    };
 }
 
 test "selection starts at newest visible retained entry not preview or admitted input and scroll keeps input enabled" {
@@ -4282,7 +4450,7 @@ test "selected message viewers are explicit retained ID handoffs and never queue
         try model.press(&ctx, .{ .codepoint = key });
         try std.testing.expect(ctx.quit and !model.external_edit);
         try std.testing.expectEqual(9, model.message_view.?.entry_id);
-        try std.testing.expectEqual(if (key == 'v') @import("tui_message_viewer.zig").Kind.editor else .leaf, model.message_view.?.viewer);
+        try std.testing.expectEqual(if (key == 'v') @import("tui_message_viewer.zig").Kind.nvim else .leaf, model.message_view.?.viewer);
     }
     try std.testing.expectEqualStrings("unsent exact  ", model.editor.text.items);
     try std.testing.expect(bridge.sequence == 0);
@@ -4615,7 +4783,8 @@ test "Esc click and reversal cancel newer before or after dispatch without chang
         if (cancel == 0) {
             const after = try Model.draw(&model, draw_ctx);
             try std.testing.expectEqual(scroll, model.scroll);
-            for (0..model.chat_height) |row| try std.testing.expectEqualStrings(try testSurfaceRowText(draw_ctx.arena, before, row, 0), try testSurfaceRowText(draw_ctx.arena, after, row, 0));
+            // Esc removes column zero's border, not any message text.
+            for (0..model.chat_height) |row| try std.testing.expectEqualStrings(try testSurfaceRowText(draw_ctx.arena, before, row, 1), try testSurfaceRowText(draw_ctx.arena, after, row, 1));
         }
         try model.issue(.poll);
         try pipe.reply(&model, &ctx, model.state().?);

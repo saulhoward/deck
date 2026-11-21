@@ -8,22 +8,16 @@ const processlib = @import("shell.zig");
 const resolve = @import("rex_resolve.zig");
 const private = @import("mcp_profiles.zig");
 const helper = @import("tui_message_viewer_helper.zig");
-pub const Kind = enum { editor, leaf };
+pub const Kind = enum { nvim, leaf };
 pub const limit = 16 * 1024 * 1024;
 pub const helper_command = "__message-viewer";
 
-fn executable(native: Native, a: Allocator, env: *std.process.Environ.Map, cwd: []const u8, name: []const u8) ![]const u8 {
-    if (name.len == 0 or name.len > 4096 or std.mem.indexOfScalar(u8, name, 0) != null) return error.ViewerUnavailable;
-    if (std.mem.indexOfScalar(u8, name, '/') != null) {
-        const path = try std.fs.path.resolve(a, &.{ cwd, name });
-        try available(native, path);
-        return path;
-    }
+fn executable(native: Native, a: Allocator, env: *std.process.Environ.Map, kind: Kind) ![]const u8 {
     var dirs = std.mem.splitScalar(u8, env.get("PATH") orelse "", ':');
     while (dirs.next()) |dir| {
         // Never accidentally execute a workspace program via empty/relative PATH.
         if (!private.absolute(dir)) continue;
-        const path = try std.fs.path.join(a, &.{ dir, name });
+        const path = try std.fs.path.join(a, &.{ dir, @tagName(kind) });
         available(native, path) catch continue;
         return path;
     }
@@ -84,12 +78,10 @@ pub fn open(native: Native, a: Allocator, env: *std.process.Environ.Map, content
     defer arena.deinit();
     const scratch = arena.allocator();
     const cwd = try std.process.currentPathAlloc(native.io, scratch);
-    const editor = switch (kind) {
-        .editor => try @import("tui_external_editor.zig").arguments(scratch, env.get("EDITOR") orelse return error.EditorNotSet),
-        .leaf => @as([]const []const u8, &.{"leaf"}),
+    const program = executable(native, scratch, env, kind) catch return switch (kind) {
+        .nvim => error.NvimUnavailable,
+        .leaf => error.LeafUnavailable,
     };
-    const argv = try scratch.dupe([]const u8, editor);
-    argv[0] = executable(native, scratch, env, cwd, editor[0]) catch return if (kind == .leaf) error.LeafUnavailable else error.EditorUnavailable;
     const session = env.get("REX_SESSION") orelse return error.ViewerRexContext;
     const block = env.get("REX_BLOCK") orelse return error.ViewerRexContext;
     if (!wire.validRexSessionId(.{ .string = session }) or !wire.validRexBlockId(.{ .string = block })) return error.ViewerRexContext;
@@ -116,7 +108,7 @@ pub fn open(native: Native, a: Allocator, env: *std.process.Environ.Map, content
     var dispatched = false;
     defer if (!dispatched) helper.cleanup(native, dir, root);
     try helper.write(native, dir, "message.md", content);
-    const control = try std.json.Stringify.valueAlloc(scratch, helper.Control{ .argv = argv, .cwd = cwd }, .{});
+    const control = try std.json.Stringify.valueAlloc(scratch, helper.Control{ .argv = &.{program}, .cwd = cwd }, .{});
     if (control.len > helper.control_limit) return error.InvalidViewerControl;
     try helper.write(native, dir, "control.json", control);
     const path = try std.fs.path.join(scratch, &.{ root, "control.json" });

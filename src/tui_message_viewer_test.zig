@@ -43,6 +43,9 @@ const Fixture = struct {
         try rex.writeStreamingAll(std.testing.io, fixture);
         rex.close(std.testing.io);
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "mode", .data = "ok" });
+        const nvim = try tmp.dir.createFile(std.testing.io, "nvim", .{ .permissions = .fromMode(0o700) });
+        try nvim.writeStreamingAll(std.testing.io, "#!/bin/sh\nexit 0\n");
+        nvim.close(std.testing.io);
         var env = std.process.Environ.Map.init(a);
         try env.put("PATH", root); // Cannot fall through to the user's real Rex.
         try env.put("TMPDIR", root);
@@ -71,7 +74,7 @@ test "message viewer full export, same-session literal argv, private copy and no
     @memset(content, 'x');
     const tail = "$(touch INJECTED); <end>";
     @memcpy(content[content.len - tail.len ..], tail);
-    try viewer.open(f.native, a, &f.env, content, .editor, &cancelled);
+    try viewer.open(f.native, a, &f.env, content, .nvim, &cancelled);
     const calls = try f.read(a, "calls");
     try std.testing.expect(std.mem.indexOf(u8, calls, "run\n--session\n" ++ session ++ "\n--cwd\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, calls, "\n--shell=none\n--json\n--\n") != null);
@@ -84,11 +87,8 @@ test "message viewer full export, same-session literal argv, private copy and no
     const control = try @import("mcp_profiles.zig").readPrivate(f.native, a, path, helper.control_limit);
     const parsed = try std.json.parseFromSlice(helper.Control, a, control, .{});
     try std.testing.expectEqualStrings(try std.process.currentPathAlloc(f.native.io, a), parsed.value.cwd);
-    try std.testing.expectEqual(@as(usize, 5), parsed.value.argv.len);
-    try std.testing.expectEqualStrings("/bin/echo", parsed.value.argv[0]);
-    try std.testing.expectEqualStrings("two words", parsed.value.argv[2]);
-    try std.testing.expectEqualStrings("$HOME;$(touch INJECTED)", parsed.value.argv[3]);
-    try std.testing.expectEqualStrings("", parsed.value.argv[4]);
+    try std.testing.expectEqual(@as(usize, 1), parsed.value.argv.len);
+    try std.testing.expectEqualStrings(try std.fs.path.join(a, &.{ f.root, "nvim" }), parsed.value.argv[0]);
     const dstat = try std.Io.Dir.cwd().statFile(f.native.io, root, .{});
     const fstat = try std.Io.Dir.cwd().statFile(f.native.io, path, .{});
     try std.testing.expectEqual(@as(u32, 0o700), dstat.permissions.toMode() & 0o777);
@@ -103,24 +103,20 @@ test "message viewer preflight rejects cap, missing programs and native Rex cont
     defer f.tmp.cleanup();
     var cancelled = std.atomic.Value(bool).init(false);
     const big = try a.alloc(u8, viewer.limit + 1);
-    try std.testing.expectError(error.MessageTooLarge, viewer.open(f.native, a, &f.env, big, .editor, &cancelled));
+    try std.testing.expectError(error.MessageTooLarge, viewer.open(f.native, a, &f.env, big, .nvim, &cancelled));
     try std.testing.expectError(error.LeafUnavailable, viewer.open(f.native, a, &f.env, "", .leaf, &cancelled));
+    // No fallback to EDITOR (the fixture has a working /bin/echo).
+    try f.tmp.dir.rename("nvim", f.tmp.dir, "hidden-nvim", f.native.io);
+    try std.testing.expectError(error.NvimUnavailable, viewer.open(f.native, a, &f.env, "", .nvim, &cancelled));
+    try f.tmp.dir.rename("hidden-nvim", f.tmp.dir, "nvim", f.native.io);
     _ = f.env.swapRemove("EDITOR");
-    try std.testing.expectError(error.EditorNotSet, viewer.open(f.native, a, &f.env, "", .editor, &cancelled));
-    try f.env.put("EDITOR", "missing-editor --wait");
-    try std.testing.expectError(error.EditorUnavailable, viewer.open(f.native, a, &f.env, "", .editor, &cancelled));
-    for ([_][]const u8{ "", "  ", "''", "/bin/echo 'bad", "editor\\", "editor\n--flag", "editor\x00bad" }) |invalid| {
-        try f.env.put("EDITOR", invalid);
-        try std.testing.expectError(error.InvalidEditor, viewer.open(f.native, a, &f.env, "", .editor, &cancelled));
-    }
-    try f.env.put("EDITOR", "/bin/echo");
     try f.env.put("REX_SESSION", "abbreviated");
-    try std.testing.expectError(error.ViewerRexContext, viewer.open(f.native, a, &f.env, "", .editor, &cancelled));
+    try std.testing.expectError(error.ViewerRexContext, viewer.open(f.native, a, &f.env, "", .nvim, &cancelled));
     try f.env.put("REX_SESSION", session);
     try f.env.put("REX_SERVER", "https://remote.example");
-    try std.testing.expectError(error.ViewerRexUnavailable, viewer.open(f.native, a, &f.env, "", .editor, &cancelled));
+    try std.testing.expectError(error.ViewerRexUnavailable, viewer.open(f.native, a, &f.env, "", .nvim, &cancelled));
     cancelled.store(true, .release);
-    try std.testing.expectError(error.Cancelled, viewer.open(f.native, a, &f.env, "", .editor, &cancelled));
+    try std.testing.expectError(error.Cancelled, viewer.open(f.native, a, &f.env, "", .nvim, &cancelled));
     try std.testing.expectError(error.FileNotFound, f.read(a, "calls"));
     var it = f.tmp.dir.iterate();
     while (try it.next(f.native.io)) |entry| try std.testing.expect(!std.mem.startsWith(u8, entry.name, "deck-message-"));
@@ -134,12 +130,12 @@ test "message viewer membership and transport refuse; uncertain run is not retri
     defer f.tmp.cleanup();
     var cancelled = std.atomic.Value(bool).init(false);
     try f.tmp.dir.writeFile(f.native.io, .{ .sub_path = "mode", .data = "wrong" });
-    try std.testing.expectError(error.ViewerRexContext, viewer.open(f.native, a, &f.env, "full text", .editor, &cancelled));
+    try std.testing.expectError(error.ViewerRexContext, viewer.open(f.native, a, &f.env, "full text", .nvim, &cancelled));
     try f.tmp.dir.writeFile(f.native.io, .{ .sub_path = "mode", .data = "remote" });
-    try std.testing.expectError(error.ViewerRexUnavailable, viewer.open(f.native, a, &f.env, "full text", .editor, &cancelled));
+    try std.testing.expectError(error.ViewerRexUnavailable, viewer.open(f.native, a, &f.env, "full text", .nvim, &cancelled));
     try std.testing.expectError(error.FileNotFound, f.read(a, "launched"));
     try f.tmp.dir.writeFile(f.native.io, .{ .sub_path = "mode", .data = "uncertain" });
-    try std.testing.expectError(error.ViewerLaunchUnconfirmed, viewer.open(f.native, a, &f.env, "full text", .editor, &cancelled));
+    try std.testing.expectError(error.ViewerLaunchUnconfirmed, viewer.open(f.native, a, &f.env, "full text", .nvim, &cancelled));
     const path = try f.read(a, "launched");
     _ = try @import("mcp_profiles.zig").readPrivate(f.native, a, path, helper.control_limit);
     const calls = try f.read(a, "calls");
@@ -180,7 +176,7 @@ test "message viewer rejects Rex identity changes between discovery and membersh
     defer f.tmp.cleanup();
     try f.tmp.dir.writeFile(f.native.io, .{ .sub_path = "mode", .data = "changed" });
     var cancelled = std.atomic.Value(bool).init(false);
-    try std.testing.expectError(error.ViewerRexUnavailable, viewer.open(f.native, a, &f.env, "message", .editor, &cancelled));
+    try std.testing.expectError(error.ViewerRexUnavailable, viewer.open(f.native, a, &f.env, "message", .nvim, &cancelled));
     try std.testing.expectError(error.FileNotFound, f.read(a, "launched"));
     var it = f.tmp.dir.iterate();
     while (try it.next(f.native.io)) |entry| try std.testing.expect(!std.mem.startsWith(u8, entry.name, "deck-message-"));
@@ -192,9 +188,9 @@ test "message viewer cannot authorize cleanup when child exit cannot be reaped" 
     const a = arena.allocator();
     var f = try Fixture.init(a);
     defer f.tmp.cleanup();
-    try f.env.put("EDITOR", "/usr/bin/true");
+    _ = f.env.swapRemove("EDITOR");
     var cancelled = std.atomic.Value(bool).init(false);
-    try viewer.open(f.native, a, &f.env, "private export", .editor, &cancelled);
+    try viewer.open(f.native, a, &f.env, "private export", .nvim, &cancelled);
     const path = try f.read(a, "launched");
     // Simulate an embedding process which auto-reaps children. ECHILD must not
     // authorize cleanup or signaling a PID that might have been reused.

@@ -17,6 +17,9 @@ const binary = process.env.DECK_TEST_BINARY;
 const selection = "SELECT MESSAGE";
 const esc = "\x1b", previous = "\x10", next = "\x0e";
 const wheelUp = "\x1b[<64;4;6M", wheelDown = "\x1b[<65;4;6M";
+// SGR coordinates are one-based. Send reports in separate steps so a press,
+// motion and release each cross the real parser/event loop, not one write.
+const mouse = (button: number, x: number, y: number, release = false) => `\x1b[<${button};${x};${y}${release ? "m" : "M"}`;
 const paste = (text: string) => `\x1b[200~${text}\x1b[201~`;
 const user = (id: number, text: string): HistoryEntry => ({ id, kind: "deck.input", data: { text } });
 const assistant = (id: number, text: string): HistoryEntry => ({ id, kind: "pi.assistant", model: [{ role: "assistant", content: [{ type: "text", text }] }] });
@@ -28,7 +31,8 @@ type Step = { keys: string } | { wait: string } | { capture: string } | { resize
 // Color runs are [start column, exclusive end, foreground, background]. Keeping
 // attributes and the terminal cursor catches regressions a text-only capture misses.
 type ColorRun = [number, number, string, string];
-type Screen = { text: string; colors: ColorRun[][]; cursor: { x: number; y: number; hidden: boolean } };
+type AttributeRun = [number, number, boolean, boolean]; // start, exclusive end, bold, italic
+type Screen = { text: string; colors: ColorRun[][]; attributes: AttributeRun[][]; cursor: { x: number; y: number; hidden: boolean } };
 type Capture = { restored: boolean; output: string; screens: Record<string, Screen> };
 
 async function until(predicate: () => boolean) {
@@ -99,17 +103,22 @@ def selection_capture():
     screen = SilentScreen(cols, rows)
     data = re.sub(rb"\x1b\[([0-9:;]*)m", lambda m: b"\x1b[" + m.group(1).replace(b"::", b":").replace(b":", b";") + b"m", committed_output(bytes(output)))
     pyte.ByteStream(screen).feed(data)
-    colors = []
+    colors, attributes = [], []
     for y in range(rows):
-        runs = []
+        runs, styles = [], []
         for x in range(cols):
             cell = screen.buffer[y][x]
             if runs and runs[-1][2:] == [cell.fg, cell.bg]:
                 runs[-1][1] = x + 1
             else:
                 runs.append([x, x + 1, cell.fg, cell.bg])
+            if styles and styles[-1][2:] == [cell.bold, cell.italics]:
+                styles[-1][1] = x + 1
+            else:
+                styles.append([x, x + 1, cell.bold, cell.italics])
         colors.append(runs)
-    return {"text": rendered(), "colors": colors, "cursor": {"x": screen.cursor.x, "y": screen.cursor.y, "hidden": screen.cursor.hidden}}
+        attributes.append(styles)
+    return {"text": rendered(), "colors": colors, "attributes": attributes, "cursor": {"x": screen.cursor.x, "y": screen.cursor.y, "hidden": screen.cursor.hidden}}
 exec(compile(source.replace(assignment, 'screens[step["capture"]] = selection_capture()'), path, "exec"))
 `;
 
@@ -128,13 +137,23 @@ async function pty(f: Awaited<ReturnType<typeof fixture>>, steps: Step[], env: N
     await closed;
   }
 }
+function noOrangeFill(screen: Screen) {
+  assert.ok(screen.colors.every(runs => runs.every(run => run[3] !== "ffc799")), "Selection must never paint an orange background");
+}
 function selected(screen: Screen, expected: RegExp) {
   assert.match(screen.text, /SELECT MESSAGE/); assert.equal(screen.cursor.hidden, true, "Selected history must hide the prompt cursor");
+  noOrangeFill(screen);
   const rows = screen.text.split("\n");
-  const highlighted = screen.colors.flatMap((runs, y) => runs.some(run => run[3] === "ffc799") ? [y] : []);
-  assert.ok(highlighted.length > 0, "Selection must be orange, not just a mode label");
+  const highlighted = screen.colors.flatMap((runs, y) => runs[0]?.[2] === "ffc799" ? [y] : []);
+  assert.ok(highlighted.length > 0, "Selection must have an orange left border, not just a mode label");
+  assert.deepEqual(highlighted, Array.from({ length: highlighted.length }, (_, i) => highlighted[0]! + i), "Every owned row, including intervening blank rows, needs a border");
+  assert.deepEqual(rows.flatMap((row, y) => row.startsWith("│") ? [y] : []), highlighted, "The border glyph and orange foreground must identify exactly the same rows");
   for (const y of highlighted) {
-    assert.ok(screen.colors[y]!.every(run => run[2] === "000000" && run[3] === "ffc799"), `Whole selected row ${y}, including its gutter, must be black on orange`);
+    const [border, ...content] = screen.colors[y]!;
+    assert.deepEqual(border!.slice(0, 3), [0, 1, "ffc799"], `Row ${y} must have exactly one orange column at the left edge`);
+    assert.equal(rows[y]![0], "│");
+    assert.ok(content.every(run => run[2] !== "000000"), `Selected row ${y} must not have black foreground`);
+    assert.ok(content.every(run => run[2] === "ffffff"), `Selected row ${y} text and speaker must stay white, not orange`);
   }
   assert.match(highlighted.map(y => rows[y]).join("\n"), expected);
   return highlighted;
@@ -142,11 +161,21 @@ function selected(screen: Screen, expected: RegExp) {
 function unselected(screen: Screen) {
   assert.doesNotMatch(screen.text, /SELECT MESSAGE/);
   assert.equal(screen.cursor.hidden, false, "Input cursor must return after selection ends");
-  assert.ok(screen.colors.every(runs => runs.every(run => run[3] !== "ffc799")), "No stale orange selection rows");
+  noOrangeFill(screen);
+  assert.ok(screen.text.split("\n").every(row => !row.startsWith("│")), "No stale selection border glyphs");
+  assert.ok(screen.colors.every(runs => runs[0]?.[2] !== "ffc799"), "No stale orange left border");
 }
 function chat(screen: Screen) {
   const rows = screen.text.split("\n"), rule = rows.findIndex(row => row.startsWith("─"));
-  assert.ok(rule > 0); return rows.slice(0, rule - 1);
+  // Esc removes only the border. Preserve every other column and every row so
+  // viewport/wrapping assertions still detect shifted or replaced content.
+  assert.ok(rule > 0); return rows.slice(0, rule - 1).map(row => row.replace(/^│/, " "));
+}
+function sameChatPaint(before: Screen, after: Screen) {
+  assert.deepEqual(chat(after), chat(before), "Selection must not change content coordinates or wrapping");
+  const backgrounds = (screen: Screen) => screen.colors.slice(0, chat(screen).length).map(runs => runs.flatMap(([start, end, , background]) => Array<string>(end - start).fill(background)));
+  assert.deepEqual(backgrounds(after), backgrounds(before), "Selection must preserve user blue, assistant base and Markdown code backgrounds in every column");
+  assert.deepEqual(after.attributes.slice(0, chat(after).length), before.attributes.slice(0, chat(before).length), "Selection must preserve Markdown bold and italic attributes");
 }
 function readOnlyRequests(f: Awaited<ReturnType<typeof fixture>>, allowAdmit = false) {
   assert.ok(f.requests.every(request => ["status", "history", "activity", "progress", "message_content", ...(allowAdmit ? ["admit"] : [])].includes(request.command)), "Selection/viewing must never mutate a chat, task, draft or Rex allocation");
@@ -199,24 +228,42 @@ test("TUI adapter: full-message chunks are scoped transient replies, preserving 
   } finally { await f.close(); }
 });
 
-test("real PTY: Ctrl-P only in Normal mode; message traversal highlights whole rows, hides cursor and preserves exact prompt", { skip: !binary, timeout: 25_000 }, async () => {
-  const retained = [user(7, "FIRST retained user"), assistant(21, "SECOND **bold** answer\n\n- Markdown bullet\n- Other bullet"), user(35, "THIRD newest message")];
+test("real PTY: Ctrl-P only in Normal mode; selection borders owned rows with white text and unchanged backgrounds, layout and prompt", { skip: !binary, timeout: 25_000 }, async () => {
+  const wrapped = "wrapped content ".repeat(8);
+  const retained = [user(7, "FIRST retained user"), assistant(21, `SECOND **bold** answer\n\n${wrapped}\n\n- Markdown bullet\n- Other *italic* bullet\n\n\`\`\`ts\nconst answer = 42;\n\`\`\``), user(35, "THIRD newest message")];
   const original = JSON.stringify(retained), f = await fixture(retained);
   const prompt = "  Preserve exact draft 🧪\nsecond line  ";
   try {
     const { screens } = await pty(f, [
       { wait: "THIRD newest message" }, { keys: paste(prompt) }, { wait: "second line" },
       { keys: previous }, { capture: "insert" }, // Ctrl-P must not select while editing.
-      { keys: esc }, { keys: previous }, { wait: selection }, { capture: "newest" },
+      { keys: esc }, { capture: "normal" }, { keys: previous }, { wait: selection }, { capture: "newest" },
       { keys: previous }, { capture: "answer" },
       { keys: "iXYZ\r\x13" }, { keys: paste("MUST_NOT_REPLACE_PROMPT") }, { capture: "ignored" },
       { keys: next }, { capture: "backToNewest" }, { keys: next }, { sleep: 0.2 }, { capture: "input" },
       { keys: "A!" }, { keys: "\r" }, { wait: "Input admitted" }, { keys: esc }, { keys: ":q\r" },
     ]);
-    unselected(screens.insert!); selected(screens.newest!, /THIRD newest message/);
+    unselected(screens.insert!); unselected(screens.normal!);
+    const newestRows = selected(screens.newest!, /THIRD newest message/);
+    const normalRows = chat(screens.normal!), newestText = normalRows.findIndex(row => row.includes("THIRD newest message"));
+    assert.ok(newestText > 0);
+    assert.deepEqual(newestRows, [newestText - 1, newestText, newestText + 1], "User top/bottom padding must have the same border as the text row, without selecting the following gap");
+    for (const y of newestRows) assert.ok(screens.newest!.colors[y]!.every(run => run[3] === "182030"), "The entire selected user panel must retain its blue background");
     const rows = selected(screens.answer!, /SECOND bold answer/);
-    assert.ok(rows.length >= 4, "All Markdown lines and owned spacing belong to the selection");
+    const answerStart = normalRows.findIndex(row => row.includes("SECOND bold answer"));
+    assert.ok(answerStart >= 0);
+    assert.deepEqual(rows, Array.from({ length: newestText - 1 - answerStart }, (_, i) => answerStart + i), "All Markdown lines and owned spacing, including the final blank row, need borders");
     assert.match(rows.map(y => screens.answer!.text.split("\n")[y]).join("\n"), /Markdown bullet/);
+    const codeRow = normalRows.findIndex(row => row.includes("const answer = 42;"));
+    assert.ok(rows.includes(codeRow));
+    assert.ok(screens.normal!.colors[codeRow]!.some(run => run[3] === "202020"), "Fixture must exercise a distinct Markdown code background");
+    assert.ok(normalRows.filter(row => row.includes("wrapped content")).length >= 2, "Fixture must exercise wrapped message coordinates");
+    for (const [word, attribute] of [["bold", 2], ["italic", 3]] as const) {
+      const y = normalRows.findIndex(row => row.includes(word)), x = normalRows[y]!.indexOf(word);
+      const run = screens.normal!.attributes[y]!.find(([start, end]) => start <= x && end >= x + word.length);
+      assert.equal(run?.[attribute], true, `Fixture must render Markdown ${word} before selecting`);
+    }
+    for (const name of ["newest", "answer", "ignored", "backToNewest", "input"]) sameChatPaint(screens.normal!, screens[name]!);
     selected(screens.ignored!, /SECOND bold answer/); assert.doesNotMatch(screens.ignored!.text, /MUST_NOT_REPLACE_PROMPT|XYZ|Input admitted/);
     selected(screens.backToNewest!, /THIRD newest message/); unselected(screens.input!);
     assert.deepEqual(f.requests.filter(r => r.command === "admit").map(r => r.args.text), [prompt + "!"]);
@@ -231,13 +278,17 @@ test("real PTY: mouse selects a retained message from Insert; resize and selecte
     const { screens } = await pty(f, [
       { wait: "THIRD line 16" }, { keys: prompt }, { keys: wheelUp.repeat(3) }, { wait: "Scrolled up" }, { capture: "ordinaryScroll" },
       { keys: "still editable" }, { wait: "mouse draft  still editable" }, { capture: "edited" },
-      // Click the first visible retained row, including its left gutter.
-      { keys: "\x1b[<0;1;1M\x1b[<0;1;1m" }, { wait: selection }, { capture: "clicked" },
+      // Click the first visible retained row, including its left gutter. A
+      // press alone must not hide/lock the editor or select a retained ID.
+      { keys: mouse(0, 1, 1) }, { capture: "pressed" },
+      { keys: mouse(0, 1, 1, true) }, { wait: selection }, { capture: "clicked" },
       { resize: [40, 90] }, { capture: "resized" }, { keys: wheelUp }, { capture: "selectedScroll" },
       { keys: esc }, { capture: "escaped" },
       { keys: "A!" }, { keys: "\r" }, { wait: "Input admitted" }, { keys: esc }, { keys: ":q\r" },
     ]);
-    unselected(screens.ordinaryScroll!); unselected(screens.edited!);
+    unselected(screens.ordinaryScroll!); unselected(screens.edited!); unselected(screens.pressed!);
+    sameChatPaint(screens.edited!, screens.pressed!);
+    assert.deepEqual(screens.pressed!.cursor, screens.edited!.cursor, "Press must leave the editable prompt cursor untouched");
     const clickedLabel = chat(screens.edited!)[0]!.match(/(FIRST|SECOND|THIRD) line/)?.[1];
     assert.ok(clickedLabel, "The click must hit a known retained message row");
     for (const name of ["clicked", "resized", "selectedScroll"]) {
@@ -249,6 +300,77 @@ test("real PTY: mouse selects a retained message from Insert; resize and selecte
     unselected(screens.escaped!); assert.deepEqual(chat(screens.escaped!), chat(screens.selectedScroll!), "Esc must not jump to the latest messages");
     assert.deepEqual(f.requests.filter(r => r.command === "admit").map(r => r.args.text), [prompt + "still editable!"]);
     readOnlyRequests(f, true);
+  } finally { await f.close(); }
+});
+
+// These are application mouse reports, not a GUI clipboard test. Terminals can
+// reserve modified drags (usually Shift-drag) for their native selection/copy.
+for (const alreadySelected of [false, true]) test(`real PTY: cancelled content gestures preserve ${alreadySelected ? "another selected retained ID" : "the editable prompt without selecting history"}`, { skip: !binary, timeout: 30_000 }, async () => {
+  // Leave one older page available: an accidental press-selection of TARGET
+  // would also start a read, even if a later event removed its painted border.
+  const retained = [hidden(3), assistant(7, "TARGET retained content to drag across"), user(21, "ANCHOR other retained message")];
+  const original = JSON.stringify(retained), f = await fixture(retained, 2);
+  const prompt = "  mouse gesture draft 🧪\nkeep trailing spaces  ";
+  const older = () => f.requests.filter(r => r.command === "history" && r.args.before !== undefined);
+  f.checkpoints.set("no-prefetch", () => {
+    assert.deepEqual(older(), [], "Presses and cancelled gestures must not prefetch history");
+    assert.equal(f.requests.filter(r => r.command === "message_content").length, 0);
+  });
+  f.checkpoints.set("completed-prefetch", async () => { await until(() => older().length === 1); });
+  // At 100 columns the body begins at column 11 (one-based); row 1 is
+  // TARGET's actual text, not its gutter, padding, or the prompt below.
+  const press = mouse(0, 15, 1), release = mouse(0, 15, 1, true);
+  const gestures: [string, string[]][] = [
+    ["stray-release", [release]],
+    ["drag-away", [press, mouse(32, 30, 1), mouse(0, 30, 1, true)]],
+    ["drag-return", [press, mouse(32, 30, 1), mouse(32, 15, 1), release]],
+    ["same-cell-motion", [press, mouse(32, 15, 1), release]],
+    ["release-elsewhere", [press, mouse(0, 16, 1, true)]],
+    ["release-in-prompt", [press, mouse(0, 15, 36, true), release]],
+  ];
+  for (const [modifier, bits] of [["shift", 4], ["alt", 8], ["ctrl", 16]] as const) {
+    gestures.push([`${modifier}-press`, [mouse(bits, 15, 1), release]]);
+    // An ignored modified release must also disarm the candidate; the next
+    // unmodified release cannot resurrect it as a completed click.
+    gestures.push([`${modifier}-release`, [press, mouse(bits, 15, 1, true), release]]);
+  }
+  try {
+    const steps: Step[] = [{ wait: "ANCHOR other retained message" }, { keys: paste(prompt) }, { wait: "keep trailing spaces" }];
+    if (alreadySelected) steps.push({ keys: esc }, { keys: previous }, { wait: selection });
+    steps.push({ capture: "before" });
+    const unchanged: string[] = [];
+    for (const [name, reports] of gestures) for (const [i, keys] of reports.entries()) {
+      const capture = `${name}-${i}`;
+      // Never combine a gesture in one write: inspect press and motion states
+      // as well as release, so temporary selection/prompt locking also fails.
+      steps.push({ keys }, { capture }); unchanged.push(capture);
+    }
+    steps.push(
+      { checkpoint: "no-prefetch" },
+      { keys: press }, { capture: "completedPress" }, { checkpoint: "no-prefetch" },
+      { keys: release }, { wait: selection }, { checkpoint: "completed-prefetch" }, { capture: "clicked" },
+      { keys: esc }, { capture: "returned" },
+      { keys: "A!" }, { keys: "\r" }, { wait: "Input admitted" }, { keys: esc }, { keys: ":q\r" },
+    );
+    unchanged.push("completedPress");
+    const { screens } = await pty(f, steps);
+    assert.equal(chat(screens.before!)[0]!.slice(10, 16), "TARGET", "Gesture coordinates must hit the retained message's content");
+    const expectedRows = alreadySelected ? selected(screens.before!, /ANCHOR other retained message/) : undefined;
+    if (!alreadySelected) unselected(screens.before!);
+    for (const name of unchanged) {
+      const screen = screens[name]!;
+      if (alreadySelected) assert.deepEqual(selected(screen, /ANCHOR other retained message/), expectedRows, `${name} must preserve the previously selected entry, not select TARGET`);
+      else {
+        unselected(screen);
+        assert.deepEqual(screen.cursor, screens.before!.cursor, `${name} must not move or hide the editable prompt cursor`);
+      }
+      sameChatPaint(screens.before!, screen);
+      assert.match(screen.text, /mouse gesture draft 🧪/); assert.match(screen.text, /keep trailing spaces/);
+    }
+    selected(screens.clicked!, /TARGET retained content/); unselected(screens.returned!);
+    assert.deepEqual(older().map(r => r.args.before), ["7"], "Only the completed click may prefetch the oldest message's preceding page");
+    assert.deepEqual(f.requests.filter(r => r.command === "admit").map(r => r.args.text), [prompt + "!"]);
+    assert.equal(JSON.stringify(retained), original); readOnlyRequests(f, true);
   } finally { await f.close(); }
 });
 
@@ -286,7 +408,7 @@ for (const key of ["v", "l"] as const) test(`real PTY: selected ${key} reads the
   const original = JSON.stringify(retained), f = await fixture(retained, 80, new Map([["21", text]]));
   const prompt = "  viewer draft 🧪\nkeep trailing spaces  ";
   try {
-    // Never discover a real Leaf or Rex executable from the developer's PATH.
+    // Never discover a real nvim, Leaf or Rex executable from the developer's PATH.
     // Keep only the dependencies used by the actual PTY/client bridge.
     const bin = join(f.local.env.DECK_CLIENT_STATE_DIRECTORY!, "bin"); await mkdir(bin);
     const python = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], { encoding: "utf8" }); assert.equal(python.status, 0, python.stderr);
@@ -300,7 +422,7 @@ for (const key of ["v", "l"] as const) test(`real PTY: selected ${key} reads the
       assert.ok(completedRequests >= 3); assert.equal(f.pages.map(p => p.text).join(""), text);
     });
     f.checkpoints.set("no-retry", () => { assert.equal(f.requests.filter(r => r.command === "message_content").length, completedRequests); });
-    const error = key === "v" ? "Set $EDITOR to view messages" : "Leaf is unavailable on PATH";
+    const error = key === "v" ? "nvim is unavailable on PATH" : "Leaf is unavailable on PATH";
     const result = await pty(f, [
       { wait: "Full preview row" }, { keys: paste(prompt) }, { keys: esc }, { keys: previous }, { wait: selection }, { capture: "selected" },
       { keys: key }, { wait: error }, { checkpoint: "downloaded" }, { capture: "error" },
