@@ -9,7 +9,7 @@ import { validInventoryFields } from "./tool-inventory-contracts.js";
 import { localGitBranch } from "./tui-workspace.js";
 import { canParticipate, requireParticipation, requireNavigation, requireCreation, inspectOnly } from "./client-access.js";
 import type { HistoryPage, TuiClientMode } from "./generated/contracts.js";
-import { validAgentStatus, validSubagents } from "./view-contracts.js";
+import { validAgentStatus, validSubagents, validManagedChildren } from "./view-contracts.js";
 import { validRexReply } from "./rex-open-contracts.js";
 import { sameSelection, validModelSettingsSnapshot } from "./model-settings-contracts.js";
 import { randomUUID } from "node:crypto";
@@ -82,6 +82,7 @@ export function validReply(value: unknown, id: string, hubId?: string, chatId?: 
   if (!validInventoryFields(s)) return false;
   if (s.agentStatus && !validAgentStatus(s.agentStatus)) return false;
   if (s.subagents !== undefined && !validSubagents(s.subagents, s.chatId)) return false;
+  if (s.children !== undefined && (s.inspectParentChatId !== undefined || s.kind === "subagent" || !validManagedChildren(s.children, s.chatId))) return false;
   if (s.modelSettings && (!validModelSettingsSnapshot(s.modelSettings) || s.modelSettings.hubId !== s.hubId || s.modelSettings.chatId !== s.chatId)) return false;
   if (s.admittedInputs !== undefined && (s.kind === "subagent" || s.inspectParentChatId !== undefined || !canParticipate(s.clientMode, s.chatId, s.hubChatId) ||
     s.admittedInputs.some(input => Buffer.byteLength(input.text) > entryBytes) || new Set(s.admittedInputs.map(input => input.requestId)).size !== s.admittedInputs.length)) return false;
@@ -245,7 +246,7 @@ export class TuiSession {
     let limit = this.pageLimits[direction];
     for (;;) {
       try {
-        const page = await this.readView("history", { chatId: this.chatId, limit, ...(before ? { before } : {}), ...(after ? { after } : {}), includeActivity: true, includeAgentStatus: true, includeSubagents: true, includeProgress: true });
+        const page = await this.readView("history", { chatId: this.chatId, limit, ...(before ? { before } : {}), ...(after ? { after } : {}), includeActivity: true, includeAgentStatus: true, includeSubagents: true, ...(!this.inspectParentChatId && this.state?.kind !== "subagent" ? { includeChildren: true } : {}), includeProgress: true });
         this.pageLimits[direction] = limit;
         return page;
       }
@@ -312,6 +313,8 @@ export class TuiSession {
     // Absence is unknown, never a fresh replay of an old completion/idle sample.
     delete this.state!.agentStatus;
     delete this.state!.subagents;
+    delete this.state!.children;
+    if (!this.inspectParentChatId && this.state!.kind !== "subagent" && page.activity?.children) this.state!.children = { ...page.activity.children, items: page.activity.children.items.map(item => ({ ...item, title: displayText(item.title, 160).replace(/\n/g, " ") })) };
     if (page.activity?.subagents) this.state!.subagents = { ...page.activity.subagents, items: page.activity.subagents.items.map((item: import("./generated/contracts.js").SubagentItem) => ({ ...item, title: displayText(item.title, 160).replace(/\n/g, " ") })) };
     if (page.activity?.agentStatus) this.state!.agentStatus = page.activity.agentStatus;
     this.state!.activityKnown = page.activity !== undefined;
@@ -431,13 +434,16 @@ export class TuiSession {
   }
   async handle(request: TuiRequest): Promise<TuiSnapshot> {
     if (!validRequest(request)) throw new Error("Invalid renderer request");
-    if (request.action !== "subagent" && request.action !== "parent") return this.handleRequest(request);
+    if (request.action !== "subagent" && request.action !== "parent") {
+      try { return await this.handleRequest(request); }
+      catch (error) { if (this.state) delete this.state.children; throw error; }
+    }
     // These transitions perform reads only. Commit their local selection only
     // when the entire first view succeeds, not merely the status lookup. A lost
     // history/settings read must not make the next poll jump behind the renderer.
     const previous = { ...this, state: this.state ? structuredClone(this.state) : undefined };
     try { return await this.handleRequest(request); }
-    catch (error) { Object.assign(this, previous); throw error; }
+    catch (error) { Object.assign(this, previous); if (this.state) delete this.state.children; throw error; }
   }
   private async handleRequest(request: TuiRequest): Promise<TuiSnapshot> {
     if (!validRequest(request)) throw new Error("Invalid renderer request");
@@ -592,7 +598,7 @@ export class TuiSession {
           state.entries = rendered.entries; this.before = rendered.next; state.hasOlder = !!rendered.next; state.historical = false; this.sample(page);
         } else {
           // Keep a scrolled/history window stable; samples never replace it.
-          const activity = await this.readView("activity", { chatId: this.chatId, includeAgentStatus: true, includeSubagents: true });
+          const activity = await this.readView("activity", { chatId: this.chatId, includeAgentStatus: true, includeSubagents: true, ...(!this.inspectParentChatId && this.state?.kind !== "subagent" ? { includeChildren: true } : {}) });
           const progress = await this.readView("progress", { chatId: this.chatId });
           this.sample({ activity, progress });
         }

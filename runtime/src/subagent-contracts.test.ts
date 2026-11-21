@@ -26,11 +26,12 @@ test("shared subagent semantics also fence runtime renderer replies, including u
   const { bases } = JSON.parse(await readFile(new URL("../../src/contracts.test.json", import.meta.url), "utf8"));
   const fixtures = JSON.parse(await readFile(new URL("../../src/views.test.json", import.meta.url), "utf8"));
   for (const fixture of fixtures) {
-    if (!fixture.name.startsWith("subagents ")) continue;
+    const field = fixture.name.startsWith("children ") ? "children" : "subagents";
+    if (!fixture.name.startsWith(`${field} `)) continue;
     const args = fixture.args ?? {};
     if (!validLiveArgs(args) || (args.chatId !== undefined && args.chatId !== fixture.result.chatId)) continue;
     const snapshot = { ...bases.TuiSnapshot, chatId: fixture.result.chatId };
-    if (Object.hasOwn(fixture.result, "subagents")) snapshot.subagents = fixture.result.subagents;
+    if (Object.hasOwn(fixture.result, field)) snapshot[field] = fixture.result[field];
     const response = { version: 1, id: "1", ok: true, snapshot };
     const before = JSON.stringify(response);
     assert.equal(validActivity(fixture.result), fixture.valid, fixture.name);

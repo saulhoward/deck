@@ -23,6 +23,13 @@ export function validAgentStatus(value: unknown): value is wire.AgentStatus {
 }
 export function validSubagents(value: unknown, chatId?: string): value is wire.SubagentSnapshot {
   if (!wire.validSubagentSnapshot(value) || !scope(value.chatId, chatId)) return false;
+  return validChildItems(value);
+}
+export function validManagedChildren(value: unknown, chatId?: string): value is wire.ManagedChildSnapshot {
+  return wire.validManagedChildSnapshot(value) && scope(value.chatId, chatId) && validChildItems(value);
+}
+// Shared ordering/status rules, not shared ownership or discovery semantics.
+function validChildItems(value: wire.SubagentSnapshot | wire.ManagedChildSnapshot): boolean {
   const parent = Number(value.chatId);
   let previous = Infinity;
   for (const child of value.items) {
@@ -38,6 +45,7 @@ export function validActivity(value: unknown, chatId?: string): value is wire.Ac
   return wire.validActivitySnapshot(value) && scope(value.chatId, chatId)
     && (value.agentStatus === undefined || validAgentStatus(value.agentStatus))
     && (value.subagents === undefined || validSubagents(value.subagents, value.chatId))
+    && (value.children === undefined || validManagedChildren(value.children, value.chatId))
     && (value.runTaskId === undefined || validSafePiId(value.runTaskId))
     && value.tools.every((tool) => tool.callId.length <= 128 && tool.name.length <= 80 && (tool.taskId === undefined || validSafePiId(tool.taskId)));
 }

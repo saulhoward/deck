@@ -44,6 +44,12 @@ pub fn validAgentStatus(value: std.json.Value) bool {
 }
 pub fn validSubagents(value: std.json.Value, chat: ?std.json.Value) bool {
     if (!wire.validSubagentSnapshot(value) or !same(value.object.get("chatId").?, chat)) return false;
+    return validChildItems(value);
+}
+pub fn validManagedChildren(value: std.json.Value, chat: ?std.json.Value) bool {
+    return wire.validManagedChildSnapshot(value) and same(value.object.get("chatId").?, chat) and validChildItems(value);
+}
+fn validChildItems(value: std.json.Value) bool {
     const parent = std.fmt.parseInt(u64, value.object.get("chatId").?.string, 10) catch return false;
     var previous: u64 = std.math.maxInt(u64);
     for (value.object.get("items").?.array.items) |child| {
@@ -61,6 +67,7 @@ fn activity(value: std.json.Value, chat: ?std.json.Value) bool {
     if (!wire.validActivitySnapshot(value) or !same(value.object.get("chatId").?, chat)) return false;
     if (value.object.get("agentStatus")) |status| if (!validAgentStatus(status)) return false;
     if (value.object.get("subagents")) |children| if (!validSubagents(children, value.object.get("chatId"))) return false;
+    if (value.object.get("children")) |children| if (!validManagedChildren(children, value.object.get("chatId"))) return false;
     if (value.object.get("runTaskId")) |id| if (!safeId(id)) return false;
     for (value.object.get("tools").?.array.items) |tool| {
         if (!unitsWithin(tool.object.get("callId").?, 128) or !unitsWithin(tool.object.get("name").?, 80)) return false;

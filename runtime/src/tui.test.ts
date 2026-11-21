@@ -98,7 +98,7 @@ async function fixture(withSettings = false, withProgramStatus = false, withStyl
   const session = new TuiSession((name, args, expected) => hubCommand(address.port, name, args, expected), undefined, undefined, local.env.DECK_CLIENT_STATE_DIRECTORY);
   let sequence = 0;
   const action = (action: TuiRequest["action"], text?: string, hold?: boolean, configuration?: ModelSettingsChange) => session.handle({ version: 1, id: String(++sequence), action, ...(text !== undefined ? { text } : {}), ...(hold !== undefined ? { hold } : {}), ...(configuration ? { configuration } : {}) });
-  return { local, requests, port: address.port, action, holdNext, retainInputs: () => { retainedInputs = requests.filter(r => r.command === "admit").map((r, i) => ({ id: 121 + i, kind: "deck.input", data: { requestId: r.args.requestId, text: r.args.text } })); }, newest: (id: number) => { history.newest = id; }, runningTools: (names: string[]) => { activity.tools = names.map((name, i) => ({ callId: String(i + 1), name, status: "running", nested: false })); }, plainHistory: () => { plainHistory = true; }, subagents: (value: ActivitySnapshot["subagents"]) => { if (value === undefined) delete activity.subagents; else activity.subagents = value; }, settingsLoss: (value: boolean) => { settingsLoss = value; }, settingsInvalid: (value: boolean) => { settingsInvalid = value; }, loss: (value: boolean) => { loss = value; }, malformed: (value: boolean) => { malformed = value; }, oversized: () => { oversized = true; }, hang: () => { hang = true; }, close: async () => { for (const reply of pendingGates) reply.resolve("fail"); server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); await local.close(); } };
+  return { local, requests, port: address.port, action, holdNext, retainInputs: () => { retainedInputs = requests.filter(r => r.command === "admit").map((r, i) => ({ id: 121 + i, kind: "deck.input", data: { requestId: r.args.requestId, text: r.args.text } })); }, newest: (id: number) => { history.newest = id; }, runningTools: (names: string[]) => { activity.tools = names.map((name, i) => ({ callId: String(i + 1), name, status: "running", nested: false })); }, plainHistory: () => { plainHistory = true; }, children: (value: ActivitySnapshot["children"]) => { if (value === undefined) delete activity.children; else activity.children = value; }, subagents: (value: ActivitySnapshot["subagents"]) => { if (value === undefined) delete activity.subagents; else activity.subagents = value; }, settingsLoss: (value: boolean) => { settingsLoss = value; }, settingsInvalid: (value: boolean) => { settingsInvalid = value; }, loss: (value: boolean) => { loss = value; }, malformed: (value: boolean) => { malformed = value; }, oversized: () => { oversized = true; }, hang: () => { hang = true; }, close: async () => { for (const reply of pendingGates) reply.resolve("fail"); server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve())); await local.close(); } };
 }
 
 test("TUI adapter holds bounded canonical pages, samples independently, reduces only validated too-large reads", async () => {
@@ -600,7 +600,9 @@ test("real PTY: Vesper sidebar, centered Markdown/table, expanding prompt and En
     assert.equal(wide[30]!.slice(90).trim(), "#SUBAGENTS");
     assert.equal(wide[33]!.slice(90).trim(), "#TOOLS");
     assert.equal(wide[35]!.slice(90).trim(), "Unknown, not an empty tool list.");
-    assert.ok(wide.slice(6, 30).every(row => row.slice(89).trim() === ""));
+    assert.equal(wide[6]!.slice(90).trim(), "#CHILDREN");
+    assert.equal(wide[7]!.slice(90).trim(), "Unavailable");
+    assert.ok(wide.slice(8, 30).every(row => row.slice(89).trim() === ""));
     assert.equal(wide[36]!.slice(89).trim(), ""); // Bottom sidebar padding.
     assert.ok(wide.some(row => row.indexOf("Please render") === 4));
     assert.ok(wide.slice(0, 37).filter(row => !row.startsWith("─")).every(row => row.slice(84, 88).trim() === ""));
@@ -816,12 +818,56 @@ test("real PTY: subagent sidebar updates working/done/error and unknown, reports
     assert.equal(sidebar[29], "#SUBAGENTS"); assert.equal(sidebar[33], "#TOOLS");
     assert.equal(sidebar[31], "Review");
     assert.equal(sidebar[35], "Unknown, not an empty tool list.");
-    assert.ok(sidebar.slice(6, 29).every(row => row === ""));
+    assert.equal(sidebar[6], "#CHILDREN"); assert.equal(sidebar[7], "Unavailable");
+    assert.ok(sidebar.slice(8, 29).every(row => row === ""));
     const small = screens.small!.split("\n").map(row => row.slice(90).trim());
-    assert.equal(small[19], "empty tool list.");
+    assert.equal(small[19], "2 more rows"); // New top section reserves space; clipped tools remain explicit.
     assert.equal(small[20], ""); assert.equal(sidebar[36], "");
     assert.doesNotMatch(screens.small!, /Inventory unavailable.*working/);
     assert.ok(f.requests.filter(r => r.command === "history" || r.command === "activity").every(r => r.args.includeSubagents === true));
+    assert.ok(f.requests.every(r => ["status", "history", "activity", "progress"].includes(r.command)));
+  } finally { await f.close(); }
+});
+
+test("real PTY: managed children stay at the top through status refresh, overflow, resize and message selection", { skip: !testBinary, timeout: 30_000 }, async () => {
+  const f = await fixture(), screens: Record<string, string> = {};
+  const children: NonNullable<ActivitySnapshot["children"]> = { chatId: "1", items: [{ chatId: "3", title: "Managed problem", agentName: "wintermute", agentRune: "ᚠ", status: { state: "working" } }], hasMore: false };
+  f.plainHistory(); f.children({ chatId: "1", items: [], hasMore: false });
+  f.subagents({ chatId: "1", items: [{ chatId: "2", title: "Captured review", agentName: "DS001" }], hasMore: false });
+  try {
+    await pty(f.port, f.local.env, [
+      { wait: "mock/echo" }, { resize: [40, 140] }, { wait_row: { row: 6, text: "#CHILDREN" } }, { wait_row: { row: 7, text: "None" } },
+      { keys: "keep exact child prompt" }, { checkpoint: "working" }, { wait_row: { row: 7, text: "working" } }, { capture: "working" },
+      { keys: "\x1b" }, { keys: "\x10" }, { wait: "SELECT MESSAGE" },
+      { checkpoint: "done" }, { wait_row: { row: 7, text: "done" } }, { capture: "selected" },
+      { checkpoint: "unknown" }, { wait_row: { row: 7, text: "unknown" } },
+      { keys: "\x1b" }, { keys: ":older\r" }, { wait: "Older history" },
+      { checkpoint: "error" }, { wait_row: { row: 7, text: "error" } }, { capture: "historical" },
+      { checkpoint: "overflow" }, { wait_row: { row: 17, text: "11+ more" } }, { capture: "overflow" },
+      { resize: [24, 112] }, { wait_row: { row: 9, text: "15+ more" } }, { capture: "small" },
+      { resize: [40, 140] }, { checkpoint: "omitted" }, { wait_row: { row: 7, text: "Children omitted" } },
+      { checkpoint: "unavailable" }, { wait_row: { row: 7, text: "Unavailable" } },
+      { checkpoint: "working" }, { wait_row: { row: 7, text: "working" } },
+      { checkpoint: "failRead" }, { wait_row: { row: 6, text: "#CHILDREN · STALE" } }, { capture: "stale" }, { keys: ":q!\r" },
+    ], screens, {
+      working: () => { children.items[0]!.status = { state: "working" }; f.children(children); },
+      done: () => { children.items[0]!.status = { state: "done", taskId: "10" }; },
+      unknown: () => { delete children.items[0]!.status; },
+      error: () => { children.items[0]!.status = { state: "error", taskId: "11" }; },
+      overflow: () => f.children({ chatId: "1", items: Array.from({ length: 16 }, (_, i) => ({ chatId: String(30 - i), title: "Managed problem", agentName: `helper-${i}`, status: { state: "working" as const } })), hasMore: true }),
+      omitted: () => f.children({ chatId: "1", items: [], hasMore: true }),
+      unavailable: () => f.children(undefined),
+      failRead: async () => { const held = f.holdNext("activity"); await held.entered; held.release("fail"); f.hang(); },
+    });
+    const sidebar = screens.working!.split("\n").map(row => row.slice(90).trim());
+    assert.equal(sidebar[6], "#CHILDREN"); assert.match(sidebar[7]!, /^ᚠ wintermute +working$/); assert.equal(sidebar[8], "Managed problem");
+    assert.equal(sidebar[29], "#SUBAGENTS"); assert.equal(sidebar[31], "Captured review"); assert.equal(sidebar[33], "#TOOLS");
+    for (const screen of Object.values(screens)) {
+      assert.match(screen, /#CHILDREN/); assert.match(screen, /#SUBAGENTS/); assert.match(screen, /#TOOLS/);
+      assert.match(screen, /keep exact child prompt/);
+    }
+    assert.match(screens.selected!, /SELECT MESSAGE/); assert.match(screens.historical!, /Older history/);
+    assert.ok(f.requests.filter(r => ["history", "activity"].includes(r.command)).every(r => r.args.includeChildren === true));
     assert.ok(f.requests.every(r => ["status", "history", "activity", "progress"].includes(r.command)));
   } finally { await f.close(); }
 });

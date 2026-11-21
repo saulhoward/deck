@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { clampThinkingLevel, getSupportedThinkingLevels, type Models } from "@earendil-works/pi-ai/models";
 import { agentStatus } from "./agent-status.js";
-import { validAgentName, validAgentRune, type SubagentSnapshot } from "./generated/contracts.js";
+import { validAgentName, validAgentRune, type SubagentSnapshot, type ManagedChildSnapshot } from "./generated/contracts.js";
 import { sameSelection } from "./model-settings-contracts.js";
 import { validSetModelSettingsArgs, type ModelRef, type ModelSelection, type ModelSettingsSnapshot, type ModelSettingsAck, type SetModelSettingsArgs } from "./generated/contracts.js";
 import { AgentDoc, createRegistry, configure as configureAgent, defineDoc, defineDocFamily, Harness, LiveDoc, InboxDoc, type ConversationId, type Conversation, type AgentChange, type Cursor, type TaskId, type Tx } from "@earendil-works/pi-durable";
@@ -975,11 +975,47 @@ export class DeckRuntime {
     return result;
   }
 
-  async activity(id: string, includeAgentStatus = false, includeSubagents = false): Promise<ActivitySnapshot> {
+  private async managedChildren(parentId: ConversationId): Promise<ManagedChildSnapshot | undefined> {
+    // A Deck relation is not Pi ownership. Validate this parent directly; never
+    // scope-walk a captured child to its owner or expose that owner's children.
+    const parent = await this.harness.commit(tx => tx.conversation(parentId), context);
+    const binding = await this.harness.snapshot(ChatDoc, parentId, context);
+    if (!independentDeckChat(parent, binding, this.main.id)) return undefined;
+    // Existing managed children have no list index. One descending canonical
+    // page bounds each opt-in poll (including legacy records); no migration,
+    // refill, persisted cache, name allocation, or read-triggered generation.
+    const page = await this.harness.commit(tx => tx.scanConversations({ order: "descending" }, 100), context);
+    const result: ManagedChildSnapshot = { chatId: String(parentId), items: [], hasMore: !!page.next };
+    for (const record of page.items) {
+      if (record.owner || record.id <= parentId) continue;
+      // snapshot outside commit is essential: tx.doc creates missing metadata.
+      const metadata = await this.harness.snapshot(ChatDoc, record.id, context);
+      if (!metadata || metadata.managedParentChatId !== String(parentId)) continue;
+      if (metadata.kind !== "task" || metadata.parentChatId !== undefined || metadata.ownerTaskId !== undefined) { result.hasMore = true; continue; }
+      if (result.items.length === 16) { result.hasMore = true; break; }
+      const problem = metadata.brief?.problem;
+      const title = typeof problem === "string" && problem.trim() ? problem : metadata.title;
+      if (typeof title !== "string" || !title.isWellFormed()) { result.hasMore = true; continue; }
+      const item: ManagedChildSnapshot["items"][number] = {
+        chatId: String(record.id), title: prefixUnits(title, 160),
+        ...(validAgentName(metadata.agentName) ? { agentName: metadata.agentName } : {}),
+        ...(validAgentRune(metadata.agentRune) && metadata.agentRune !== "Δ" ? { agentRune: metadata.agentRune } : {}),
+      };
+      try {
+        const inbox = await this.harness.snapshot(InboxDoc, record.id, context);
+        item.status = await this.harness.commit(tx => agentStatus(tx, record.id, (inbox?.items.length ?? 0) > 0), context);
+      } catch { /* Unknown status is absent, never an invented idle observation. */ }
+      result.items.push(item);
+    }
+    return result;
+  }
+
+  async activity(id: string, includeAgentStatus = false, includeSubagents = false, includeChildren = false): Promise<ActivitySnapshot> {
     const chat = await this.chat(id);
     const [live, inbox] = await Promise.all([
       this.harness.snapshot(LiveDoc, chat.id, context), this.harness.snapshot(InboxDoc, chat.id, context),
     ]);
+    const children = includeChildren ? await this.managedChildren(chat.id) : undefined;
     const primary = live?.tools ?? []; const nested = live?.nestedTools ?? [];
     const tools = [...primary.slice(0, 32), ...nested.slice(0, Math.max(0, 32 - primary.length))];
     // Deliberately omit arguments, partial messages, output, details and retry errors.
@@ -988,6 +1024,7 @@ export class DeckRuntime {
       chatId: String(chat.id), busy: !!live?.run, queued: inbox?.items.length ?? 0,
       ...(includeAgentStatus ? { agentStatus: await chat.commit((tx) => agentStatus(tx, chat.id, (inbox?.items.length ?? 0) > 0), context) } : {}),
       ...(includeSubagents ? { subagents: await this.subagents(chat.id) } : {}),
+      ...(children === undefined ? {} : { children }),
       ...(live?.run ? { runTaskId: String(live.run.taskId) } : {}),
       ...(live?.generation ? { generation: { attempt: live.generation.attempt, phase: live.generation.retry ? "retrying" : live.generation.deferred ? "deferred" : "generating" } } : {}),
       tools: tools.slice(0, 32).map((tool) => ({ callId: prefixUnits(tool.callId, 128), name: prefixUnits(tool.name, 80), status: tool.status, ...(tool.taskId === undefined ? {} : { taskId: String(tool.taskId) }), nested: "parentTaskId" in tool })),

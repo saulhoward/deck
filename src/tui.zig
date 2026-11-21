@@ -410,9 +410,12 @@ test "task display groups children without changing the canonical page or IDs" {
     try std.testing.expectEqualStrings("3", page.items[1].chatId);
     try std.testing.expectEqualStrings("10", page.next.?);
 }
-// A bounded sample of direct Pi-owned children, never a second task tracker.
-// Keep status visible even when a name/title is too wide for the sidebar.
+// Both lists share presentation only, never ownership or navigation authority.
 fn subagentRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), sample: ?wire.SubagentSnapshot, width: u16, budget: usize) !void {
+    try agentRows(wire.SubagentSnapshot, ctx, list, sample, width, budget);
+}
+// Keep status visible even when a name/problem is too wide for the sidebar.
+fn agentRows(comptime Sample: type, ctx: fw.DrawContext, list: *std.ArrayList(Row), sample: ?Sample, width: u16, budget: usize) !void {
     if (budget == 0) return;
     const children = sample orelse {
         try list.append(ctx.arena, .{ .text = "Unavailable", .style = dim });
@@ -426,7 +429,11 @@ fn subagentRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), sample: ?wire.Su
     const count = @min(children.items.len, (budget - @intFromBool(overflow)) / 2);
     for (children.items[0..count]) |child| {
         const status = if (child.status) |value| @tagName(value.state) else "unknown";
-        const label = child.agentName orelse "unnamed";
+        const name = child.agentName orelse "unnamed";
+        const label = if (Sample == wire.ManagedChildSnapshot)
+            try std.fmt.allocPrint(ctx.arena, "{s} {s}", .{ child.agentRune orelse "·", name })
+        else
+            name;
         const status_width = @min(width, displayWidth(ctx, status));
         const shown = try animatedText(ctx, label, @intCast(width -| (status_width + 1)), null);
         var text: std.ArrayList(u8) = .empty;
@@ -551,24 +558,37 @@ fn inventoryRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), snapshot: ?wire
     try rows(ctx, list, if (compact) "Shell also exposes host commands." else "MCP is not the whole tool surface. File/shell and hub coordination tools above are separate. When bash or another execution tool is offered, host programs (e.g. git, compilers, tests) are accessible through it subject to that host's permissions and installed software; these are not separate MCP servers or an enumerated command allowlist.", width, dim);
 }
 
-// One bottom-aligned block. Availability is neutral; only observed use is green.
+// Managed children are anchored below identity, above the bottom-aligned
+// captured-subagent/tool block. Reserve identity, footer and bottom padding;
+// never let either bounded list overwrite another section in a short pane.
 fn sidebarRows(ctx: fw.DrawContext, list: *std.ArrayList(Row), snapshot: ?wire.TuiSnapshot, width: u16, height: u16, online: bool, fresh: bool) !void {
     if (height < 12) return;
+    const available: usize = height - 10;
     if (height >= 16) {
-        try list.append(ctx.arena, .{ .text = if (fresh) "#SUBAGENTS" else "#SUBAGENTS · STALE", .style = Theme.sidebar_heading });
-        try subagentRows(ctx, list, if (snapshot) |s| s.subagents else null, width, @min(12, (height - 14) / 2));
+        try list.append(ctx.arena, .{ .text = if (fresh) "#CHILDREN" else "#CHILDREN · STALE", .style = Theme.sidebar_heading });
+        const budget = @min(12, @max(1, (height -| 17) / 2));
+        try agentRows(wire.ManagedChildSnapshot, ctx, list, if (snapshot) |s| s.children else null, width, budget);
         try list.append(ctx.arena, .{ .style = dim });
     }
-    try list.append(ctx.arena, .{ .text = if (online) "#TOOLS" else "#TOOLS · STALE", .style = Theme.sidebar_heading });
+    var bottom: std.ArrayList(Row) = .empty;
+    if (height >= 19) {
+        try bottom.append(ctx.arena, .{ .text = if (fresh) "#SUBAGENTS" else "#SUBAGENTS · STALE", .style = Theme.sidebar_heading });
+        const budget = @min(@min(12, (height - 14) / 2), available - list.items.len - 5);
+        try subagentRows(ctx, &bottom, if (snapshot) |s| s.subagents else null, width, budget);
+        try bottom.append(ctx.arena, .{ .style = dim });
+    }
+    try bottom.append(ctx.arena, .{ .text = if (online) "#TOOLS" else "#TOOLS · STALE", .style = Theme.sidebar_heading });
     var inventory: std.ArrayList(Row) = .empty;
     try inventoryRows(ctx, &inventory, snapshot, width, true, fresh);
-    // Rows 0..5 belong to identity/spacing; reserve a blank bottom row
-    // above the full-width rule and two footer rows.
-    const budget = height - 10 - list.items.len;
+    const budget = available - list.items.len - bottom.items.len;
     const overflow = inventory.items.len > budget;
     const count = @min(inventory.items.len, budget - @intFromBool(overflow));
-    try list.appendSlice(ctx.arena, inventory.items[0..count]);
-    if (overflow) try list.append(ctx.arena, .{ .text = try std.fmt.allocPrint(ctx.arena, "{d} more rows", .{inventory.items.len - count}), .style = dim });
+    try bottom.appendSlice(ctx.arena, inventory.items[0..count]);
+    if (overflow) try bottom.append(ctx.arena, .{ .text = try std.fmt.allocPrint(ctx.arena, "{d} more rows", .{inventory.items.len - count}), .style = dim });
+    // Fill only the gap between the top and bottom blocks. Extra height must
+    // not push #CHILDREN down or move the tool inventory away from the footer.
+    if (height >= 16) try list.appendNTimes(ctx.arena, .{ .style = dim }, available - list.items.len - bottom.items.len);
+    try list.appendSlice(ctx.arena, bottom.items);
     for (list.items) |*row| if (row.active_prefix > 0) {
         row.style = dim; // Sidebar-only color overlay; full :tools stays static.
         if (!fresh) row.active_prefix = 0;
@@ -3544,11 +3564,14 @@ test "subagent sidebar coexists with inventory, marks stale samples, and stays b
     try std.testing.expectEqualStrings("Review", try testSurfaceRowText(alloc, fresh_surface, 31, 90));
     try std.testing.expectEqualStrings("#TOOLS", try testSurfaceRowText(alloc, fresh_surface, 33, 90));
     try std.testing.expectEqualStrings("Unknown, not an empty tool list.", try testSurfaceRowText(alloc, fresh_surface, 35, 90));
-    for (6..29) |y| try std.testing.expectEqualStrings("", try testSurfaceRowText(alloc, fresh_surface, y, 90));
+    try std.testing.expectEqualStrings("#CHILDREN", try testSurfaceRowText(alloc, fresh_surface, 6, 90));
+    try std.testing.expectEqualStrings("Unavailable", try testSurfaceRowText(alloc, fresh_surface, 7, 90));
+    for (8..29) |y| try std.testing.expectEqualStrings("", try testSurfaceRowText(alloc, fresh_surface, y, 90));
     try std.testing.expectEqualStrings("", try testSurfaceRowText(alloc, fresh_surface, 36, 90));
-    // A taller terminal adds space above the list, not below it.
+    // A taller terminal adds space between the blocks, not above children or below tools.
     ctx.max.height = 60;
     const taller = try Model.draw(&model, ctx);
+    try std.testing.expectEqualStrings("#CHILDREN", try testSurfaceRowText(alloc, taller, 6, 90));
     try std.testing.expectEqualStrings("#SUBAGENTS", try testSurfaceRowText(alloc, taller, 49, 90));
     try std.testing.expectEqualStrings("Unknown, not an empty tool list.", try testSurfaceRowText(alloc, taller, 55, 90));
     ctx.max.height = 40;
@@ -3582,6 +3605,79 @@ test "subagent sidebar coexists with inventory, marks stale samples, and stays b
         try std.testing.expect(std.mem.indexOf(u8, hidden, "SUBAGENTS") == null);
     };
     try std.testing.expect(bridge.pending == null);
+}
+
+test "managed children stay at the sidebar top, separate from captured helpers, without changing prompt or selection" {
+    const a = std.testing.allocator;
+    var bridge: Bridge = .{ .a = a, .io = std.testing.io, .child = undefined };
+    defer bridge.output.deinit(a);
+    var model = try testChatModel(a, &bridge);
+    defer model.deinit();
+    var arena = std.heap.ArenaAllocator.init(a);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+    var ctx = selectionTestDraw(alloc, 140, 40);
+    const snap = &model.snapshot.?.value.case0.snapshot;
+    snap.activityKnown = true;
+    snap.entries = &.{.{ .id = 10, .role = .user, .text = "Retained message" }};
+    snap.subagents = .{ .chatId = "1", .items = &.{.{ .chatId = "3", .title = "Captured review", .agentName = "DS001" }}, .hasMore = false };
+    var child: wire.ManagedChildItem = .{ .chatId = "2", .title = "Saved problem", .agentName = "wintermute", .agentRune = "ᚠ", .status = .{ .state = .working } };
+    snap.children = .{ .chatId = "1", .items = (&child)[0..1], .hasMore = false };
+    const exact = "  Unsent 界 é\ntrailing  \n";
+    try model.editor.set(exact);
+    model.editor.cursor = 3;
+    model.editor.mode = .normal;
+    model.selectMessage(10, false);
+    const editor_before = model.editor;
+    const fresh = try Model.draw(&model, ctx);
+    try std.testing.expectEqualStrings("#CHILDREN", try testSurfaceRowText(alloc, fresh, 6, 90));
+    const name = try testSurfaceRowText(alloc, fresh, 7, 90);
+    try std.testing.expect(std.mem.startsWith(u8, name, "ᚠ wintermute") and std.mem.endsWith(u8, name, "working"));
+    try std.testing.expectEqualStrings("Saved problem", try testSurfaceRowText(alloc, fresh, 8, 90));
+    try std.testing.expectEqualStrings("#SUBAGENTS", try testSurfaceRowText(alloc, fresh, 29, 90));
+    try std.testing.expectEqualStrings("Captured review", try testSurfaceRowText(alloc, fresh, 31, 90));
+    try std.testing.expect(model.sidebar_flickering);
+    try testSidebarPalette(fresh, Theme.Layout.init(140, null), true);
+    for ([_]?wire.AgentStatus{ .{ .state = .done, .taskId = "10" }, .{ .state = .@"error", .taskId = "11" }, .{ .state = .idle }, null }) |status| {
+        child.status = status;
+        const drawn = try Model.draw(&model, ctx);
+        try std.testing.expect(!model.sidebar_flickering);
+        try std.testing.expect(std.mem.endsWith(u8, try testSurfaceRowText(alloc, drawn, 7, 90), if (status) |value| @tagName(value.state) else "unknown"));
+    }
+    child.status = .{ .state = .working };
+    model.frame = 100;
+    const stale = try Model.draw(&model, ctx);
+    try std.testing.expectEqualStrings("#CHILDREN · STALE", try testSurfaceRowText(alloc, stale, 6, 90));
+    try std.testing.expect(!model.sidebar_flickering);
+    model.frame = 0;
+    for ([_]bool{ false, true }) |has_more| {
+        snap.children = .{ .chatId = "1", .items = &.{}, .hasMore = has_more };
+        try std.testing.expectEqualStrings(if (has_more) "Children omitted" else "None", try testSurfaceRowText(alloc, try Model.draw(&model, ctx), 7, 90));
+    }
+    snap.children = null;
+    try std.testing.expectEqualStrings("Unavailable", try testSurfaceRowText(alloc, try Model.draw(&model, ctx), 7, 90));
+    var children: [16]wire.ManagedChildItem = @splat(child);
+    var captured: [16]wire.SubagentItem = @splat(.{ .chatId = "3", .title = "Captured", .agentName = "DS001" });
+    snap.children = .{ .chatId = "1", .items = &children, .hasMore = true };
+    snap.subagents = .{ .chatId = "1", .items = &captured, .hasMore = true };
+    for ([_]u16{ 20, 24, 60, 112, 140, 512 }) |width| for ([_]u16{ 9, 12, 15, 16, 17, 18, 19, 20, 21, 22, 24, 40, 120 }) |height| {
+        ctx.max = .{ .width = width, .height = height };
+        model.sidebar_override = true;
+        const drawn = try Model.draw(&model, ctx);
+        const left = Theme.Layout.init(width, true).main + 2;
+        try std.testing.expectEqualStrings("", try testSurfaceRowText(alloc, drawn, height - 4, left));
+        if (width >= 112 and height >= 16) try std.testing.expectEqualStrings("#CHILDREN", try testSurfaceRowText(alloc, drawn, 6, left));
+        if (width >= 112 and height >= 19) {
+            const text = try testSurfaceText(alloc, drawn);
+            try std.testing.expect(std.mem.indexOf(u8, text, "#SUBAGENTS") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "#TOOLS") != null);
+            try std.testing.expect(std.mem.indexOf(u8, text, "+ more") != null);
+        }
+    };
+    try std.testing.expectEqual(@as(?i64, 10), model.selected_message);
+    try std.testing.expectEqualDeep(editor_before, model.editor);
+    try std.testing.expectEqualStrings(exact, model.editor.text.items);
+    try std.testing.expect(bridge.pending == null and bridge.output.items.len == 0);
 }
 
 test "automatic scrollback anchors Markdown and bash page boundaries through prepend, resize and eviction" {
