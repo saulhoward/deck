@@ -1,5 +1,6 @@
 //! User-owned context on THIS machine. No caller-supplied home, workspace
-//! fallback, shell expansion, or symlink traversal inside the resource roots.
+//! fallback or shell expansion. The skills root and personal AGENTS.md file
+//! may be symlinks; paths inside individual skills remain strictly no-follow.
 const std = @import("std");
 const Native = @import("native.zig");
 const Operation = @import("generated/contracts.zig").NativeOperation;
@@ -26,19 +27,27 @@ pub fn skillPath(path: []const u8) bool {
     return true;
 }
 
-fn readText(io: std.Io, a: Allocator, dir: Dir, name: []const u8, cap: usize, prefix: bool) ![]const u8 {
-    const fd = try std.posix.openat(dir.handle, name, .{ .ACCMODE = .RDONLY, .NOFOLLOW = true, .NONBLOCK = true, .CLOEXEC = true }, 0);
+const ReadOptions = struct {
+    cap: usize = max_text,
+    prefix: bool = false,
+    follow_symlinks: bool = false,
+};
+
+fn readText(io: std.Io, a: Allocator, dir: Dir, name: []const u8, options: ReadOptions) ![]const u8 {
+    // Open once and validate/read that descriptor, not a separately resolved
+    // path. NONBLOCK also protects personal symlinks that resolve to a FIFO.
+    const fd = try std.posix.openat(dir.handle, name, .{ .ACCMODE = .RDONLY, .NOFOLLOW = !options.follow_symlinks, .NONBLOCK = true, .CLOEXEC = true }, 0);
     const file = std.Io.File{ .handle = fd, .flags = .{ .nonblocking = true } };
     defer file.close(io);
     const stat = try file.stat(io);
     if (stat.kind != .file or stat.size > max_text) return error.InvalidResource;
-    if (prefix) {
-        const buf = try a.alloc(u8, @intCast(@min(cap, stat.size)));
+    if (options.prefix) {
+        const buf = try a.alloc(u8, @intCast(@min(options.cap, stat.size)));
         return buf[0..try file.readPositionalAll(io, buf, 0)];
     }
     // Check through EOF even if the file grew after stat. Never publish a
     // silently truncated instruction or reference as a successful receipt.
-    const text = try Native.readAll(io, file, a, cap);
+    const text = try Native.readAll(io, file, a, options.cap);
     if (!std.unicode.utf8ValidateSlice(text) or std.mem.indexOfScalar(u8, text, 0) != null) return error.InvalidResource;
     return text;
 }
@@ -72,7 +81,7 @@ fn catalog(io: std.Io, a: Allocator, skills: Dir) ![]const u8 {
         if (entry.kind != .directory or !skillName(entry.name)) continue;
         var dir = skills.openDir(io, entry.name, .{ .follow_symlinks = false }) catch continue;
         defer dir.close(io);
-        const prefix = readText(io, a, dir, "SKILL.md", max_header + 2 * "---\r\n".len, true) catch continue;
+        const prefix = readText(io, a, dir, "SKILL.md", .{ .cap = max_header + 2 * "---\r\n".len, .prefix = true }) catch continue;
         const meta = frontmatter(prefix) catch continue;
         bytes += entry.name.len + meta.header.len;
         if (bytes > 64 * 1024) return error.CatalogTooLarge;
@@ -85,13 +94,18 @@ fn get(io: std.Io, a: Allocator, home: Dir, op: Operation, path: ?[]const u8) ![
     if (op == .user_agents_md) {
         var codex = try home.openDir(io, ".codex", .{ .follow_symlinks = false });
         defer codex.close(io);
-        return readText(io, a, codex, "AGENTS.md", max_text, false);
+        // Only this fixed file opts in. Relative/absolute targets and bounded
+        // OS link chains may leave HOME; .codex itself stays a real directory.
+        return readText(io, a, codex, "AGENTS.md", .{ .follow_symlinks = true });
     }
     var config = try home.openDir(io, ".config", .{ .follow_symlinks = false });
     defer config.close(io);
     var deck = try config.openDir(io, "deck", .{ .follow_symlinks = false });
     defer deck.close(io);
-    var skills = try deck.openDir(io, "skills", .{ .follow_symlinks = false, .iterate = op == .skill_catalog });
+    // The user-installed library root may link elsewhere (e.g. a dotfiles
+    // checkout). Keep this resolved directory handle for the whole operation;
+    // all caller-selected names and references below it remain no-follow.
+    var skills = try deck.openDir(io, "skills", .{ .follow_symlinks = true, .iterate = op == .skill_catalog });
     defer skills.close(io);
     if (op == .skill_catalog) return catalog(io, a, skills);
     const target = path orelse return error.InvalidSkill;
@@ -100,11 +114,11 @@ fn get(io: std.Io, a: Allocator, home: Dir, op: Operation, path: ?[]const u8) ![
     const name = parts.next().?;
     var dir = try skills.openDir(io, name, .{ .follow_symlinks = false });
     defer dir.close(io);
-    const manifest = try frontmatter(try readText(io, a, dir, "SKILL.md", max_text, false));
+    const manifest = try frontmatter(try readText(io, a, dir, "SKILL.md", .{}));
     var body = manifest.body;
     while (parts.next()) |part| {
         if (parts.index == null) {
-            body = try readText(io, a, dir, part, max_text, false);
+            body = try readText(io, a, dir, part, .{});
         } else {
             const child = try dir.openDir(io, part, .{ .follow_symlinks = false });
             dir.close(io);
@@ -154,4 +168,91 @@ test "user context resolves only fixed roots and skill-relative regular files" {
     try tmp.dir.createDir(io, ".codex", .default_dir);
     try tmp.dir.writeFile(io, .{ .sub_path = ".codex/AGENTS.md", .data = "my default" });
     try std.testing.expectEqualStrings("my default", try get(io, a, tmp.dir, .user_agents_md, null));
+}
+
+test "personal AGENTS.md follows file symlinks but validates exact target bytes" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try tmp.dir.createDirPath(io, "home/.codex");
+    var home = try tmp.dir.openDir(io, "home", .{});
+    defer home.close(io);
+    const link = "home/.codex/AGENTS.md";
+    const content = "  Personal 界 🌍 instructions\ntrailing  \n";
+    try tmp.dir.writeFile(io, .{ .sub_path = "personal.md", .data = content });
+    // Relative target outside HOME, then an absolute target and a link chain.
+    try tmp.dir.symLink(io, "../../personal.md", link, .{});
+    try std.testing.expectEqualStrings(content, try get(io, a, home, .user_agents_md, null));
+    try tmp.dir.deleteFile(io, link);
+    try tmp.dir.symLink(io, try tmp.dir.realPathFileAlloc(io, "personal.md", a), link, .{});
+    try std.testing.expectEqualStrings(content, try get(io, a, home, .user_agents_md, null));
+    try tmp.dir.deleteFile(io, link);
+    try tmp.dir.symLink(io, "personal.md", "chain", .{});
+    try tmp.dir.symLink(io, "../../chain", link, .{});
+    try std.testing.expectEqualStrings(content, try get(io, a, home, .user_agents_md, null));
+    const limit = try a.alloc(u8, max_text);
+    for (0..max_text / 4) |i| @memcpy(limit[i * 4 ..][0..4], "🌍");
+    for ([_][]const u8{ "", limit }) |text| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "personal.md", .data = text });
+        try std.testing.expectEqualStrings(text, try get(io, a, home, .user_agents_md, null));
+    }
+    const oversized = try a.alloc(u8, max_text + 1);
+    @memset(oversized, 'a');
+    for ([_][]const u8{ oversized, "not\x00text", "bad\xff" }) |text| {
+        try tmp.dir.writeFile(io, .{ .sub_path = "personal.md", .data = text });
+        try std.testing.expectError(error.InvalidResource, get(io, a, home, .user_agents_md, null));
+    }
+    try tmp.dir.deleteFile(io, "personal.md");
+    try std.testing.expectError(error.FileNotFound, get(io, a, home, .user_agents_md, null));
+    try tmp.dir.symLink(io, "chain", "personal.md", .{});
+    try std.testing.expectError(error.SymLinkLoop, get(io, a, home, .user_agents_md, null));
+    try tmp.dir.deleteFile(io, link);
+    try tmp.dir.symLink(io, "..", link, .{ .is_directory = true });
+    try std.testing.expectError(error.InvalidResource, get(io, a, home, .user_agents_md, null));
+}
+
+test "linked skills root supports discovery and resources without following inner symlinks" {
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try tmp.dir.createDirPath(io, "home/.config/deck");
+    try tmp.dir.createDirPath(io, "library/demo/refs");
+    var home = try tmp.dir.openDir(io, "home", .{});
+    defer home.close(io);
+    const link = "home/.config/deck/skills";
+    try tmp.dir.writeFile(io, .{ .sub_path = "library/demo/SKILL.md", .data = "---\nname: demo\ndescription: Example\n---\nPRIVATE_BODY" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "library/demo/refs/example", .data = "REFERENCE 界\n" });
+    try tmp.dir.symLink(io, "library", "chain", .{ .is_directory = true });
+    try tmp.dir.symLink(io, "demo", "library/linked", .{ .is_directory = true });
+    try tmp.dir.symLink(io, "refs", "library/demo/linked-refs", .{ .is_directory = true });
+    try tmp.dir.symLink(io, "refs/example", "library/demo/linked-file", .{});
+    try tmp.dir.createDir(io, "library/linked-manifest", .default_dir);
+    try tmp.dir.symLink(io, "../demo/SKILL.md", "library/linked-manifest/SKILL.md", .{});
+    // Both direct targets and chains may be outside HOME. No caller-supplied
+    // resource path can use that exception to follow another link inside it.
+    for ([_][]const u8{ "../../../library", try tmp.dir.realPathFileAlloc(io, "library", a), "../../../chain" }) |target| {
+        try tmp.dir.symLink(io, target, link, .{ .is_directory = true });
+        const listing = try get(io, a, home, .skill_catalog, null);
+        try std.testing.expect(std.mem.indexOf(u8, listing, "demo") != null);
+        try std.testing.expect(std.mem.indexOf(u8, listing, "PRIVATE_BODY") == null);
+        try std.testing.expect(std.mem.indexOf(u8, listing, "linked") == null);
+        try std.testing.expect(std.mem.indexOf(u8, try get(io, a, home, .skill_read, "demo"), "PRIVATE_BODY") != null);
+        try std.testing.expect(std.mem.indexOf(u8, try get(io, a, home, .skill_read, "demo/refs/example"), "REFERENCE 界") != null);
+        for ([_][]const u8{ "linked", "linked-manifest", "demo/linked-refs/example", "demo/linked-file" }) |path| {
+            if (get(io, a, home, .skill_read, path)) |_| return error.FollowedInnerSymlink else |_| {}
+        }
+        try tmp.dir.deleteFile(io, link);
+    }
+    for ([_][]const u8{ "skills", "../../../library/demo/SKILL.md", "../../../missing" }) |target| {
+        try tmp.dir.symLink(io, target, link, .{});
+        if (get(io, a, home, .skill_catalog, null)) |_| return error.AcceptedInvalidRoot else |_| {}
+        if (get(io, a, home, .skill_read, "demo")) |_| return error.AcceptedInvalidRoot else |_| {}
+        try tmp.dir.deleteFile(io, link);
+    }
 }

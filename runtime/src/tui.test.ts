@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmod, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { freeHubPort } from "./hub-port.test.support.js";
 import { resolve, join } from "node:path";
@@ -518,10 +518,11 @@ test("real PTY: detach remains responsive while HTTP history is stalled", { skip
   try { await pty(f.port, f.local.env, [{ wait: "STALE" }, { sleep: .3 }, { keys: ":q\r" }]); assert.ok(f.requests.some((v) => v.command === "history")); assert.ok(!f.requests.some((v) => v.command === "stop")); }
   finally { await f.close(); }
 });
-test("real PTY: default hub loads personal AGENTS.md only on request and retains input and answer after detach", { skip: !testBinary, timeout: 20_000 }, async () => {
+test("real PTY: default hub explicitly loads symlinked personal AGENTS.md, preserves it on failed refresh and retains input after detach", { skip: !testBinary, timeout: 25_000 }, async () => {
   assert.ok(testBinary); const local = await clientEnv();
   const port = await freeHubPort();
-  const home = join(local.env.DECK_CLIENT_STATE_DIRECTORY, "hub-home"), env = { ...local.env, HOME: home };
+  const home = join(local.env.DECK_CLIENT_STATE_DIRECTORY, "hub-home"), env = { ...local.env, HOME: home, DECK_NODE: process.execPath, DECK_RUNTIME_ROOT: fileURLToPath(new URL("../../", import.meta.url)) };
+  const personal = join(local.env.DECK_CLIENT_STATE_DIRECTORY, "personal-agents.md");
   const directory = join(home, ".local/share/deck/hubs/default");
   const initialize = spawn(resolve(testBinary), ["init"], { env }); initialize.stdout.resume(); initialize.stderr.resume();
   const initialized = (await once(initialize, "close"))[0];
@@ -538,19 +539,45 @@ test("real PTY: default hub loads personal AGENTS.md only on request and retains
     assert.ok(status, errors); assert.match(status.binding.agentName, /^[a-z]+$/);
     assert.equal(JSON.parse(await readFile(join(directory, "config.json"), "utf8")).machine_id, status.machineId);
     const screens: Record<string, string> = {};
-    await pty(port, local.env, [
+    await pty(port, env, [
       { resize: [40, 140] }, { wait: `${status.model.provider}/${status.model.modelId}` }, { keys: "hello from real Zig TUI" }, { keys: "\x1b" },
       { keys: ":agentsmd" }, { wait: "client idle" }, { keys: "\r" }, { wait: "File not found: ~/.codex/AGENTS.md" }, { capture: "missing" },
       { checkpoint: "install" }, { keys: ":agentsmd" }, { wait: "client idle" }, { keys: "\r" }, { wait: "AGENTS.md loaded" }, { capture: "received" },
+      { checkpoint: "break target" }, { keys: ":agentsmd" }, { wait: "client idle" }, { keys: "\r" }, { wait: "File not found: ~/.codex/AGENTS.md" }, { capture: "failedRefresh" },
+      { checkpoint: "retained snapshot" },
       { keys: "\x13" }, { wait: "Input admitted" }, { wait: "Deck prototype response" }, { wait: "Δ hub" }, { keys: ":q\r" },
-    ], screens, { install: async () => { await mkdir(join(home, ".codex")); await writeFile(join(home, ".codex/AGENTS.md"), "PRIVATE_PERSONAL_BODY"); } });
-    assert.doesNotMatch(screens.missing!, /AGENTS.md loaded/); assert.doesNotMatch(screens.received!, /PRIVATE_PERSONAL_BODY/);
-    assert.match(screens.received!, /hello from real Zig TUI/);
+    ], screens, {
+      install: async () => {
+        await mkdir(join(home, ".codex")); await writeFile(personal, "PRIVATE_PERSONAL_BODY");
+        // A relative link may resolve outside HOME, but remains test-owned.
+        await symlink("../../personal-agents.md", join(home, ".codex/AGENTS.md"));
+        const before: any = await hubCommand(port, "status", {}, status.hubId);
+        assert.equal(before.toolInventory.agentsMdLoaded, undefined);
+        const history: any = await hubCommand(port, "history", { chatId: status.chatId, limit: 80 }, status.hubId);
+        assert.ok(!history.items.some((item: any) => ["deck.input", "pi.assistant"].includes(item.kind)), "Installing the link and importing context must not submit the draft or invoke inference");
+      },
+      "break target": async () => {
+        const loaded: any = await hubCommand(port, "status", {}, status.hubId);
+        assert.equal(loaded.toolInventory.agentsMdLoaded, true);
+        await rm(personal);
+      },
+      "retained snapshot": async () => {
+        const after: any = await hubCommand(port, "status", {}, status.hubId);
+        assert.equal(after.toolInventory.agentsMdLoaded, true, "A broken-link refresh must not clear the previous personal snapshot");
+        const history: any = await hubCommand(port, "history", { chatId: status.chatId, limit: 80 }, status.hubId);
+        assert.ok(!history.items.some((item: any) => ["deck.input", "pi.assistant"].includes(item.kind)), "Context imports must not send the retained input or invoke inference");
+      },
+    });
+    assert.doesNotMatch(screens.missing!, /AGENTS.md loaded/);
+    for (const name of ["missing", "received", "failedRefresh"]) {
+      assert.doesNotMatch(screens[name]!, /PRIVATE_PERSONAL_BODY/);
+      assert.match(screens[name]!, /hello from real Zig TUI/);
+    }
     const history: any = await hubCommand(port, "history", { chatId: status.chatId, limit: 80 }, status.hubId);
     assert.ok(history.items.some((v: any) => v.kind === "deck.input" && v.data.text === "hello from real Zig TUI"));
     assert.ok(history.items.some((v: any) => v.kind === "pi.assistant"));
     const settings: any = await hubCommand(port, "model_settings", { chatId: status.chatId }, status.hubId);
-    await pty(port, local.env, [
+    await pty(port, env, [
       { wait: `${status.model.provider}/${status.model.modelId}` }, { wait: "Δ hub" }, { keys: "\x1b" },
       { keys: ":task TUI created task" }, { wait: "client idle" }, { keys: "\r" }, { wait: "Rex open unconfirmed" },
       { keys: ":tasks" }, { wait: "client idle" }, { keys: "\r" }, { wait: "TASKS" }, { keys: "\x1b[B\r" },
